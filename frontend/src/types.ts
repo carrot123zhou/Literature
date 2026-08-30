@@ -20,3 +20,14 @@ export type Job = { job_id: string; kind: string; status: string; progress: numb
 export type StructureSuggestion = { block_id: string; operation: "set_type" | "set_level"; before: unknown; after: unknown; confidence: number; reason: string; automatic: boolean };
 export type StructurePatch = StructureSuggestion & { patch_id: string; source: "ai" | "user"; reverted_at?: string; created_at: string };
 export type UsageRecord = { usage_id: string; job_id: string; provider: string; model: string; scope: string; input_tokens: number; output_tokens: number; cached_tokens: number; reasoning_tokens: number; estimated_cost?: number; request_id: string; created_at: string };
+export type OcrSlice = {
+  index: number; start_page: number; end_page: number; page_count: number; state: string;
+  remote_state: string; attempts: number; error: string;
+};
+export type OcrJob = {
+  job_id: string; project_id: string; title: string; project_state: string; state: string; error: string;
+  page_count: number; page_limit: number; source_size: number; slice_count: number; completed_slices: number;
+  downloaded_slices: number; failed_slices: number; submitted_pages: number; completed_pages: number;
+  downloaded_pages: number; stage_progress: number | null; can_retry: boolean; slices: OcrSlice[];
+  created_at: string; updated_at: string;
+};

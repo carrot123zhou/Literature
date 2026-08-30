@@ -3,6 +3,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { api, initializeApi } from "./api";
 import PdfPage from "./PdfPage";
 import TocTree from "./TocTree";
+import ImportWorkspace from "./ImportWorkspace";
 import type { Block, DocumentGraph, Job, Project, ProviderConfig, StructurePatch, StructureSuggestion, TocNode, TranslationEntry, TranslationLayer, UsageRecord } from "./types";
 
 type Mode = "review" | "read" | "export";
@@ -87,14 +88,6 @@ export default function App() {
 
   const selectBlock = (id: string) => { setSelected(id); const block=document?.blocks.find(value=>value.block_id===id); if (block) setPage(block.page_index+1); };
   const toggle = (id: string) => setChecked(previous => { const next=new Set(previous); next.has(id)?next.delete(id):next.add(id); return next; });
-  const createProject = async () => {
-    let source = "";
-    if ("__TAURI_INTERNALS__" in window) source = String(await open({ multiple:false, filters:[{name:"PDF",extensions:["pdf"]}] }) || "");
-    if (!source) source = window.prompt("PDF 绝对路径") || "";
-    if (!source) return;
-    const project = await api<Project>("/projects", { method:"POST", body:JSON.stringify({source_pdf:source}) });
-    await refreshProjects(); setProjectId(project.project_id);
-  };
   const importMineru = async () => {
     let paths: string[] = [];
     if ("__TAURI_INTERNALS__" in window) { const value=await open({directory:true,multiple:true}); paths = Array.isArray(value)?value:value?[value]:[]; }
@@ -144,7 +137,7 @@ export default function App() {
     setInstantResult({source:selection,text:value.text,blockId});
   };
 
-  if (!projectId) return <div className="library-shell"><header><div><span className="eyebrow">LOCAL STRUCTURED LITERATURE WORKBENCH</span><h1>Literature</h1><p>从扫描书到结构化双语文档。</p></div><button className="primary" onClick={createProject}>导入 PDF</button></header><section className="library-grid">{projects.map(project=><button className="project-card" key={project.project_id} onClick={()=>setProjectId(project.project_id)}><span className="status-dot"/><strong>{project.title}</strong><small>{project.source_language||"auto"} → {project.target_language||"zh-CN"}</small><span>{project.state}</span></button>)}{projects.length===0&&<div className="empty">尚无项目。导入一本扫描 PDF 开始。</div>}</section>{message&&<div className="toast">{message}</div>}</div>;
+  if (!projectId) return <ImportWorkspace projects={projects} refreshProjects={refreshProjects} openProject={setProjectId}/>;
   if (!document) return <div className="empty full"><button onClick={()=>setProjectId("")}>← 项目库</button><h2>项目尚未生成文档图谱</h2><p>先导入 MinerU 结果，或启动 MinerU 精准解析。</p><button className="primary" onClick={startMineru}>启动 MinerU OCR</button><button onClick={importMineru}>导入已有 MinerU 结果</button>{message&&<div className="toast">{message}</div>}</div>;
 
   return <div className="app-shell">

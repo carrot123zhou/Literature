@@ -80,6 +80,97 @@ button:hover { border-color: var(--mineru-accent); }
 .usage-ledger article { display: grid; grid-template-columns: 1fr auto; gap: 3px 8px; padding: 9px; border: 1px solid var(--mineru-border); border-radius: 7px; background: #fff; font-size: 11px; }
 .usage-ledger article small { grid-column: 1 / -1; color: #6b7280; }
 
+/* Import and MinerU processing workspace */
+.intake-shell { min-height: 100vh; background: #f7f7f2; color: #20322b; }
+.intake-topbar { height: 64px; display: grid; grid-template-columns: minmax(180px,1fr) auto minmax(180px,1fr); align-items: stretch; gap: 16px; padding: 0 22px; border-bottom: 1px solid #dce2dc; background: #fffefa; }
+.intake-brand { justify-self: start; border: 0; background: transparent; color: #20322b; font: 600 24px Georgia,serif; }
+.intake-topbar nav { display: flex; }
+.intake-topbar nav button { border: 0; border-radius: 0; border-bottom: 3px solid transparent; background: transparent; padding: 0 18px; color: #748078; }
+.intake-topbar nav button.active { color: #20322b; border-bottom-color: #9fc32f; }
+.intake-topbar nav button:disabled { cursor: default; opacity: .55; }
+.intake-topbar > button:last-child { align-self: center; justify-self: end; }
+.intake-content { width: min(1180px,calc(100% - 48px)); margin: 0 auto; padding: 36px 0 60px; }
+.intake-heading { display: flex; justify-content: space-between; align-items: end; margin-bottom: 24px; }
+.intake-heading h1 { margin: 5px 0 6px; font: 600 40px Georgia,"Noto Serif CJK SC",serif; }
+.intake-heading p { margin: 0; color: #68766f; }
+.token-state { padding: 7px 11px; border-radius: 999px; background: #f0ece7; color: #9a6542; font-size: 12px; }
+.token-state.configured { background: #edf3dc; color: #526b18; }
+.intake-card { display: grid; grid-template-columns: minmax(0,1fr) minmax(270px,30%); gap: 18px; }
+.intake-main-column,.intake-options,.intake-progress-card,.existing-projects { border: 1px solid #dce2dc; border-radius: 12px; background: #fffefa; }
+.intake-main-column { padding: 16px; }
+.intake-dropzone { min-height: 250px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 9px; border: 1.5px dashed #bfc9c1; border-radius: 10px; background: #fbfcf8; transition: .2s ease; }
+.intake-dropzone.dragging { border-color: #83a91b; background: #f3f8e6; box-shadow: inset 0 0 0 2px #9fc32f2e; }
+.intake-dropzone > strong { font-size: 18px; }
+.intake-dropzone > span,.intake-dropzone > small { color: #748078; }
+.intake-dropzone > button { margin-top: 6px; }
+.intake-file-symbols { display: flex; height: 50px; align-items: end; }
+.intake-file-symbols i { display: grid; place-items: center; width: 42px; height: 46px; margin: 0 -5px; border-radius: 6px; background: #e98062; color: #fff; box-shadow: 0 5px 12px #20322b21; transform: rotate(-8deg); font: 700 9px -apple-system; }
+.intake-file-symbols i:nth-child(2) { z-index: 2; height: 52px; background: #d85e4f; transform: none; }
+.intake-file-symbols i:nth-child(3) { background: #ec9a65; transform: rotate(8deg); }
+.intake-shell .primary { background: #c8e569; border-color: #20322b; color: #20322b; }
+.intake-shell button:hover { border-color: #607268; }
+.intake-queue-heading { display: flex; justify-content: space-between; margin: 17px 2px 8px; }
+.intake-queue-heading span { color: #758078; }
+.intake-queue { display: grid; gap: 7px; }
+.intake-queue article { display: grid; grid-template-columns: 38px minmax(0,1fr) auto; align-items: center; gap: 10px; padding: 9px 10px; border-radius: 7px; background: #f5f6f1; }
+.intake-queue article > div { min-width: 0; display: grid; gap: 3px; }
+.intake-queue article strong,.intake-queue article small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.intake-queue article small { color: #7a867e; }
+.intake-queue article > button { border: 0; background: transparent; font-size: 19px; }
+.file-kind { display: grid; place-items: center; width: 38px; height: 42px; border-radius: 5px; background: #df6a58; color: white; font-size: 9px; font-weight: 700; }
+.intake-options { padding: 18px; display: flex; flex-direction: column; gap: 17px; }
+.intake-options > div:first-child { display: flex; justify-content: space-between; }
+.intake-options > div:first-child small { color: #748078; }
+.intake-options > label:not(.option-toggle) { display: grid; gap: 6px; font-size: 12px; color: #65736c; }
+.intake-options select,.token-dialog input { width: 100%; border: 1px solid #cbd4cd; border-radius: 7px; padding: 9px; background: white; }
+.option-toggle { display: flex; align-items: center; justify-content: space-between; }
+.option-toggle span { display: grid; gap: 2px; }
+.option-toggle small { color: #7d8981; }
+.option-toggle input { width: 38px; height: 21px; accent-color: #9fc32f; }
+.intake-start { min-height: 44px; margin-top: auto; font-weight: 700; }
+.intake-start:disabled { opacity: .48; cursor: default; }
+.intake-privacy { text-align: center; color: #758078; line-height: 1.45; }
+.intake-progress-card { margin-top: 18px; overflow: hidden; }
+.intake-progress-card > header { padding: 15px 18px; border-bottom: 1px solid #e0e5e0; }
+.intake-progress-card > header > div { display: flex; align-items: baseline; gap: 12px; }
+.intake-progress-card h2,.existing-projects h2 { margin: 0; font: 600 19px Georgia,"Noto Serif CJK SC",serif; }
+.intake-progress-card header span { color: #748078; font-size: 12px; }
+.ocr-job { display: grid; grid-template-columns: 40px minmax(0,1fr) auto; align-items: start; gap: 13px; padding: 15px 18px; border-bottom: 1px solid #e7eae6; }
+.ocr-job:last-child { border-bottom: 0; }
+.ocr-job-content { min-width: 0; display: grid; gap: 7px; }
+.ocr-job-title { display: flex; justify-content: space-between; gap: 16px; }
+.ocr-job-title strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ocr-job-title span { color: #68766f; }
+.ocr-processing .ocr-job-title span,.ocr-uploading .ocr-job-title span,.ocr-downloading .ocr-job-title span,.ocr-merging .ocr-job-title span { color: #657d20; font-weight: 700; }
+.ocr-completed .ocr-job-title span { color: #39795f; }
+.ocr-failed .ocr-job-title span { color: #b54334; }
+.ocr-job-content p { margin: 0; color: #748078; font-size: 12px; }
+.ocr-job-content progress { width: 100%; height: 7px; accent-color: #9fc32f; }
+.ocr-job-content details { margin-top: 2px; }
+.ocr-job-content summary { cursor: pointer; color: #526b18; font-size: 12px; }
+.ocr-slices { display: grid; gap: 5px; margin-top: 8px; padding: 9px; border-radius: 7px; background: #f5f6f1; }
+.ocr-slice { display: grid; grid-template-columns: 8px minmax(0,1fr) auto; align-items: center; gap: 8px; font-size: 11px; }
+.ocr-slice i { width: 7px; height: 7px; border-radius: 50%; background: #c7cec8; }
+.ocr-slice strong { font-weight: 500; color: #68766f; }
+.ocr-slice.slice-downloaded i,.ocr-slice.slice-remote_done i { background: #55a37d; }
+.ocr-slice.slice-processing i { background: #9fc32f; box-shadow: 0 0 0 3px #9fc32f2e; }
+.ocr-slice.slice-failed i { background: #d65d4c; }
+.ocr-slice.slice-failed strong { color: #b54334; }
+.ocr-slice small { grid-column: 2 / -1; color: #b54334; overflow-wrap: anywhere; }
+.ocr-error { color: #b54334; overflow-wrap: anywhere; }
+.ocr-job-actions { display: flex; align-items: center; }
+.ocr-job-actions:empty { display: none; }
+.intake-empty { padding: 28px; text-align: center; color: #7a867e; }
+.existing-projects { margin-top: 18px; padding: 17px; }
+.existing-projects > div { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 9px; margin-top: 12px; }
+.existing-projects button { display: flex; justify-content: space-between; gap: 8px; padding: 12px; text-align: left; }
+.existing-projects button span { color: #758078; font-size: 11px; }
+.token-dialog { width: min(430px,calc(100vw - 40px)); align-self: center; margin: auto; padding: 18px; border-radius: 12px; background: #fffefa; box-shadow: 0 20px 60px #0003; }
+.token-dialog .panel-title { margin: -18px -18px 16px; border-radius: 12px 12px 0 0; }
+.token-dialog p { color: #68766f; }
+.token-dialog label { display: grid; gap: 6px; margin: 14px 0; }
+.token-dialog > .primary { width: 100%; }
+
 @media (max-width: 1120px) {
   .topbar { gap: 10px; padding: 0 10px; }
   .project-title { min-width: 190px; max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -88,4 +179,14 @@ button:hover { border-color: var(--mineru-accent); }
   .reading-grid { grid-template-columns: minmax(190px,24%) minmax(0,38%) minmax(0,38%); }
   .status-steps-panel { margin: 8px; padding: 9px; }
   .block-card { padding: 11px; }
+  .intake-content { width: calc(100% - 24px); }
+  .intake-topbar { grid-template-columns: minmax(140px,1fr) auto minmax(140px,1fr); gap: 8px; padding: 0 12px; }
+  .intake-topbar nav button { padding: 0 10px; }
+}
+
+@media (max-width: 900px) {
+  .intake-card { grid-template-columns: 1fr; }
+  .intake-options { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); }
+  .intake-options > div:first-child,.intake-start,.intake-privacy { grid-column: 1 / -1; }
+  .existing-projects > div { grid-template-columns: repeat(2,minmax(0,1fr)); }
 }

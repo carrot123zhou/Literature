@@ -17,6 +17,7 @@ EPUB、DOCX 和 HTML 绝不由原 PDF 直接转换。`source.md` 是 `document.j
 
 ## 当前实现
 
+- 多 PDF 拖拽/系统文件选择队列，以及真实后端任务创建与状态轮询
 - 独立项目库与 SQLite 任务/修订/用量账本
 - MinerU `content_list_v2.json`、`content_list.json` 与 Markdown 导入
 - 原始 OCR 封存、哈希验证、规范化文档图谱与稳定 block/cell ID
@@ -27,6 +28,7 @@ EPUB、DOCX 和 HTML 绝不由原 PDF 直接转换。`source.md` 是 `document.j
 - 术语表冻结、任务暂停/恢复/失败分块重试、逐次 token 明细与预算暂停
 - HTML、Markdown+JSON、EPUB 3、DOCX 导出，以及 TBL 外部接力清单
 - FastAPI 本地 sidecar 与 Tauri/React/PDF.js 三工作区桌面界面
+- 大型 PDF 自动按最多 200 页分段；默认展示文档总状态，可展开查看各分段页码、状态和错误
 
 开发状态与可接续事项见 [开发日志](docs/DEVELOPMENT_LOG.md)，数据不变量见 [架构说明](docs/ARCHITECTURE.md)，发布流程见 [macOS 打包](docs/PACKAGING.md)。
 

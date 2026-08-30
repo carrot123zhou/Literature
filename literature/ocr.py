@@ -63,14 +63,22 @@ class MinerUService:
         return self.describe(job)
 
     def run(self, job_id: str) -> dict[str, Any]:
-        job = self.workflow.run_or_resume(self.jobs_root / job_id / "job.json")
         project_id = self._project_for_job(job_id)
+        self.store.update_manifest(project_id, state="ocr_processing")
+        try:
+            job = self.workflow.run_or_resume(self.jobs_root / job_id / "job.json")
+        except Exception:
+            self.store.update_manifest(project_id, state="ocr_failed")
+            raise
         if job.state == JobState.COMPLETED:
             self.store.update_manifest(project_id, state="ready")
+        elif job.state == JobState.WAITING:
+            self.store.update_manifest(project_id, state="ocr_waiting")
         return self.describe(job)
 
     def retry(self, job_id: str) -> dict[str, Any]:
         job = self.workflow.retry_failed(self.jobs_root / job_id / "job.json")
+        self.store.update_manifest(self._project_for_job(job_id), state="ocr_queued")
         return self.describe(job)
 
     def stop(self) -> None:
@@ -86,18 +94,64 @@ class MinerUService:
             if project_id and mapped != project_id:
                 continue
             value = self.describe(job)
-            value["project_id"] = mapped
+            manifest = self.store.load_manifest(mapped)
+            value.update(
+                project_id=mapped,
+                title=manifest.get("title") or Path(job.source_pdf).stem,
+                project_state=manifest.get("state", ""),
+                source_size=manifest.get("source_size", job.source_size),
+            )
             output.append(value)
-        return output
+        return sorted(output, key=lambda item: item["created_at"], reverse=True)
+
+    def get(self, job_id: str) -> dict[str, Any]:
+        job = self.workflow.load_job(self.jobs_root / job_id / "job.json")
+        value = self.describe(job)
+        project_id = self._project_for_job(job_id)
+        manifest = self.store.load_manifest(project_id)
+        value.update(
+            project_id=project_id,
+            title=manifest.get("title") or Path(job.source_pdf).stem,
+            project_state=manifest.get("state", ""),
+            source_size=manifest.get("source_size", job.source_size),
+        )
+        return value
 
     @staticmethod
     def describe(job: WorkflowJob) -> dict[str, Any]:
+        total_pages = job.page_count or sum(item.page_count for item in job.slices)
+        submitted_states = {"uploaded", "processing", "remote_done", "downloaded"}
+        completed_states = {"remote_done", "downloaded"}
+        submitted_pages = sum(item.page_count for item in job.slices if item.state.value in submitted_states)
+        completed_pages = sum(item.page_count for item in job.slices if item.state.value in completed_states)
+        downloaded_pages = sum(item.page_count for item in job.slices if item.state.value == "downloaded")
+        failed_slices = sum(item.state.value == "failed" for item in job.slices)
+        if job.state == JobState.COMPLETED:
+            stage_progress: float | None = 1.0
+        elif job.state == JobState.UPLOADING and total_pages:
+            stage_progress = submitted_pages / total_pages
+        elif job.state == JobState.PROCESSING and total_pages:
+            stage_progress = completed_pages / total_pages
+        elif job.state == JobState.DOWNLOADING and total_pages:
+            stage_progress = downloaded_pages / total_pages
+        else:
+            stage_progress = None
         return {
             "job_id": job.job_id, "state": job.state.value, "error": job.error,
-            "page_count": job.page_count, "output": job.output_epub,
+            "page_count": job.page_count, "page_limit": job.page_limit, "output": job.output_epub,
+            "slice_count": len(job.slices),
+            "completed_slices": sum(item.state.value in completed_states for item in job.slices),
+            "downloaded_slices": sum(item.state.value == "downloaded" for item in job.slices),
+            "failed_slices": failed_slices,
+            "submitted_pages": submitted_pages,
+            "completed_pages": completed_pages,
+            "downloaded_pages": downloaded_pages,
+            "stage_progress": stage_progress,
+            "can_retry": job.state == JobState.FAILED or failed_slices > 0,
             "slices": [
                 {"index": item.index, "start_page": item.start_page, "end_page": item.end_page,
-                 "state": item.state.value, "error": item.error}
+                 "page_count": item.page_count, "state": item.state.value,
+                 "remote_state": item.remote_state, "attempts": item.attempts, "error": item.error}
                 for item in job.slices
             ],
             "created_at": job.created_at, "updated_at": job.updated_at,

@@ -113,6 +113,7 @@ class ProjectStore:
             "source_language": source_language, "source_language_mode": source_language,
             "target_language": target_language,
             "source_pdf": "source/origin.pdf", "source_sha256": sha256_file(copied),
+            "source_size": copied.stat().st_size,
             "budget_usd": 0.0,
             "state": "created", "created_at": utc_now(), "updated_at": utc_now(),
         }

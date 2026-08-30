@@ -7,6 +7,7 @@ import secrets
 import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import asynccontextmanager
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Literal
@@ -68,6 +69,10 @@ class MinerUJobCreate(BaseModel):
     enable_table: bool = True
     enable_formula: bool = True
     page_limit: int = Field(default=200, ge=1, le=200)
+
+
+class IntakeJobCreate(MinerUJobCreate):
+    paths: list[str] = Field(min_length=1, max_length=20)
 
 
 class SecretInput(BaseModel):
@@ -178,6 +183,8 @@ class JobManager:
         self.ocr = ocr
         self.executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="literature-job")
         self.pause_events: dict[str, threading.Event] = {}
+        self.ocr_running: set[str] = set()
+        self.ocr_lock = threading.Lock()
 
     def start_translation(self, project_id: str, request: TranslationJobInput, *, existing_job_id: str | None = None) -> str:
         scope = {"block_ids": request.block_ids, "locale": request.locale}
@@ -208,8 +215,40 @@ class JobManager:
         if event:
             event.set()
 
-    def start_ocr(self, job_id: str) -> None:
-        self.executor.submit(self.ocr.run, job_id)
+    def start_ocr(self, job_id: str) -> bool:
+        with self.ocr_lock:
+            if job_id in self.ocr_running:
+                return False
+            self.ocr_running.add(job_id)
+
+        def run() -> None:
+            try:
+                self.ocr.run(job_id)
+            except Exception:
+                # MinerUWorkflow and MinerUService persist the actionable error.
+                pass
+            finally:
+                with self.ocr_lock:
+                    self.ocr_running.discard(job_id)
+
+        self.executor.submit(run)
+        return True
+
+    def resume_ocr_jobs(self) -> int:
+        if not get_mineru_token():
+            return 0
+        resumable = {
+            "queued", "preparing", "uploading", "processing",
+            "downloading", "merging", "waiting",
+        }
+        started = 0
+        for job in self.ocr.list():
+            if job["state"] in resumable and self.start_ocr(job["job_id"]):
+                started += 1
+        return started
+
+    def shutdown(self) -> None:
+        self.executor.shutdown(wait=False, cancel_futures=False)
 
 
 def create_app(store: ProjectStore | None = None):
@@ -225,7 +264,15 @@ def create_app(store: ProjectStore | None = None):
     manager = JobManager(store, ocr)
     tbl = TBLBridge(store)
     token = session_token()
-    app = FastAPI(title="Literature Local API", version="0.1.0")
+    @asynccontextmanager
+    async def lifespan(_app: Any):
+        manager.resume_ocr_jobs()
+        try:
+            yield
+        finally:
+            manager.shutdown()
+
+    app = FastAPI(title="Literature Local API", version="0.1.0", lifespan=lifespan)
     app.state.session_token = token
     app.state.store = store
     app.state.job_manager = manager
@@ -325,7 +372,7 @@ def create_app(store: ProjectStore | None = None):
     @app.put("/mineru/token")
     def mineru_token_save(request: SecretInput):
         save_mineru_token(request.value)
-        return {"configured": True}
+        return {"configured": True, "resumed_jobs": manager.resume_ocr_jobs()}
 
     @app.delete("/mineru/token")
     def mineru_token_delete():
@@ -336,19 +383,52 @@ def create_app(store: ProjectStore | None = None):
     def create_ocr_job(project_id: str, request: MinerUJobCreate):
         return ocr.create(project_id, **request.model_dump())
 
+    @app.post("/intake/jobs")
+    def create_intake_jobs(request: IntakeJobCreate):
+        sources: list[Path] = []
+        seen: set[Path] = set()
+        for raw in request.paths:
+            source = Path(raw).expanduser().resolve()
+            if source in seen:
+                continue
+            if not source.is_file() or source.suffix.casefold() != ".pdf":
+                raise StorageError(f"第一阶段仅支持有效 PDF：{source}")
+            seen.add(source)
+            sources.append(source)
+        if not sources:
+            raise StorageError("请选择至少一个 PDF。")
+
+        options = request.model_dump(exclude={"paths"})
+        token_configured = bool(get_mineru_token())
+        jobs = []
+        for source in sources:
+            project = store.create_project(
+                source, source_language=request.language,
+            )
+            job = ocr.create(project["project_id"], **options)
+            if token_configured:
+                manager.start_ocr(job["job_id"])
+            jobs.append(ocr.get(job["job_id"]))
+        return {"jobs": jobs, "token_configured": token_configured}
+
+    @app.get("/ocr/jobs")
+    def list_all_ocr_jobs():
+        return ocr.list()
+
     @app.post("/ocr/jobs/{job_id}/start")
     def start_ocr_job(job_id: str):
-        manager.start_ocr(job_id)
-        return {"job_id": job_id, "state": "starting"}
+        if not get_mineru_token():
+            raise StorageError("请先配置 MinerU Token。")
+        started = manager.start_ocr(job_id)
+        return {"job_id": job_id, "state": "starting" if started else "already_running"}
 
     @app.post("/ocr/jobs/{job_id}/retry")
     def retry_ocr_job(job_id: str):
-        return ocr.retry(job_id)
-
-    @app.post("/ocr/jobs/{job_id}/pause")
-    def pause_ocr_job(job_id: str):
-        ocr.stop()
-        return {"job_id": job_id, "state": "pause_requested"}
+        if not get_mineru_token():
+            raise StorageError("请先配置 MinerU Token。")
+        ocr.retry(job_id)
+        manager.start_ocr(job_id)
+        return ocr.get(job_id)
 
     @app.get("/projects/{project_id}/ocr/jobs")
     def list_ocr_jobs(project_id: str):

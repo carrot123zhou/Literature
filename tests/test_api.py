@@ -5,6 +5,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 class ApiIntegrationTests(unittest.TestCase):
@@ -111,6 +112,37 @@ class ApiIntegrationTests(unittest.TestCase):
         missing = self.client.post("/projects", headers=self.headers, json={"source_pdf": str(self.root / "missing.pdf")})
         self.assertEqual(missing.status_code, 400)
         self.assertEqual(self.client.get("/projects/not-real/source.pdf", headers=self.headers).status_code, 400)
+
+    def test_batch_intake_creates_persistent_queued_jobs(self) -> None:
+        with patch("literature.api.get_mineru_token", return_value=""):
+            created = self.client.post("/intake/jobs", headers=self.headers, json={
+                "paths": [str(self.source), str(self.source)],
+                "language": "auto", "page_limit": 200,
+            })
+        self.assertEqual(created.status_code, 200, created.text)
+        value = created.json()
+        self.assertFalse(value["token_configured"])
+        self.assertEqual(len(value["jobs"]), 1)
+        job = value["jobs"][0]
+        self.assertEqual(job["state"], "queued")
+        self.assertEqual(job["project_state"], "ocr_queued")
+        self.assertEqual(job["slice_count"], 0)
+        self.assertIsNone(job["stage_progress"])
+        listed = self.client.get("/ocr/jobs", headers=self.headers)
+        self.assertEqual(listed.status_code, 200, listed.text)
+        self.assertEqual(listed.json()[0]["job_id"], job["job_id"])
+        # Remote MinerU processing cannot actually be paused, so the local API
+        # does not expose a misleading per-job pause operation.
+        paused = self.client.post(f"/ocr/jobs/{job['job_id']}/pause", headers=self.headers)
+        self.assertEqual(paused.status_code, 404)
+
+    def test_batch_intake_rejects_unimplemented_formats_before_creating_projects(self) -> None:
+        document = self.root / "notes.docx"
+        document.write_bytes(b"not-a-real-docx")
+        rejected = self.client.post("/intake/jobs", headers=self.headers, json={"paths": [str(document)]})
+        self.assertEqual(rejected.status_code, 400)
+        self.assertIn("仅支持有效 PDF", rejected.json()["detail"])
+        self.assertEqual(self.client.get("/projects", headers=self.headers).json(), [])
 
 
 if __name__ == "__main__":
