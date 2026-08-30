@@ -136,12 +136,46 @@ class ApiIntegrationTests(unittest.TestCase):
         paused = self.client.post(f"/ocr/jobs/{job['job_id']}/pause", headers=self.headers)
         self.assertEqual(paused.status_code, 404)
 
-    def test_batch_intake_rejects_unimplemented_formats_before_creating_projects(self) -> None:
+    def test_web_upload_accepts_mineru_document_types_and_persists_settings(self) -> None:
         document = self.root / "notes.docx"
         document.write_bytes(b"not-a-real-docx")
+        uploaded = self.client.post(
+            "/intake/uploads", headers=self.headers,
+            files=[
+                ("files", ("notes.docx", document.read_bytes(), "application/vnd.openxmlformats-officedocument.wordprocessingml.document")),
+                ("files", ("article.html", b"<h1>Article</h1>", "text/html")),
+            ],
+        )
+        self.assertEqual(uploaded.status_code, 200, uploaded.text)
+        item, html = uploaded.json()
+        self.assertEqual(item["extension"], "docx")
+        self.assertEqual(item["source_kind"], "word")
+        with patch("literature.api.get_mineru_token", return_value=""):
+            created = self.client.post("/intake/jobs", headers=self.headers, json={
+                "upload_ids": [item["upload_id"], html["upload_id"]], "language": "latin", "model_version": "pipeline",
+                "is_ocr": False, "enable_table": False, "enable_formula": True,
+                "extra_formats": ["docx", "latex"],
+            })
+        self.assertEqual(created.status_code, 200, created.text)
+        jobs = created.json()["jobs"]
+        job = next(value for value in jobs if value["source_type"] == "word")
+        self.assertEqual(job["source_name"], "notes.docx")
+        self.assertEqual(job["source_type"], "word")
+        self.assertEqual(job["model_version"], "pipeline")
+        self.assertEqual(job["language"], "latin")
+        self.assertFalse(job["is_ocr"])
+        self.assertFalse(job["enable_table"])
+        self.assertEqual(job["extra_formats"], ["docx", "latex"])
+        html_job = next(value for value in jobs if value["source_type"] == "html")
+        self.assertEqual(html_job["model_version"], "MinerU-HTML")
+        self.assertEqual(html_job["extra_formats"], [])
+
+    def test_batch_intake_rejects_formats_not_supported_by_mineru(self) -> None:
+        document = self.root / "notes.txt"
+        document.write_text("not supported", encoding="utf-8")
         rejected = self.client.post("/intake/jobs", headers=self.headers, json={"paths": [str(document)]})
         self.assertEqual(rejected.status_code, 400)
-        self.assertIn("仅支持有效 PDF", rejected.json()["detail"])
+        self.assertIn("MinerU 不支持", rejected.json()["detail"])
         self.assertEqual(self.client.get("/projects", headers=self.headers).json(), [])
 
 

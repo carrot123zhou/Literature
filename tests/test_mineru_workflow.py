@@ -11,6 +11,7 @@ from literature import mineru_workflow as workflow
 class WorkflowRegressionTests(unittest.TestCase):
     def test_page_ranges_are_contiguous_without_overlap(self):
         self.assertEqual(workflow.plan_page_ranges(401, 200), [(1, 200), (201, 400), (401, 401)])
+        self.assertEqual(workflow.parse_page_ranges("2,4-6,10--2", 12), [2, 4, 5, 6, 10, 11])
 
     def test_real_large_pdf_is_split_into_valid_non_overlapping_files(self):
         import fitz
@@ -69,6 +70,59 @@ class WorkflowRegressionTests(unittest.TestCase):
                 manager.create_job(source, root / "book.epub", page_limit=201)
             with self.assertRaises(workflow.WorkflowError):
                 manager.create_job(source, root / "book.epub", language="xx")
+
+    def test_office_file_is_prepared_without_local_pdf_splitting(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "book.docx"
+            source.write_bytes(b"docx fixture")
+            manager = workflow.MinerUWorkflow(root / "jobs")
+            job = manager.create_job(
+                source, root / "book.epub", model_version="pipeline", language="latin",
+                is_ocr=False, enable_table=False, extra_formats=["docx", "latex"],
+            )
+            manager._prepare(job, None)
+            self.assertEqual(job.page_count, 0)
+            self.assertEqual(job.slices[0].upload_name, "book.docx")
+            self.assertEqual(Path(job.slices[0].local_pdf), source.resolve())
+
+    def test_batch_request_contains_official_mineru_settings(self):
+        class Response:
+            status_code = 200
+
+            @staticmethod
+            def json():
+                return {"code": 0, "data": {"batch_id": "batch", "file_urls": ["https://upload"]}}
+
+        class HTTP:
+            def __init__(self):
+                self.calls = []
+
+            def request(self, method, url, **kwargs):
+                self.calls.append((method, url, kwargs))
+                return Response()
+
+            def close(self):
+                pass
+
+        http = HTTP()
+        client = workflow.MinerUClient("token", http_client=http)
+        job = workflow.WorkflowJob(
+            job_id="settings", source_pdf="/tmp/book.pdf", output_epub="/tmp/book.epub",
+            workspace="/tmp/settings", raw_output="/tmp/raw", source_size=1, source_sha256="digest",
+            model_version="vlm", language="japan", is_ocr=True, enable_table=False,
+            enable_formula=True, page_ranges="2,4-6", extra_formats=["docx", "latex"],
+        )
+        item = workflow.SliceJob(1, 1, 5, "data", "book.pdf", "/tmp/book.pdf")
+        client.create_batch([item], job)
+        payload = http.calls[0][2]["json"]
+        self.assertEqual(payload["model_version"], "vlm")
+        self.assertEqual(payload["language"], "japan")
+        self.assertFalse(payload["enable_table"])
+        self.assertTrue(payload["enable_formula"])
+        self.assertEqual(payload["extra_formats"], ["docx", "latex"])
+        self.assertTrue(payload["files"][0]["is_ocr"])
+        self.assertEqual(payload["files"][0]["page_ranges"], "2,4-6")
 
     def test_slice_progress_reports_real_completed_pages(self):
         job = workflow.WorkflowJob(

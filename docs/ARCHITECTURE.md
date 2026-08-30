@@ -34,7 +34,7 @@ MinerU 服务适配层 --------> ocr/raw/mineru/（只读证据）
 4. 结构校准只写可逆补丁；正文删除、合并和改写不得自动执行。
 5. 翻译通过 block/cell ID 挂接，不把译文写回 source block。
 6. 人工编辑的译文自动锁定；批量任务默认跳过锁定项。
-7. 导出器不得读取 `source/origin.pdf` 生成内容。
+7. 导出器不得读取 `source/origin.<原扩展名>` 生成内容。
 8. API key、MinerU Token 和会话令牌不得进入项目、日志或导出。
 9. 本地 API 只绑定 loopback；除健康检查外均需会话令牌。
 10. TBL 只消费派生 EPUB/DOCX，不拥有或覆盖 Literature 文档图谱。

@@ -1,5 +1,4 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { open } from "@tauri-apps/plugin-dialog";
 import { api } from "./api";
 import type { OcrJob, OcrSlice, Project } from "./types";
 
@@ -10,6 +9,12 @@ type Props = {
 };
 
 const FINAL_STATES = new Set(["completed", "failed"]);
+const ACCEPTED_EXTENSIONS = ["pdf", "doc", "docx", "ppt", "pptx", "xls", "xlsx", "png", "jpg", "jpeg", "jp2", "webp", "gif", "bmp", "html"];
+const ACCEPT = ACCEPTED_EXTENSIONS.map(value => `.${value}`).join(",");
+const MAX_BATCH_FILES = 50;
+const MAX_OFFICE_BYTES = 200_000_000;
+type PendingFile = { key: string; file: File };
+type UploadedFile = { upload_id: string; name: string; size: number; extension: string; source_kind: string };
 const stateLabel: Record<string, string> = {
   queued: "等待开始", preparing: "正在检查并自动分段", uploading: "正在上传分段",
   processing: "MinerU 解析中", downloading: "正在下载解析结果", merging: "正在合并与规范化",
@@ -20,7 +25,7 @@ const sliceLabel: Record<string, string> = {
   remote_done: "解析完成，等待下载", downloaded: "已下载并校验", failed: "处理失败",
 };
 
-function basename(path: string) { return path.split(/[\\/]/).pop() || path; }
+function extension(name: string) { return name.split(".").pop()?.toUpperCase() || "FILE"; }
 function formatSize(bytes: number) {
   if (!bytes) return "本地文件";
   if (bytes >= 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
@@ -40,12 +45,15 @@ function jobDescription(job: OcrJob) {
 }
 
 export default function ImportWorkspace({ projects, refreshProjects, openProject }: Props) {
-  const [paths, setPaths] = useState<string[]>([]);
+  const [pendingFiles, setPendingFiles] = useState<PendingFile[]>([]);
   const [jobs, setJobs] = useState<OcrJob[]>([]);
-  const [language, setLanguage] = useState("auto");
+  const [language, setLanguage] = useState("ch");
+  const [modelVersion, setModelVersion] = useState("vlm");
   const [ocr, setOcr] = useState(true);
   const [tables, setTables] = useState(true);
   const [formulas, setFormulas] = useState(true);
+  const [pageRanges, setPageRanges] = useState("");
+  const [extraFormats, setExtraFormats] = useState<Set<string>>(new Set());
   const [tokenConfigured, setTokenConfigured] = useState(false);
   const [tokenDialog, setTokenDialog] = useState(false);
   const [tokenEditing, setTokenEditing] = useState(false);
@@ -53,6 +61,7 @@ export default function ImportWorkspace({ projects, refreshProjects, openProject
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
   const [dragging, setDragging] = useState(false);
+  const [busyStage, setBusyStage] = useState("");
 
   const refreshJobs = useCallback(async () => setJobs(await api<OcrJob[]>("/ocr/jobs")), []);
   useEffect(() => {
@@ -66,57 +75,46 @@ export default function ImportWorkspace({ projects, refreshProjects, openProject
     const timer = window.setInterval(() => refreshJobs().catch(() => {}), 1500);
     return () => window.clearInterval(timer);
   }, [jobs, refreshJobs]);
-  useEffect(() => {
-    if (!("__TAURI_INTERNALS__" in window)) return;
-    let unlisten: undefined | (() => void);
-    import("@tauri-apps/api/webview").then(({ getCurrentWebview }) =>
-      getCurrentWebview().onDragDropEvent(event => {
-        if (event.payload.type === "enter") setDragging(true);
-        if (event.payload.type === "leave") setDragging(false);
-        if (event.payload.type === "drop") {
-          setDragging(false);
-          addPaths(event.payload.paths);
-        }
-      }).then(value => { unlisten = value; })
-    ).catch(() => {});
-    return () => unlisten?.();
-  }, []);
-
-  const addPaths = (incoming: string[]) => {
-    const unsupported = incoming.filter(path => !path.toLowerCase().endsWith(".pdf"));
-    const accepted = incoming.filter(path => path.toLowerCase().endsWith(".pdf"));
-    setPaths(current => [...new Set([...current, ...accepted])]);
-    if (unsupported.length) setMessage(`第一阶段仅加入 PDF；已忽略 ${unsupported.length} 个其他格式文件。`);
-  };
-  const chooseFiles = async () => {
-    let selected: string[] = [];
-    if ("__TAURI_INTERNALS__" in window) {
-      const value = await open({ multiple: true, filters: [{ name: "PDF 文档", extensions: ["pdf"] }] });
-      selected = Array.isArray(value) ? value : value ? [value] : [];
-    } else {
-      selected = (window.prompt("浏览器开发模式：请输入 PDF 绝对路径，多个路径用逗号分隔") || "")
-        .split(",").map(value => value.trim()).filter(Boolean);
+  const addFiles = (incoming: FileList | File[]) => {
+    const selected = Array.from(incoming);
+    const unsupported = selected.filter(file => !ACCEPTED_EXTENSIONS.includes(file.name.split(".").pop()?.toLowerCase() || ""));
+    const oversized = selected.filter(file => !file.name.toLowerCase().endsWith(".pdf") && file.size > MAX_OFFICE_BYTES);
+    const accepted = selected.filter(file => !unsupported.includes(file) && !oversized.includes(file));
+    setPendingFiles(current => {
+      const known = new Set(current.map(item => item.key));
+      const additions = accepted
+        .map(file => ({ key: `${file.name}:${file.size}:${file.lastModified}`, file }))
+        .filter(item => !known.has(item.key));
+      return [...current, ...additions].slice(0, MAX_BATCH_FILES);
+    });
+    if (unsupported.length || oversized.length || selected.length > MAX_BATCH_FILES) {
+      setMessage(`已忽略 ${unsupported.length} 个不支持格式、${oversized.length} 个超过 200MB 的非 PDF 文件；单批最多 ${MAX_BATCH_FILES} 个。`);
     }
-    addPaths(selected);
   };
   const startJobs = async () => {
-    if (!paths.length) return;
-    if (!tokenConfigured) { setTokenDialog(true); return; }
+    if (!pendingFiles.length) return;
+    if (!tokenConfigured) { openTokenSettings(); return; }
     setBusy(true);
     try {
+      setBusyStage("正在上传到 Literature…");
+      const form = new FormData();
+      pendingFiles.forEach(item => form.append("files", item.file, item.file.name));
+      const uploaded = await api<UploadedFile[]>("/intake/uploads", { method: "POST", body: form });
+      setBusyStage("正在创建 MinerU 任务…");
       const value = await api<{jobs:OcrJob[];token_configured:boolean}>("/intake/jobs", {
         method: "POST",
         body: JSON.stringify({
-          paths, language, model_version: "vlm", is_ocr: ocr,
-          enable_table: tables, enable_formula: formulas, page_limit: 200,
+          upload_ids: uploaded.map(item => item.upload_id), language, model_version: modelVersion,
+          is_ocr: ocr, enable_table: tables, enable_formula: formulas,
+          page_ranges: pageRanges.trim(), extra_formats: [...extraFormats], page_limit: 200,
         }),
       });
-      setPaths([]);
+      setPendingFiles([]);
       setJobs(current => [...value.jobs, ...current]);
       await refreshProjects();
       setMessage(`已创建 ${value.jobs.length} 个解析任务；Literature 将自动分段并轮询 MinerU。`);
     } catch (error) { setMessage(String(error)); }
-    finally { setBusy(false); }
+    finally { setBusy(false); setBusyStage(""); }
   };
   const saveToken = async () => {
     if (!token.trim()) return;
@@ -155,25 +153,27 @@ export default function ImportWorkspace({ projects, refreshProjects, openProject
       <button onClick={openTokenSettings}>⚙ 设置</button>
     </header>
     <main className="intake-content">
-      <section className="intake-heading"><div><span className="eyebrow">DOCUMENT INTAKE</span><h1>导入与解析</h1><p>添加 PDF 文献，使用 MinerU 生成结构化解析数据。</p></div><span className={`token-state ${tokenConfigured ? "configured" : ""}`}>● {tokenConfigured ? "MinerU 已连接" : "MinerU 未配置"}</span></section>
+      <section className="intake-heading"><div><span className="eyebrow">DOCUMENT INTAKE</span><h1>导入与解析</h1><p>上传文献文件，使用 MinerU 生成结构化解析数据。</p></div><span className={`token-state ${tokenConfigured ? "configured" : ""}`}>● {tokenConfigured ? "MinerU 已连接" : "MinerU 未配置"}</span></section>
       <section className="intake-card">
         <div className="intake-main-column">
-          <div className={`intake-dropzone ${dragging ? "dragging" : ""}`} onDragOver={event => { event.preventDefault(); setDragging(true); }} onDragLeave={() => setDragging(false)} onDrop={event => { event.preventDefault(); setDragging(false); if (!("__TAURI_INTERNALS__" in window)) setMessage("浏览器无法读取拖入文件的本地路径；请点击选择文件。桌面应用支持直接拖入。"); }}>
-            <div className="intake-file-symbols"><i>PDF</i><i>PDF</i><i>PDF</i></div>
-            <strong>将 PDF 拖到此处</strong><span>或通过系统文件选择器批量添加</span>
-            <button className="primary" onClick={chooseFiles}>＋ 选择文件</button><small>第一阶段支持 PDF · 单本超过 200 页会自动分段</small>
+          <div className={`intake-dropzone ${dragging ? "dragging" : ""}`} onDragOver={event => { event.preventDefault(); setDragging(true); }} onDragLeave={() => setDragging(false)} onDrop={event => { event.preventDefault(); setDragging(false); addFiles(event.dataTransfer.files); }}>
+            <div className="intake-file-symbols"><i>DOC</i><i>PDF</i><i>IMG</i></div>
+            <strong>将文件拖到此处</strong><span>或点击后从系统文件选择窗口批量添加</span>
+            <input aria-label="选择文件" className="intake-file-input" type="file" multiple accept={ACCEPT} onChange={event => { if (event.target.files) addFiles(event.target.files); event.target.value = ""; }}/><small>PDF · Office · 图片 · HTML · PDF 超过 200 页自动分段</small>
           </div>
-          <div className="intake-queue-heading"><strong>待处理文件</strong><span>{paths.length} 个文件</span></div>
-          <div className="intake-queue">{paths.length ? paths.map(path => <article key={path}><span className="file-kind">PDF</span><div><strong>{basename(path)}</strong><small>{path}</small></div><button aria-label="移除文件" onClick={() => setPaths(current => current.filter(value => value !== path))}>×</button></article>) : <div className="intake-empty">尚未选择文件</div>}</div>
+          <div className="intake-queue-heading"><strong>待处理文件</strong><span>{pendingFiles.length} 个文件</span></div>
+          <div className="intake-queue">{pendingFiles.length ? pendingFiles.map(item => <article key={item.key}><span className="file-kind">{extension(item.file.name)}</span><div><strong>{item.file.name}</strong><small>{formatSize(item.file.size)}</small></div><button aria-label={`移除 ${item.file.name}`} onClick={() => setPendingFiles(current => current.filter(value => value.key !== item.key))}>×</button></article>) : <div className="intake-empty">尚未选择文件</div>}</div>
         </div>
         <aside className="intake-options">
           <div className="intake-option-title"><strong>解析设置</strong><button className={tokenConfigured ? "token-button configured" : "token-button"} onClick={openTokenSettings}>🔑 {tokenConfigured ? "Token 已保存" : "设置 Token"}</button></div>
-          <label>文档语言<select value={language} onChange={event => setLanguage(event.target.value)}><option value="auto">自动检测</option><option value="en">英语</option><option value="ja">日语</option><option value="fr">法语</option><option value="de">德语</option></select></label>
+          <label>解析模型<select value={modelVersion} onChange={event => setModelVersion(event.target.value)}><option value="vlm">MinerU VLM（推荐）</option><option value="pipeline">MinerU Pipeline</option></select><small>HTML 文件会自动切换到 MinerU-HTML。</small></label>
+          <label>文档语言包<select value={language} onChange={event => setLanguage(event.target.value)}><option value="ch">中英文（默认）</option><option value="ch_server">繁体／手写体</option><option value="en">纯英文</option><option value="japan">日文为主</option><option value="korean">韩文</option><option value="chinese_cht">繁体中文为主</option><option value="ta">泰米尔文</option><option value="te">泰卢固文</option><option value="ka">卡纳达文</option><option value="el">希腊文</option><option value="th">泰文</option><option value="latin">拉丁语系</option><option value="arabic">阿拉伯语系</option><option value="cyrillic">西里尔语系</option><option value="east_slavic">东斯拉夫语系</option><option value="devanagari">天城文语系</option></select></label>
           <label className="option-toggle"><span><strong>OCR</strong><small>扫描件文字识别</small></span><input type="checkbox" checked={ocr} onChange={event => setOcr(event.target.checked)}/></label>
           <label className="option-toggle"><span><strong>表格识别</strong><small>保留行列结构</small></span><input type="checkbox" checked={tables} onChange={event => setTables(event.target.checked)}/></label>
           <label className="option-toggle"><span><strong>公式识别</strong><small>保留公式结构</small></span><input type="checkbox" checked={formulas} onChange={event => setFormulas(event.target.checked)}/></label>
-          <button className="primary intake-start" disabled={!paths.length || busy} onClick={startJobs}>{busy ? "正在创建任务…" : `开始解析${paths.length ? `（${paths.length}）` : ""}`}</button>
-          <small className="intake-privacy">文件与解析结果保存在本机；只有解析任务会发送至 MinerU。</small>
+          <details className="mineru-advanced"><summary>更多 MinerU 设置</summary><label>PDF 页码范围<input type="text" value={pageRanges} onChange={event => setPageRanges(event.target.value)} placeholder="例如 2,4-6,10--2"/><small>留空解析全部；多文件时应用到每个 PDF。</small></label><fieldset><legend>额外输出格式</legend>{["docx", "html", "latex"].map(value => <label key={value}><input type="checkbox" checked={extraFormats.has(value)} onChange={() => setExtraFormats(current => { const next = new Set(current); next.has(value) ? next.delete(value) : next.add(value); return next; })}/>{value.toUpperCase()}</label>)}</fieldset><p>Markdown、JSON 默认返回；data_id 由 Literature 管理，任务状态使用轮询，不需要公网回调地址。</p></details>
+          <button className="primary intake-start" disabled={!pendingFiles.length || busy} onClick={startJobs}>{busy ? busyStage || "正在处理…" : `开始解析${pendingFiles.length ? `（${pendingFiles.length}）` : ""}`}</button>
+          <small className="intake-privacy">文件先上传到本机 Literature，再由后台发送给 MinerU；Token 不进入浏览器存储。</small>
         </aside>
       </section>
       <section className="intake-progress-card">
@@ -190,9 +190,9 @@ export default function ImportWorkspace({ projects, refreshProjects, openProject
 function OcrJobRow({ job, retry, openProject }: { job: OcrJob; retry: (job: OcrJob) => void; openProject: (id: string) => void }) {
   const showProgress = job.stage_progress != null && job.state !== "completed";
   return <article className={`ocr-job ocr-${job.state}`}>
-    <span className="file-kind">PDF</span>
+    <span className="file-kind">{extension(job.source_name || job.title)}</span>
     <div className="ocr-job-content">
-      <div className="ocr-job-title"><strong>{job.title}.pdf</strong><span>{stateLabel[job.state] || job.state}</span></div>
+      <div className="ocr-job-title"><strong>{job.source_name || job.title}</strong><span>{stateLabel[job.state] || job.state}</span></div>
       <p>{job.page_count ? `${job.page_count} 页${job.slice_count > 1 ? ` · 已自动分为 ${job.slice_count} 段` : ""}` : formatSize(job.source_size)} · {jobDescription(job)}</p>
       {showProgress && <progress max={1} value={job.stage_progress || 0}/>}
       {job.slice_count > 1 && <details open={job.failed_slices > 0}><summary>{job.failed_slices ? `${job.failed_slices} 个分段失败` : `查看 ${job.slice_count} 个分段的进度`}</summary><div className="ocr-slices">{job.slices.map(slice => <SliceRow key={slice.index} slice={slice}/>)}</div></details>}
@@ -204,7 +204,7 @@ function OcrJobRow({ job, retry, openProject }: { job: OcrJob; retry: (job: OcrJ
 
 function SliceRow({ slice }: { slice: OcrSlice }) {
   return <div className={`ocr-slice slice-${slice.state}`}><i/>
-    <span>第 {slice.index} 段 · 第 {slice.start_page}–{slice.end_page} 页</span>
+    <span>{slice.start_page > 0 ? `第 ${slice.index} 段 · 第 ${slice.start_page}–${slice.end_page} 页` : "完整文件"}</span>
     <strong>{sliceLabel[slice.state] || slice.state}</strong>
     {slice.error && <small>{slice.error}</small>}
   </div>;

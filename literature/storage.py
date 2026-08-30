@@ -13,6 +13,7 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Iterable
 
+from .mineru_capabilities import source_kind, validate_source
 from .models import Document, StructurePatch, TranslationLayer, UsageRecord, utc_now
 
 
@@ -91,12 +92,13 @@ class ProjectStore:
         raise StorageError(f"项目不存在：{project_id}")
 
     def create_project(
-        self, source_pdf: str | Path, *, title: str = "", source_language: str = "auto",
+        self, source_file: str | Path, *, title: str = "", source_language: str = "auto",
         target_language: str = "zh-CN",
     ) -> dict[str, Any]:
-        source = Path(source_pdf).expanduser().resolve()
-        if not source.is_file() or source.suffix.casefold() != ".pdf":
-            raise StorageError(f"请选择有效的 PDF：{source}")
+        try:
+            source = validate_source(source_file)
+        except ValueError as error:
+            raise StorageError(str(error)) from error
         name = safe_name(title or source.stem)
         destination = self.root / name
         index = 2
@@ -105,14 +107,16 @@ class ProjectStore:
             index += 1
         for child in ("source", "ocr/raw/mineru", "document", "translations", "assets", "exports"):
             (destination / child).mkdir(parents=True, exist_ok=True)
-        copied = destination / "source" / "origin.pdf"
+        copied = destination / "source" / f"origin{source.suffix.casefold()}"
         shutil.copy2(source, copied)
         project_id = uuid.uuid4().hex
         manifest = {
             "project_id": project_id, "title": title or source.stem,
             "source_language": source_language, "source_language_mode": source_language,
             "target_language": target_language,
-            "source_pdf": "source/origin.pdf", "source_sha256": sha256_file(copied),
+            "source_file": copied.relative_to(destination).as_posix(),
+            "source_name": source.name, "source_type": source_kind(source),
+            "source_sha256": sha256_file(copied),
             "source_size": copied.stat().st_size,
             "budget_usd": 0.0,
             "state": "created", "created_at": utc_now(), "updated_at": utc_now(),
@@ -120,6 +124,15 @@ class ProjectStore:
         atomic_json(destination / "project.json", manifest)
         self._init_database(destination / "literature.sqlite")
         return {**manifest, "path": str(destination)}
+
+    def source_path(self, project_id: str) -> Path:
+        project = self.project_path(project_id)
+        manifest = self.load_manifest(project_id)
+        relative = str(manifest.get("source_file") or manifest.get("source_pdf") or "")
+        candidate = (project / relative).resolve()
+        if not relative or candidate.parent != (project / "source").resolve() or not candidate.is_file():
+            raise StorageError("项目源文件不存在。")
+        return candidate
 
     def load_manifest(self, project_id: str) -> dict[str, Any]:
         path = self.project_path(project_id) / "project.json"

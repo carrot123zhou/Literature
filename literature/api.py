@@ -12,10 +12,13 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Literal
 
+from fastapi import File, UploadFile
 from pydantic import BaseModel, Field
 
 from .exporters import export_all
 from .mineru import detect_language, import_mineru
+from .mineru_capabilities import MAX_BATCH_FILES, validate_source
+from .mineru_workflow import WorkflowError
 from .models import UsageRecord
 from .ocr import MinerUService, delete_mineru_token, get_mineru_token, save_mineru_token
 from .providers import PROVIDER_PRESETS, OpenAICompatibleProvider, ProviderConfig, ProviderError, delete_api_key, get_api_key, save_api_key
@@ -23,6 +26,7 @@ from .storage import ProjectStore, StorageError
 from .structure import analyze_structure, analyze_structure_with_provider, apply_automatic, apply_patch, find_toc_page_candidates, revert_patch, structure_model_payload
 from .tbl import TBLBridge
 from .translation import TranslationService, draft_glossary
+from .uploads import UploadStore
 
 
 def application_support() -> Path:
@@ -45,7 +49,8 @@ def session_token() -> str:
 
 
 class ProjectCreate(BaseModel):
-    source_pdf: str
+    source_file: str = ""
+    source_pdf: str = ""  # Backward-compatible alias for existing local clients.
     title: str = ""
     source_language: str = "auto"
     target_language: str = "zh-CN"
@@ -63,16 +68,19 @@ class MinerUImport(BaseModel):
 
 
 class MinerUJobCreate(BaseModel):
-    language: str = "auto"
+    language: str = "ch"
     model_version: str = "vlm"
     is_ocr: bool = True
     enable_table: bool = True
     enable_formula: bool = True
+    page_ranges: str = Field(default="", max_length=2000)
+    extra_formats: list[Literal["docx", "html", "latex"]] = Field(default_factory=list)
     page_limit: int = Field(default=200, ge=1, le=200)
 
 
 class IntakeJobCreate(MinerUJobCreate):
-    paths: list[str] = Field(min_length=1, max_length=20)
+    upload_ids: list[str] = Field(default_factory=list, max_length=MAX_BATCH_FILES)
+    paths: list[str] = Field(default_factory=list, max_length=MAX_BATCH_FILES)
 
 
 class SecretInput(BaseModel):
@@ -262,6 +270,7 @@ def create_app(store: ProjectStore | None = None):
     store = store or ProjectStore()
     ocr = MinerUService(store)
     manager = JobManager(store, ocr)
+    uploads = UploadStore(application_support() / "uploads")
     tbl = TBLBridge(store)
     token = session_token()
     @asynccontextmanager
@@ -294,6 +303,11 @@ def create_app(store: ProjectStore | None = None):
         from fastapi.responses import JSONResponse
         return JSONResponse({"detail": str(error)}, status_code=400)
 
+    @app.exception_handler(WorkflowError)
+    async def workflow_error(_request: Request, error: WorkflowError):
+        from fastapi.responses import JSONResponse
+        return JSONResponse({"detail": str(error)}, status_code=400)
+
     @app.exception_handler(ProviderError)
     async def provider_error(_request: Request, error: ProviderError):
         from fastapi.responses import JSONResponse
@@ -309,7 +323,10 @@ def create_app(store: ProjectStore | None = None):
 
     @app.post("/projects")
     def create_project(request: ProjectCreate):
-        return store.create_project(request.source_pdf, title=request.title, source_language=request.source_language, target_language=request.target_language)
+        source = request.source_file or request.source_pdf
+        if not source:
+            raise StorageError("请选择源文件。")
+        return store.create_project(source, title=request.title, source_language=request.source_language, target_language=request.target_language)
 
     @app.get("/projects/{project_id}")
     def project(project_id: str):
@@ -345,7 +362,15 @@ def create_app(store: ProjectStore | None = None):
 
     @app.get("/projects/{project_id}/source.pdf")
     def source_pdf(project_id: str):
-        return FileResponse(store.project_path(project_id) / "source" / "origin.pdf", media_type="application/pdf")
+        source = store.source_path(project_id)
+        if source.suffix.casefold() != ".pdf":
+            raise HTTPException(status_code=404, detail="该项目的源文件不是 PDF。")
+        return FileResponse(source, media_type="application/pdf")
+
+    @app.get("/projects/{project_id}/source")
+    def source_file(project_id: str):
+        source = store.source_path(project_id)
+        return FileResponse(source, filename=source.name)
 
     @app.get("/projects/{project_id}/assets/{name}")
     def asset(project_id: str, name: str):
@@ -383,32 +408,55 @@ def create_app(store: ProjectStore | None = None):
     def create_ocr_job(project_id: str, request: MinerUJobCreate):
         return ocr.create(project_id, **request.model_dump())
 
+    @app.post("/intake/uploads")
+    def create_intake_uploads(files: list[UploadFile] = File(...)):
+        if not files or len(files) > MAX_BATCH_FILES:
+            raise StorageError(f"一次请选择 1–{MAX_BATCH_FILES} 个文件。")
+        saved = []
+        try:
+            for item in files:
+                saved.append(uploads.save(item.filename or "", item.file, content_type=item.content_type or ""))
+        except Exception:
+            for item in saved:
+                uploads.discard(str(item["upload_id"]))
+            raise
+        return saved
+
     @app.post("/intake/jobs")
     def create_intake_jobs(request: IntakeJobCreate):
-        sources: list[Path] = []
+        sources: list[tuple[Path, str | None]] = []
         seen: set[Path] = set()
+        for upload_id in request.upload_ids:
+            source, _metadata = uploads.resolve(upload_id)
+            resolved = source.resolve()
+            if resolved not in seen:
+                seen.add(resolved)
+                sources.append((resolved, upload_id))
         for raw in request.paths:
-            source = Path(raw).expanduser().resolve()
+            try:
+                source = validate_source(raw)
+            except ValueError as error:
+                raise StorageError(str(error)) from error
             if source in seen:
                 continue
-            if not source.is_file() or source.suffix.casefold() != ".pdf":
-                raise StorageError(f"第一阶段仅支持有效 PDF：{source}")
             seen.add(source)
-            sources.append(source)
+            sources.append((source, None))
         if not sources:
-            raise StorageError("请选择至少一个 PDF。")
+            raise StorageError("请选择至少一个 MinerU 支持的文件。")
 
-        options = request.model_dump(exclude={"paths"})
+        options = request.model_dump(exclude={"paths", "upload_ids"})
         token_configured = bool(get_mineru_token())
         jobs = []
-        for source in sources:
+        for source, upload_id in sources:
             project = store.create_project(
-                source, source_language=request.language,
+                source, source_language="auto",
             )
             job = ocr.create(project["project_id"], **options)
             if token_configured:
                 manager.start_ocr(job["job_id"])
             jobs.append(ocr.get(job["job_id"]))
+            if upload_id:
+                uploads.discard(upload_id)
         return {"jobs": jobs, "token_configured": token_configured}
 
     @app.get("/ocr/jobs")

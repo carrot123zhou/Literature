@@ -16,9 +16,12 @@ export async function initializeApi() {
 }
 
 export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
+  const headers = new Headers(init.headers);
+  headers.set("x-literature-token", token);
+  if (!(init.body instanceof FormData) && !headers.has("content-type")) headers.set("content-type", "application/json");
   const response = await fetch(`${base}${path}`, {
     ...init,
-    headers: { "content-type": "application/json", "x-literature-token": token, ...(init.headers || {}) },
+    headers,
   });
   if (!response.ok) {
     const value = await response.json().catch(() => ({ detail: response.statusText }));

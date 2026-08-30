@@ -25,6 +25,10 @@ button:hover { border-color: var(--mineru-accent); }
 .viewer-toolbar { justify-content: space-between; padding: 0 12px; background: rgba(255,255,255,.9); border-bottom-color: var(--mineru-border); }
 .viewer-toolbar > div { display: flex; align-items: center; gap: 10px; }
 .pdf-scroll { background: #e9ebee; }
+.source-preview-placeholder { width: min(520px,calc(100% - 40px)); margin: 48px auto; padding: 32px; border: 1px solid #d7ddd8; border-radius: 12px; background: #fff; text-align: center; }
+.source-preview-placeholder strong,.source-preview-placeholder span { display: block; }
+.source-preview-placeholder span { margin: 10px auto 18px; color: #9a4d12; font-weight: 700; }
+.source-preview-placeholder p { color: #6b7280; line-height: 1.6; }
 .bbox { border-color: #f9731666; background: #f9731609; }
 .bbox:hover, .bbox.selected { border-color: var(--mineru-accent); background: #f9731626; box-shadow: 0 0 0 2px #f9731622; }
 .block-card.selected { background: #fff7ed; box-shadow: inset 3px 0 var(--mineru-accent); }
@@ -100,6 +104,8 @@ button:hover { border-color: var(--mineru-accent); }
 .intake-main-column { padding: 16px; }
 .intake-dropzone { min-height: 250px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 9px; border: 1.5px dashed #bfc9c1; border-radius: 10px; background: #fbfcf8; transition: .2s ease; }
 .intake-dropzone.dragging { border-color: #83a91b; background: #f3f8e6; box-shadow: inset 0 0 0 2px #9fc32f2e; }
+.intake-file-input { width: 126px; margin-top: 6px; color: transparent; font-size: 0; }
+.intake-file-input::file-selector-button { width: 126px; border: 1px solid #20322b; border-radius: 8px; padding: 10px 15px; background: #c8e569; color: #20322b; cursor: pointer; font-size: 13px; font-weight: 700; }
 .intake-dropzone > strong { font-size: 18px; }
 .intake-dropzone > span,.intake-dropzone > small { color: #748078; }
 .intake-dropzone > button { margin-top: 6px; }
@@ -124,7 +130,8 @@ button:hover { border-color: var(--mineru-accent); }
 .token-button:hover { border-color: #8eaa3a; color: #4d6711; }
 .token-button.configured { border-color: #cbdca5; background: #f0f5df; color: #526b18; }
 .intake-options > label:not(.option-toggle) { display: grid; gap: 6px; font-size: 12px; color: #65736c; }
-.intake-options select,.token-dialog input { width: 100%; border: 1px solid #cbd4cd; border-radius: 7px; padding: 9px; background: white; }
+.intake-options select,.intake-options input[type="text"],.token-dialog input { width: 100%; border: 1px solid #cbd4cd; border-radius: 7px; padding: 9px; background: white; }
+.intake-options label > small { color: #7d8981; line-height: 1.4; }
 .option-toggle { display: flex; align-items: center; justify-content: space-between; }
 .option-toggle span { display: grid; gap: 2px; }
 .option-toggle small { color: #7d8981; }
@@ -132,6 +139,14 @@ button:hover { border-color: var(--mineru-accent); }
 .intake-start { min-height: 44px; margin-top: auto; font-weight: 700; }
 .intake-start:disabled { opacity: .48; cursor: default; }
 .intake-privacy { text-align: center; color: #758078; line-height: 1.45; }
+.mineru-advanced { border-top: 1px solid #e0e5e0; padding-top: 12px; }
+.mineru-advanced summary { cursor: pointer; color: #526b18; font-size: 12px; font-weight: 700; }
+.mineru-advanced > label { display: grid; gap: 6px; margin-top: 12px; color: #65736c; font-size: 12px; }
+.mineru-advanced fieldset { display: flex; gap: 12px; margin: 12px 0 0; border: 1px solid #dce2dc; border-radius: 8px; padding: 10px; }
+.mineru-advanced legend { color: #65736c; font-size: 11px; }
+.mineru-advanced fieldset label { display: flex; align-items: center; gap: 4px; font-size: 11px; }
+.mineru-advanced fieldset input { width: auto; }
+.mineru-advanced p { margin: 10px 0 0; color: #7d8981; font-size: 10px; line-height: 1.5; }
 .intake-progress-card { margin-top: 18px; overflow: hidden; }
 .intake-progress-card > header { padding: 15px 18px; border-bottom: 1px solid #e0e5e0; }
 .intake-progress-card > header > div { display: flex; align-items: baseline; gap: 12px; }

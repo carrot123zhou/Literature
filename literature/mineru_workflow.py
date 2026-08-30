@@ -26,6 +26,11 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, Iterable, Protocol
 
+from .mineru_capabilities import (
+    MAX_BATCH_FILES, SUPPORTED_EXTRA_FORMATS, SUPPORTED_LANGUAGES,
+    SUPPORTED_MODELS, validate_source,
+)
+
 
 SCHEMA_VERSION = 1
 DEFAULT_PAGE_LIMIT = 200
@@ -35,15 +40,8 @@ DEFAULT_MAX_EXTRACTED_BYTES = 4_000_000_000
 DEFAULT_DOWNLOAD_ROUNDS = 2
 DEFAULT_API_BASE = "https://mineru.net"
 MAX_PAGES_PER_FILE = 200
-MAX_BATCH_FILES = 50
 KEYCHAIN_SERVICE = "local.literature.mineru"
 KEYCHAIN_ACCOUNT = "precision-api-token"
-SUPPORTED_MODELS = {"vlm", "pipeline"}
-SUPPORTED_LANGUAGES = {
-    "ch", "ch_server", "en", "japan", "korean", "chinese_cht",
-    "ta", "te", "ka", "el", "th", "latin", "arabic", "cyrillic",
-    "east_slavic", "devanagari",
-}
 DEFAULT_OUTPUT_DIRECTORY_NAME = "MinerU"
 PROJECT_MANIFEST_NAME = "project.json"
 PROJECT_README_NAME = "README.md"
@@ -203,6 +201,8 @@ class SliceJob:
 
     @property
     def page_count(self) -> int:
+        if self.start_page < 1 or self.end_page < 1:
+            return 0
         return self.end_page - self.start_page + 1
 
     def to_dict(self) -> dict[str, Any]:
@@ -236,6 +236,8 @@ class WorkflowJob:
     is_ocr: bool = False
     enable_table: bool = True
     enable_formula: bool = True
+    page_ranges: str = ""
+    extra_formats: list[str] = field(default_factory=list)
     page_limit: int = DEFAULT_PAGE_LIMIT
     max_slice_bytes: int = DEFAULT_MAX_SLICE_BYTES
     keep_original_pdf: bool = True
@@ -351,6 +353,8 @@ def write_project_documents(job: WorkflowJob) -> None:
             "ocr": job.is_ocr,
             "table": job.enable_table,
             "formula": job.enable_formula,
+            "page_ranges": job.page_ranges,
+            "extra_formats": job.extra_formats,
             "pages_per_slice": job.page_limit,
             "keep_original_pdf": job.keep_original_pdf,
         },
@@ -396,7 +400,7 @@ def write_project_documents(job: WorkflowJob) -> None:
 - 表格识别：{'开启' if job.enable_table else '关闭'}
 - 公式识别：{'开启' if job.enable_formula else '关闭'}
 - 每片最多：{job.page_limit} 页
-- 保留原始 PDF：{'是' if job.keep_original_pdf else '否'}
+- 保留原始源文件：{'是' if job.keep_original_pdf else '否'}
 
 Token 只保存在 macOS Keychain，不会写入本目录。
 """
@@ -410,6 +414,31 @@ def plan_page_ranges(page_count: int, page_limit: int = DEFAULT_PAGE_LIMIT) -> l
     if page_limit < 1:
         raise WorkflowError("每片页数必须大于 0。")
     return [(start, min(page_count, start + page_limit - 1)) for start in range(1, page_count + 1, page_limit)]
+
+
+def parse_page_ranges(value: str, page_count: int) -> list[int]:
+    """Validate MinerU page-range syntax and return selected one-based pages."""
+    if not value.strip():
+        return list(range(1, page_count + 1))
+
+    def resolve(number: int) -> int:
+        page = number if number > 0 else page_count + number + 1
+        if page < 1 or page > page_count:
+            raise WorkflowError(f"页码 {number} 超出文档范围 1–{page_count}。")
+        return page
+
+    selected: set[int] = set()
+    for raw in value.split(","):
+        token = raw.strip()
+        match = re.fullmatch(r"(-?\d+)(?:-(-?\d+))?", token)
+        if not match:
+            raise WorkflowError(f"无效页码范围：{token or '(空)'}。示例：2,4-6,10--2")
+        start = resolve(int(match.group(1)))
+        end = resolve(int(match.group(2))) if match.group(2) is not None else start
+        if start > end:
+            raise WorkflowError(f"页码范围起点大于终点：{token}")
+        selected.update(range(start, end + 1))
+    return sorted(selected)
 
 
 def _open_pdf_page_count(path: Path) -> int:
@@ -617,6 +646,7 @@ class MinerUClient:
                 "name": item.upload_name,
                 "data_id": item.data_id,
                 "is_ocr": job.is_ocr,
+                **({"page_ranges": job.page_ranges} if job.page_ranges and Path(job.source_pdf).suffix.casefold() == ".pdf" else {}),
             }
             for item in slices
         ]
@@ -630,6 +660,7 @@ class MinerUClient:
                 "language": job.language,
                 "enable_table": job.enable_table,
                 "enable_formula": job.enable_formula,
+                **({"extra_formats": job.extra_formats} if job.extra_formats else {}),
             },
         )
         data = self._json(response)
@@ -993,14 +1024,21 @@ class MinerUWorkflow:
         is_ocr: bool = False,
         enable_table: bool = True,
         enable_formula: bool = True,
+        page_ranges: str = "",
+        extra_formats: list[str] | None = None,
         page_limit: int = DEFAULT_PAGE_LIMIT,
         max_slice_bytes: int = DEFAULT_MAX_SLICE_BYTES,
         keep_original_pdf: bool = True,
         project_layout: ProjectLayout | None = None,
     ) -> WorkflowJob:
-        source = Path(source_pdf).expanduser().resolve()
-        if not source.is_file() or source.suffix.casefold() != ".pdf":
-            raise WorkflowError(f"请选择有效 PDF：{source}")
+        try:
+            source = validate_source(source_pdf)
+        except ValueError as error:
+            raise WorkflowError(str(error)) from error
+        if source.suffix.casefold() == ".html":
+            model_version = "MinerU-HTML"
+        elif model_version == "MinerU-HTML":
+            raise WorkflowError("MinerU-HTML 只用于 HTML 文件；其他文件请选择 VLM 或 Pipeline。")
         if model_version not in SUPPORTED_MODELS:
             raise WorkflowError(f"不支持的 MinerU 模型：{model_version}")
         language = language.strip() or "ch"
@@ -1008,6 +1046,13 @@ class MinerUWorkflow:
             raise WorkflowError(f"不支持的 MinerU 识别语言：{language}")
         if page_limit < 1 or page_limit > MAX_PAGES_PER_FILE:
             raise WorkflowError(f"每片页数必须在 1–{MAX_PAGES_PER_FILE} 之间。")
+        page_ranges = page_ranges.strip()
+        if page_ranges and source.suffix.casefold() != ".pdf":
+            raise WorkflowError("页码范围只适用于 PDF 文件。")
+        formats = list(dict.fromkeys(extra_formats or []))
+        invalid_formats = set(formats) - SUPPORTED_EXTRA_FORMATS
+        if invalid_formats:
+            raise WorkflowError(f"MinerU 不支持额外输出格式：{', '.join(sorted(invalid_formats))}")
         output = Path(output_epub).expanduser().resolve()
         if output.suffix.casefold() != ".epub":
             output = output.with_suffix(".epub")
@@ -1030,6 +1075,8 @@ class MinerUWorkflow:
             is_ocr=is_ocr,
             enable_table=enable_table,
             enable_formula=enable_formula,
+            page_ranges=page_ranges,
+            extra_formats=formats,
             page_limit=page_limit,
             max_slice_bytes=max_slice_bytes,
             keep_original_pdf=keep_original_pdf,
@@ -1043,9 +1090,10 @@ class MinerUWorkflow:
         output_root: str | Path,
         **options: Any,
     ) -> WorkflowJob:
-        source = Path(source_pdf).expanduser().resolve()
-        if not source.is_file() or source.suffix.casefold() != ".pdf":
-            raise WorkflowError(f"请选择有效 PDF：{source}")
+        try:
+            source = validate_source(source_pdf)
+        except ValueError as error:
+            raise WorkflowError(str(error)) from error
         layout = reserve_project_layout(output_root, source)
         try:
             return self.create_job(
@@ -1084,9 +1132,9 @@ class MinerUWorkflow:
     def _verify_source(self, job: WorkflowJob) -> Path:
         source = Path(job.source_pdf)
         if not source.is_file():
-            raise WorkflowError(f"原始 PDF 已移动或删除：{source}")
+            raise WorkflowError(f"原始文件已移动或删除：{source}")
         if source.stat().st_size != job.source_size or _sha256(source) != job.source_sha256:
-            raise WorkflowError("原始 PDF 自创建任务后已发生变化，请新建任务。")
+            raise WorkflowError("原始文件自创建任务后已发生变化，请新建任务。")
         return source
 
     def _prepare(self, job: WorkflowJob, progress: ProgressCallback | None) -> None:
@@ -1099,9 +1147,30 @@ class MinerUWorkflow:
             )
         job.state = JobState.PREPARING
         job.error = ""
-        self._notify(job, progress, "正在检查并拆分 PDF")
+        self._notify(job, progress, "正在检查文件并准备 MinerU 任务")
         source = self._verify_source(job)
+        if source.suffix.casefold() != ".pdf":
+            job.page_count = 0
+            job.slices = [SliceJob(
+                index=1, start_page=0, end_page=0,
+                data_id=f"{job.job_id}-001", upload_name=source.name,
+                local_pdf=str(source),
+            )]
+            self._notify(job, progress, "原始文件将由 MinerU 转换并解析")
+            return
         page_count = _open_pdf_page_count(source)
+        if job.page_ranges:
+            selected = parse_page_ranges(job.page_ranges, page_count)
+            if len(selected) > MAX_PAGES_PER_FILE:
+                raise WorkflowError(f"所选页码共 {len(selected)} 页，MinerU 单文件最多处理 {MAX_PAGES_PER_FILE} 页。")
+            job.page_count = len(selected)
+            job.slices = [SliceJob(
+                index=1, start_page=1, end_page=len(selected),
+                data_id=f"{job.job_id}-001", upload_name=source.name,
+                local_pdf=str(source),
+            )]
+            self._notify(job, progress, f"将按页码范围 {job.page_ranges} 解析 {len(selected)} 页")
+            return
         split_dir = Path(job.workspace) / "split"
         pieces = split_pdf(
             source, split_dir, page_limit=job.page_limit,
@@ -1147,7 +1216,8 @@ class MinerUWorkflow:
                     client.upload_file(upload_url, item.local_pdf)
                     item.state = SliceState.UPLOADED
                     item.error = ""
-                    self._notify(job, progress, f"已上传切片 {item.index}/{len(job.slices)}（{item.start_page}–{item.end_page} 页）")
+                    scope = f"（{item.start_page}–{item.end_page} 页）" if item.start_page else ""
+                    self._notify(job, progress, f"已上传文件 {item.index}/{len(job.slices)}{scope}")
                 except Exception as error:
                     item.state = SliceState.FAILED
                     item.error = str(error)
@@ -1236,7 +1306,8 @@ class MinerUWorkflow:
                 self._notify(job, progress, "已在安全边界停止下载；可稍后继续")
                 return False
             archive = downloads / f"{item.index:03d}.zip"
-            result_dir = slices_root / f"{item.index:03d}_p{item.start_page:06d}-{item.end_page:06d}"
+            scope = f"p{item.start_page:06d}-{item.end_page:06d}" if item.start_page else "file"
+            result_dir = slices_root / f"{item.index:03d}_{scope}"
             try:
                 for download_round in range(1, DEFAULT_DOWNLOAD_ROUNDS + 1):
                     try:
@@ -1289,7 +1360,7 @@ class MinerUWorkflow:
             auto_order=False,
             dedupe_boundaries=False,
             merge_origin_pdf=False,
-            source_pdf=job.source_pdf if job.keep_original_pdf else None,
+            source_pdf=job.source_pdf if job.keep_original_pdf and Path(job.source_pdf).suffix.casefold() == ".pdf" else None,
         )
 
     def _merge(self, job: WorkflowJob, progress: ProgressCallback | None) -> None:

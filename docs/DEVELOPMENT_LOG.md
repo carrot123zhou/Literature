@@ -2,6 +2,33 @@
 
 > 本日志记录可验证事实、架构决策和仍需外部条件完成的验收。更新代码时应同步更新本文，避免把“已编码”“已测试”和“已用真实服务验证”混为一谈。
 
+## 2026-08-31：WebUI 优先与 MinerU 全格式导入
+
+### 已实现
+
+- 开发优先级从 Tauri 桌面端调整为 WebUI；已有桌面源码保留，但当前模块不再依赖 Tauri 文件路径能力。
+- 使用标准 `<input type="file" multiple>` 与浏览器拖放事件建立待处理队列；点击会打开系统文件选择窗口。
+- 新增 FastAPI multipart 流式上传暂存接口，项目创建后保存为 `source/origin.<原扩展名>`，不再固定为 `origin.pdf`。
+- 输入格式对齐 MinerU 精准解析本地文件接口：PDF、DOC/DOCX、PPT/PPTX、XLS/XLSX、PNG/JPG/JPEG/JP2/WEBP/GIF/BMP、HTML。
+- PDF 继续自动按 200 页及 200MB 分片；非 PDF 作为完整原件交给 MinerU 转换，远端限制会保留为可操作错误。
+- 前端展示并持久化 MinerU VLM/Pipeline（HTML 自动 MinerU-HTML）、全部官方语言包、OCR、表格、公式、PDF 页码范围和 DOCX/HTML/LaTeX 额外输出。
+- `data_id`、轮询和结果匹配由 Literature 托管；本地文件流程不要求用户配置公网 callback/seed，也不展示只适用于 URL 的缓存参数。
+- 新增根目录 `PROJECT_PLAN.md` 和 `AGENTS.md`，规定新 agent 或上下文恢复后先读取总体计划与开发日志。
+- 非 PDF 项目完成后不会错误加载 PDF.js；结构校对页先提供结构块/Markdown/JSON，并明确标记原件预览仍待完善。
+- 旧项目没有 `source_type` 时按旧版 PDF 项目处理，避免迁移后丢失原页预览。
+
+### 已验证
+
+- Python 自动化测试：`23 passed`，覆盖 Web multipart 上传、DOCX/HTML 项目、HTML 模型自动选择、任务设置快照、官方 MinerU 请求参数与非 PDF 准备流程。
+- TypeScript 类型检查和 Vite 生产构建通过。
+- 浏览器中实际触发系统文件选择器，确认支持多选；选择 DOCX 后文件名、大小、类型进入队列并启用“开始解析”。
+- 浏览器验收完整语言包、模型、OCR/表格/公式、页码范围和额外输出设置；未点击“开始解析”，未把测试文件发送给 MinerU。
+
+### 尚待真实服务验收
+
+- 需要用户选取可公开测试的短 PDF、图片、DOCX、PPTX、XLSX 和 HTML，逐类验证 MinerU 在线上传、转换、轮询、下载与规范化结果。
+- 真实多格式 smoke test 前不把“官方接口允许”表述为“所有格式已由真实服务跑通”。
+
 ## 2026-08-30：PDF 导入与 MinerU 分段进度工作台
 
 ### 已实现

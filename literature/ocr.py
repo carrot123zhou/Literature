@@ -48,14 +48,19 @@ class MinerUService:
     def create(
         self, project_id: str, *, language: str = "auto", model_version: str = "vlm",
         is_ocr: bool = True, enable_table: bool = True, enable_formula: bool = True,
+        page_ranges: str = "", extra_formats: list[str] | None = None,
         page_limit: int = 200,
     ) -> dict[str, Any]:
         project = self.store.project_path(project_id)
-        source = project / "source" / "origin.pdf"
+        source = self.store.source_path(project_id)
+        is_pdf = source.suffix.casefold() == ".pdf"
+        is_html = source.suffix.casefold() == ".html"
         job = self.workflow.create_job(
             source, project / "exports" / ".mineru-workflow.epub",
             model_version=model_version, language=LANGUAGE_MAP.get(language, language), is_ocr=is_ocr,
-            enable_table=enable_table, enable_formula=enable_formula, page_limit=page_limit,
+            enable_table=enable_table, enable_formula=enable_formula,
+            page_ranges=page_ranges if is_pdf else "",
+            extra_formats=[] if is_html else extra_formats, page_limit=page_limit,
             keep_original_pdf=False,
         )
         atomic_json(self._bridge_path(job.job_id), {"project_id": project_id})
@@ -100,6 +105,8 @@ class MinerUService:
                 title=manifest.get("title") or Path(job.source_pdf).stem,
                 project_state=manifest.get("state", ""),
                 source_size=manifest.get("source_size", job.source_size),
+                source_name=manifest.get("source_name", Path(job.source_pdf).name),
+                source_type=manifest.get("source_type", "pdf"),
             )
             output.append(value)
         return sorted(output, key=lambda item: item["created_at"], reverse=True)
@@ -114,6 +121,8 @@ class MinerUService:
             title=manifest.get("title") or Path(job.source_pdf).stem,
             project_state=manifest.get("state", ""),
             source_size=manifest.get("source_size", job.source_size),
+            source_name=manifest.get("source_name", Path(job.source_pdf).name),
+            source_type=manifest.get("source_type", "pdf"),
         )
         return value
 
@@ -139,6 +148,10 @@ class MinerUService:
         return {
             "job_id": job.job_id, "state": job.state.value, "error": job.error,
             "page_count": job.page_count, "page_limit": job.page_limit, "output": job.output_epub,
+            "model_version": job.model_version, "language": job.language,
+            "is_ocr": job.is_ocr, "enable_table": job.enable_table,
+            "enable_formula": job.enable_formula, "page_ranges": job.page_ranges,
+            "extra_formats": job.extra_formats,
             "slice_count": len(job.slices),
             "completed_slices": sum(item.state.value in completed_states for item in job.slices),
             "downloaded_slices": sum(item.state.value == "downloaded" for item in job.slices),
