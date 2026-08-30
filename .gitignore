@@ -1,0 +1,59 @@
+# macOS and editor metadata
+.DS_Store
+.AppleDouble
+.LSOverride
+*.swp
+*.swo
+.idea/
+.vscode/
+
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.p12
+*.key
+
+# Python environments, caches, and packaging output
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+build/
+dist/
+*.spec
+
+# Frontend dependencies and generated output
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+*.tsbuildinfo
+
+# Rust and Tauri generated output
+src-tauri/target/
+src-tauri/binaries/
+src-tauri/gen/
+*.app
+*.dmg
+
+# Local runtime state and logs
+runtime/
+.runtime/
+*.log
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+
+# Temporary files
+.cache/
+.tmp/
+tmp/
+*.tmp
+*.bak
