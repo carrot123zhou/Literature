@@ -119,8 +119,10 @@ button:hover { border-color: var(--mineru-accent); }
 .intake-queue article > button { border: 0; background: transparent; font-size: 19px; }
 .file-kind { display: grid; place-items: center; width: 38px; height: 42px; border-radius: 5px; background: #df6a58; color: white; font-size: 9px; font-weight: 700; }
 .intake-options { padding: 18px; display: flex; flex-direction: column; gap: 17px; }
-.intake-options > div:first-child { display: flex; justify-content: space-between; }
-.intake-options > div:first-child small { color: #748078; }
+.intake-option-title { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.token-button { border: 1px solid #d4dbd5; border-radius: 7px; padding: 6px 9px; background: #fff; color: #526159; font-size: 11px; font-weight: 650; white-space: nowrap; }
+.token-button:hover { border-color: #8eaa3a; color: #4d6711; }
+.token-button.configured { border-color: #cbdca5; background: #f0f5df; color: #526b18; }
 .intake-options > label:not(.option-toggle) { display: grid; gap: 6px; font-size: 12px; color: #65736c; }
 .intake-options select,.token-dialog input { width: 100%; border: 1px solid #cbd4cd; border-radius: 7px; padding: 9px; background: white; }
 .option-toggle { display: flex; align-items: center; justify-content: space-between; }
@@ -170,6 +172,12 @@ button:hover { border-color: var(--mineru-accent); }
 .token-dialog p { color: #68766f; }
 .token-dialog label { display: grid; gap: 6px; margin: 14px 0; }
 .token-dialog > .primary { width: 100%; }
+.token-saved-state { display: grid; grid-template-columns: 36px minmax(0,1fr) auto; align-items: center; gap: 11px; margin-top: 16px; padding: 13px; border: 1px solid #dce7c0; border-radius: 9px; background: #f6f9ec; }
+.token-saved-state > i { display: grid; place-items: center; width: 32px; height: 32px; border-radius: 50%; background: #87b816; color: white; font-style: normal; font-weight: 800; }
+.token-saved-state > div { display: grid; gap: 3px; min-width: 0; }
+.token-saved-state span { color: #6e7965; font-size: 11px; line-height: 1.4; }
+.token-saved-state button { border: 1px solid #bdc9b4; border-radius: 7px; padding: 7px 9px; background: white; color: #425249; white-space: nowrap; }
+.token-cancel-edit { width: 100%; margin-top: 8px; border: 0; padding: 8px; background: transparent; color: #68766f; }
 
 @media (max-width: 1120px) {
   .topbar { gap: 10px; padding: 0 10px; }
@@ -187,6 +195,6 @@ button:hover { border-color: var(--mineru-accent); }
 @media (max-width: 900px) {
   .intake-card { grid-template-columns: 1fr; }
   .intake-options { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); }
-  .intake-options > div:first-child,.intake-start,.intake-privacy { grid-column: 1 / -1; }
+  .intake-option-title,.intake-start,.intake-privacy { grid-column: 1 / -1; }
   .existing-projects > div { grid-template-columns: repeat(2,minmax(0,1fr)); }
 }

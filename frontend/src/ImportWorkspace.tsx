@@ -48,6 +48,7 @@ export default function ImportWorkspace({ projects, refreshProjects, openProject
   const [formulas, setFormulas] = useState(true);
   const [tokenConfigured, setTokenConfigured] = useState(false);
   const [tokenDialog, setTokenDialog] = useState(false);
+  const [tokenEditing, setTokenEditing] = useState(false);
   const [token, setToken] = useState("");
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
@@ -122,10 +123,15 @@ export default function ImportWorkspace({ projects, refreshProjects, openProject
     setBusy(true);
     try {
       await api("/mineru/token", { method: "PUT", body: JSON.stringify({ value: token }) });
-      setToken(""); setTokenConfigured(true); setTokenDialog(false);
+      setToken(""); setTokenConfigured(true); setTokenEditing(false);
       setMessage("MinerU Token 已保存到 macOS Keychain。现在可以开始解析。");
     } catch (error) { setMessage(String(error)); }
     finally { setBusy(false); }
+  };
+  const openTokenSettings = () => {
+    setToken("");
+    setTokenEditing(!tokenConfigured);
+    setTokenDialog(true);
   };
   const retry = async (job: OcrJob) => {
     setBusy(true);
@@ -146,7 +152,7 @@ export default function ImportWorkspace({ projects, refreshProjects, openProject
     <header className="intake-topbar">
       <button className="intake-brand">Literature</button>
       <nav><button className="active">导入与解析</button><button disabled>结构校对</button><button disabled>阅读与翻译</button><button disabled>导出</button></nav>
-      <button onClick={() => setTokenDialog(true)}>⚙ MinerU 设置</button>
+      <button onClick={openTokenSettings}>⚙ 设置</button>
     </header>
     <main className="intake-content">
       <section className="intake-heading"><div><span className="eyebrow">DOCUMENT INTAKE</span><h1>导入与解析</h1><p>添加 PDF 文献，使用 MinerU 生成结构化解析数据。</p></div><span className={`token-state ${tokenConfigured ? "configured" : ""}`}>● {tokenConfigured ? "MinerU 已连接" : "MinerU 未配置"}</span></section>
@@ -161,7 +167,7 @@ export default function ImportWorkspace({ projects, refreshProjects, openProject
           <div className="intake-queue">{paths.length ? paths.map(path => <article key={path}><span className="file-kind">PDF</span><div><strong>{basename(path)}</strong><small>{path}</small></div><button aria-label="移除文件" onClick={() => setPaths(current => current.filter(value => value !== path))}>×</button></article>) : <div className="intake-empty">尚未选择文件</div>}</div>
         </div>
         <aside className="intake-options">
-          <div><strong>解析设置</strong><small>MinerU VLM</small></div>
+          <div className="intake-option-title"><strong>解析设置</strong><button className={tokenConfigured ? "token-button configured" : "token-button"} onClick={openTokenSettings}>🔑 {tokenConfigured ? "Token 已保存" : "设置 Token"}</button></div>
           <label>文档语言<select value={language} onChange={event => setLanguage(event.target.value)}><option value="auto">自动检测</option><option value="en">英语</option><option value="ja">日语</option><option value="fr">法语</option><option value="de">德语</option></select></label>
           <label className="option-toggle"><span><strong>OCR</strong><small>扫描件文字识别</small></span><input type="checkbox" checked={ocr} onChange={event => setOcr(event.target.checked)}/></label>
           <label className="option-toggle"><span><strong>表格识别</strong><small>保留行列结构</small></span><input type="checkbox" checked={tables} onChange={event => setTables(event.target.checked)}/></label>
@@ -176,7 +182,7 @@ export default function ImportWorkspace({ projects, refreshProjects, openProject
       </section>
       {standaloneProjects.length > 0 && <section className="existing-projects"><h2>已有项目</h2><div>{standaloneProjects.map(project => <button key={project.project_id} onClick={() => openProject(project.project_id)}><strong>{project.title}</strong><span>{project.state}</span></button>)}</div></section>}
     </main>
-    {tokenDialog && <div className="modal-backdrop" onClick={() => setTokenDialog(false)}><section className="token-dialog" onClick={event => event.stopPropagation()}><div className="panel-title"><h2>MinerU 连接</h2><button onClick={() => setTokenDialog(false)}>关闭</button></div><p>Token 只会保存到 macOS Keychain，不写入项目或日志。</p><label>MinerU Token<input type="password" value={token} onChange={event => setToken(event.target.value)} placeholder={tokenConfigured ? "已配置；输入新 Token 可替换" : "请输入 MinerU Token"}/></label><button className="primary" disabled={!token.trim() || busy} onClick={saveToken}>保存 Token</button></section></div>}
+    {tokenDialog && <div className="modal-backdrop" onClick={() => setTokenDialog(false)}><section className="token-dialog" onClick={event => event.stopPropagation()}><div className="panel-title"><h2>MinerU API Token</h2><button onClick={() => setTokenDialog(false)}>关闭</button></div><p>Token 只会保存到 macOS Keychain，不写入项目、日志或导出文件。</p>{tokenConfigured && !tokenEditing ? <div className="token-saved-state"><i>✓</i><div><strong>Token 已安全保存</strong><span>为保护密钥安全，Literature 不回显完整 Token。</span></div><button onClick={() => setTokenEditing(true)}>替换 Token</button></div> : <><label>MinerU Token<input autoFocus type="password" value={token} onChange={event => setToken(event.target.value)} placeholder="请输入 MinerU Token"/></label><button className="primary" disabled={!token.trim() || busy} onClick={saveToken}>{busy ? "正在保存…" : tokenConfigured ? "保存新 Token" : "保存 Token"}</button>{tokenConfigured && <button className="token-cancel-edit" onClick={() => { setToken(""); setTokenEditing(false); }}>取消替换</button>}</>}</section></div>}
     {message && <button className="toast" onClick={() => setMessage("")}>{message}</button>}
   </div>;
 }
