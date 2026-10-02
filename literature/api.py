@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import secrets
 import threading
@@ -13,20 +14,24 @@ from pathlib import Path
 from typing import Any, Literal
 
 from fastapi import File, UploadFile
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from .exporters import export_all
 from .mineru import detect_language, import_mineru
 from .mineru_capabilities import MAX_BATCH_FILES, validate_source
-from .mineru_workflow import WorkflowError
+from .mineru_workflow import MinerUClient, WorkflowError
 from .models import UsageRecord
 from .ocr import MinerUService, delete_mineru_token, get_mineru_token, save_mineru_token
 from .providers import PROVIDER_PRESETS, OpenAICompatibleProvider, ProviderConfig, ProviderError, delete_api_key, get_api_key, save_api_key
+from .runtime_revision import RUNTIME_REVISION
 from .storage import ProjectStore, StorageError
 from .structure import analyze_structure, analyze_structure_with_provider, apply_automatic, apply_patch, find_toc_page_candidates, revert_patch, structure_model_payload
 from .tbl import TBLBridge
 from .translation import TranslationService, draft_glossary
 from .uploads import UploadStore
+
+
+logger = logging.getLogger(__name__)
 
 
 def application_support() -> Path:
@@ -57,6 +62,7 @@ class ProjectCreate(BaseModel):
 
 
 class ProjectUpdate(BaseModel):
+    title: str | None = Field(default=None, max_length=240)
     source_language: Literal["auto", "en", "ja", "fr", "de"] | None = None
     target_language: str | None = None
     chapter_language_overrides: dict[str, Literal["en", "ja", "fr", "de"]] | None = None
@@ -78,7 +84,17 @@ class MinerUJobCreate(BaseModel):
     page_limit: int = Field(default=200, ge=1, le=200)
 
 
+class IntakeItemOptions(BaseModel):
+    upload_id: str = ""
+    path: str = ""
+    page_ranges: str = Field(default="", max_length=2000)
+    extra_formats: list[Literal["docx", "html", "latex"]] = Field(default_factory=list)
+
+
 class IntakeJobCreate(MinerUJobCreate):
+    model_config = ConfigDict(extra="forbid")
+
+    items: list[IntakeItemOptions] = Field(default_factory=list, max_length=MAX_BATCH_FILES)
     upload_ids: list[str] = Field(default_factory=list, max_length=MAX_BATCH_FILES)
     paths: list[str] = Field(default_factory=list, max_length=MAX_BATCH_FILES)
 
@@ -94,7 +110,7 @@ class StructureAnalyze(BaseModel):
 
 class PatchInput(BaseModel):
     block_id: str
-    operation: Literal["set_type", "set_level"]
+    operation: Literal["set_type", "set_level", "set_title"]
     after: str | int
     confidence: float = 1.0
     reason: str = ""
@@ -233,13 +249,19 @@ class JobManager:
             try:
                 self.ocr.run(job_id)
             except Exception:
-                # MinerUWorkflow and MinerUService persist the actionable error.
-                pass
+                # MinerUWorkflow and MinerUService persist the actionable error
+                # for the UI; keep a traceback in the local API log as well.
+                logger.exception("MinerU job %s failed", job_id)
             finally:
                 with self.ocr_lock:
                     self.ocr_running.discard(job_id)
 
-        self.executor.submit(run)
+        try:
+            self.executor.submit(run)
+        except Exception:
+            with self.ocr_lock:
+                self.ocr_running.discard(job_id)
+            raise
         return True
 
     def resume_ocr_jobs(self) -> int:
@@ -268,6 +290,12 @@ def create_app(store: ProjectStore | None = None):
         raise RuntimeError("缺少 FastAPI，请安装 Literature Python 依赖。") from error
 
     store = store or ProjectStore()
+    try:
+        store.assert_accessible()
+    except StorageError as error:
+        # This happens before FastAPI can serve a useful error response.  Make
+        # startup fail instead of running against a partially visible library.
+        raise RuntimeError(str(error)) from error
     ocr = MinerUService(store)
     manager = JobManager(store, ocr)
     uploads = UploadStore(application_support() / "uploads")
@@ -284,10 +312,13 @@ def create_app(store: ProjectStore | None = None):
     app = FastAPI(title="Literature Local API", version="0.1.0", lifespan=lifespan)
     app.state.session_token = token
     app.state.store = store
+    app.state.ocr_service = ocr
+    app.state.upload_store = uploads
     app.state.job_manager = manager
     app.add_middleware(
         CORSMiddleware,
         allow_origins=["http://localhost:1420", "http://127.0.0.1:1420", "tauri://localhost", "https://tauri.localhost"],
+        allow_origin_regex=r"https?://(localhost|127\.0\.0\.1):\d+",
         allow_credentials=False, allow_methods=["*"], allow_headers=["*"],
     )
 
@@ -315,7 +346,12 @@ def create_app(store: ProjectStore | None = None):
 
     @app.get("/health")
     def health():
-        return {"status": "ok", "version": "0.1.0"}
+        return {
+            "status": "ok",
+            "version": "0.1.0",
+            "runtime_revision": RUNTIME_REVISION,
+            "capabilities": ["intake_items_v1", "structure_review_v2"],
+        }
 
     @app.get("/projects")
     def projects():
@@ -330,31 +366,56 @@ def create_app(store: ProjectStore | None = None):
 
     @app.get("/projects/{project_id}")
     def project(project_id: str):
-        return {**store.load_manifest(project_id), "jobs": store.list_jobs(project_id), "usage": store.usage_summary(project_id)}
+        return {**store.describe_project(project_id), "jobs": store.list_jobs(project_id), "usage": store.usage_summary(project_id)}
 
     @app.patch("/projects/{project_id}")
     def update_project(project_id: str, request: ProjectUpdate):
-        document = store.load_document(project_id)
+        if request.title is not None:
+            store.rename_project(project_id, request.title)
+
+        project_path = store.project_path(project_id)
+        has_document = (project_path / "document" / "document.json").is_file()
+        document_changes_requested = any(value is not None for value in (
+            request.source_language, request.target_language, request.chapter_language_overrides,
+        ))
+        if document_changes_requested and not has_document:
+            raise StorageError("项目尚未生成规范文档，当前只能重命名或调整预算。")
+
         changes: dict[str, Any] = {}
-        if request.source_language is not None:
-            document.source_language_mode = request.source_language
-            document.source_language = detect_language(document.blocks) if request.source_language == "auto" else request.source_language
-            changes.update(source_language=document.source_language, source_language_mode=request.source_language)
-        if request.target_language is not None:
-            document.target_language = request.target_language
-            changes["target_language"] = request.target_language
-        if request.chapter_language_overrides is not None:
-            for block_id in request.chapter_language_overrides:
-                block = document.block(block_id)
-                if block.type != "title":
-                    raise HTTPException(status_code=400, detail=f"章节语言覆盖必须挂接标题 block：{block_id}")
-            document.chapter_language_overrides = dict(request.chapter_language_overrides)
-            changes["chapter_language_overrides"] = document.chapter_language_overrides
         if request.budget_usd is not None:
             changes["budget_usd"] = request.budget_usd
-        store.save_document(document)
-        manifest = store.update_manifest(project_id, **changes)
-        return {**document.to_dict(), "budget_usd": manifest.get("budget_usd", 0)}
+        if has_document:
+            document = store.load_document(project_id)
+            if request.source_language is not None:
+                document.source_language_mode = request.source_language
+                document.source_language = detect_language(document.blocks) if request.source_language == "auto" else request.source_language
+                changes.update(source_language=document.source_language, source_language_mode=request.source_language)
+            if request.target_language is not None:
+                document.target_language = request.target_language
+                changes["target_language"] = request.target_language
+            if request.chapter_language_overrides is not None:
+                for block_id in request.chapter_language_overrides:
+                    block = document.block(block_id)
+                    if block.type != "title":
+                        raise HTTPException(status_code=400, detail=f"章节语言覆盖必须挂接标题 block：{block_id}")
+                document.chapter_language_overrides = dict(request.chapter_language_overrides)
+                changes["chapter_language_overrides"] = document.chapter_language_overrides
+            store.save_document(document)
+            manifest = store.update_manifest(project_id, **changes) if changes else store.load_manifest(project_id)
+            return {**document.to_dict(), "budget_usd": manifest.get("budget_usd", 0)}
+        if changes:
+            store.update_manifest(project_id, **changes)
+        return store.describe_project(project_id)
+
+    @app.delete("/projects/{project_id}")
+    def delete_project(project_id: str):
+        active_ocr_states = {"queued", "preparing", "uploading", "processing", "downloading", "merging", "waiting"}
+        active_ocr = [job for job in ocr.list(project_id) if job["state"] in active_ocr_states]
+        active_jobs = [job for job in store.list_jobs(project_id) if job["status"] in {"queued", "running"}]
+        if active_ocr or active_jobs:
+            raise HTTPException(status_code=409, detail="项目仍有运行或等待中的任务，请等待任务结束后再删除。")
+        ocr.archive_project_jobs(project_id)
+        return store.delete_project(project_id)
 
     @app.get("/projects/{project_id}/document")
     def document(project_id: str):
@@ -381,6 +442,32 @@ def create_app(store: ProjectStore | None = None):
             raise HTTPException(status_code=404, detail="asset not found")
         return FileResponse(path)
 
+    @app.get("/projects/{project_id}/raw")
+    def raw_files(project_id: str):
+        """列出已封存的 MinerU 原始文件，供对照阅读核对逐格式输出。"""
+        manifest_path = store.project_path(project_id) / "ocr" / "raw" / "manifest.json"
+        if not manifest_path.is_file():
+            return {"files": []}
+        value = json.loads(manifest_path.read_text(encoding="utf-8"))
+        files = [
+            {"path": str(item.get("path", "")), "size": int(item.get("size", 0)), "sha256": str(item.get("sha256", ""))}
+            for slice_info in value.get("slices", [])
+            for item in slice_info.get("files", [])
+        ]
+        return {"files": files}
+
+    @app.get("/projects/{project_id}/raw/{name:path}")
+    def raw_file(project_id: str, name: str):
+        """只读读取封存原始文件；路径必须落在 ocr/raw/mineru/ 之内。"""
+        project = store.project_path(project_id).resolve()
+        root = (project / "ocr" / "raw" / "mineru").resolve()
+        candidate = (project / name).resolve()
+        if candidate != root and root not in candidate.parents:
+            raise HTTPException(status_code=400, detail="invalid raw path")
+        if not candidate.is_file():
+            raise HTTPException(status_code=404, detail="raw file not found")
+        return FileResponse(candidate)
+
     @app.post("/projects/{project_id}/mineru/import")
     def mineru_import(project_id: str, request: MinerUImport):
         return import_mineru(store, project_id, request.paths).to_dict()
@@ -393,6 +480,15 @@ def create_app(store: ProjectStore | None = None):
     @app.get("/mineru/token")
     def mineru_token_status():
         return {"configured": bool(get_mineru_token())}
+
+    @app.post("/mineru/token/check")
+    def mineru_token_check():
+        client = MinerUClient(get_mineru_token(), max_attempts=2)
+        try:
+            client.check_token()
+        finally:
+            client.close()
+        return {"configured": True, "connected": True}
 
     @app.put("/mineru/token")
     def mineru_token_save(request: SecretInput):
@@ -422,41 +518,94 @@ def create_app(store: ProjectStore | None = None):
             raise
         return saved
 
+    @app.delete("/intake/uploads/{upload_id}")
+    def discard_intake_upload(upload_id: str):
+        uploads.discard(upload_id)
+        return {"discarded": True}
+
     @app.post("/intake/jobs")
     def create_intake_jobs(request: IntakeJobCreate):
-        sources: list[tuple[Path, str | None]] = []
-        seen: set[Path] = set()
-        for upload_id in request.upload_ids:
-            source, _metadata = uploads.resolve(upload_id)
-            resolved = source.resolve()
-            if resolved not in seen:
-                seen.add(resolved)
-                sources.append((resolved, upload_id))
-        for raw in request.paths:
-            try:
-                source = validate_source(raw)
-            except ValueError as error:
-                raise StorageError(str(error)) from error
-            if source in seen:
-                continue
-            seen.add(source)
-            sources.append((source, None))
-        if not sources:
-            raise StorageError("请选择至少一个 MinerU 支持的文件。")
+        request_upload_ids = {
+            item.upload_id for item in request.items if item.upload_id
+        } | set(request.upload_ids)
+        sources: list[tuple[Path, str | None, IntakeItemOptions | None]] = []
+        created_project_ids: list[str] = []
+        try:
+            seen: set[Path] = set()
+            if request.items and (request.upload_ids or request.paths):
+                raise StorageError("逐文件设置不能与旧版批量文件字段同时使用。")
+            if request.items:
+                for item in request.items:
+                    if bool(item.upload_id) == bool(item.path):
+                        raise StorageError("每个文件设置必须且只能指定 upload_id 或 path。")
+                    if item.upload_id:
+                        source, _metadata = uploads.resolve(item.upload_id)
+                        upload_id: str | None = item.upload_id
+                    else:
+                        try:
+                            source = validate_source(item.path)
+                        except ValueError as error:
+                            raise StorageError(str(error)) from error
+                        upload_id = None
+                    resolved = source.resolve()
+                    if resolved not in seen:
+                        seen.add(resolved)
+                        sources.append((resolved, upload_id, item))
+            else:
+                for upload_id in request.upload_ids:
+                    source, _metadata = uploads.resolve(upload_id)
+                    resolved = source.resolve()
+                    if resolved not in seen:
+                        seen.add(resolved)
+                        sources.append((resolved, upload_id, None))
+                for raw in request.paths:
+                    try:
+                        source = validate_source(raw)
+                    except ValueError as error:
+                        raise StorageError(str(error)) from error
+                    if source in seen:
+                        continue
+                    seen.add(source)
+                    sources.append((source, None, None))
+            if not sources:
+                raise StorageError("请选择至少一个 MinerU 支持的文件。")
 
-        options = request.model_dump(exclude={"paths", "upload_ids"})
-        token_configured = bool(get_mineru_token())
-        jobs = []
-        for source, upload_id in sources:
-            project = store.create_project(
-                source, source_language="auto",
-            )
-            job = ocr.create(project["project_id"], **options)
-            if token_configured:
-                manager.start_ocr(job["job_id"])
-            jobs.append(ocr.get(job["job_id"]))
-            if upload_id:
+            options = request.model_dump(exclude={"items", "paths", "upload_ids"})
+            token_configured = bool(get_mineru_token())
+            jobs = []
+            # Build the whole local batch before starting any background work.
+            # If item N fails, items 1..N-1 are moved out of the active indexes
+            # so retrying the batch cannot create hidden duplicates.
+            for source, _upload_id, item in sources:
+                project = store.create_project(source, source_language="auto")
+                project_id = str(project["project_id"])
+                created_project_ids.append(project_id)
+                file_options = dict(options)
+                if item is not None:
+                    file_options.update(page_ranges=item.page_ranges, extra_formats=item.extra_formats)
+                job = ocr.create(project_id, **file_options)
+                jobs.append(ocr.get(job["job_id"]))
+        except Exception:
+            for project_id in reversed(created_project_ids):
+                try:
+                    ocr.archive_project_jobs(project_id)
+                    store.delete_project(project_id)
+                except Exception:
+                    logger.exception("Failed to roll back intake project %s", project_id)
+            for upload_id in request_upload_ids:
                 uploads.discard(upload_id)
+            raise
+
+        for upload_id in request_upload_ids:
+            uploads.discard(upload_id)
+        if token_configured:
+            for job in jobs:
+                try:
+                    manager.start_ocr(job["job_id"])
+                except Exception:
+                    # The persisted queued job remains resumable on the next
+                    # startup; do not turn an accepted batch into a false 400.
+                    logger.exception("Could not start queued MinerU job %s", job["job_id"])
         return {"jobs": jobs, "token_configured": token_configured}
 
     @app.get("/ocr/jobs")

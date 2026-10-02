@@ -23,7 +23,7 @@ class StorageError(RuntimeError):
 
 def default_library_root() -> Path:
     configured = os.environ.get("LITERATURE_LIBRARY", "").strip()
-    return Path(configured).expanduser() if configured else Path.home() / "Documents" / "Literature"
+    return Path(configured).expanduser() if configured else Path.home() / "CdoexProject" / "Literature" / "library"
 
 
 def safe_name(value: str) -> str:
@@ -57,6 +57,35 @@ class ProjectStore:
         self.root = Path(root).expanduser().resolve() if root else default_library_root().resolve()
         self.root.mkdir(parents=True, exist_ok=True)
 
+    def assert_accessible(self) -> None:
+        """Fail fast when macOS lets us address the library but not enumerate it.
+
+        A process launched from a restricted development host can sometimes
+        create a file at a known Documents path while directory enumeration is
+        filtered.  Project lookup is ID-based and therefore depends on a
+        trustworthy directory listing; continuing in that state can overwrite
+        an existing same-name project and then report that its new ID is
+        missing.
+        """
+        probe = self.root / f".literature-access-{uuid.uuid4().hex}.tmp"
+        try:
+            with probe.open("x", encoding="utf-8") as handle:
+                handle.write("Literature library access probe\n")
+            if not any(item.name == probe.name for item in self.root.iterdir()):
+                raise OSError("directory enumeration did not return the access probe")
+            if not probe.is_file() or not probe.read_text(encoding="utf-8"):
+                raise OSError("access probe could not be read back")
+        except OSError as error:
+            raise StorageError(
+                f"Literature 无法完整读写项目库 {self.root}。请完全退出 Literature，"
+                "确认项目仓库仍在原位置且当前用户拥有读写权限后再重新打开。"
+            ) from error
+        finally:
+            try:
+                probe.unlink(missing_ok=True)
+            except OSError:
+                pass
+
     @staticmethod
     @contextmanager
     def _connect(path: Path):
@@ -75,11 +104,19 @@ class ProjectStore:
         for manifest in self.root.glob("*/project.json"):
             try:
                 value = json.loads(manifest.read_text(encoding="utf-8"))
-                value["path"] = str(manifest.parent)
-                projects.append(value)
+                projects.append(self._describe_project(manifest.parent, value))
             except (OSError, ValueError):
                 continue
         return sorted(projects, key=lambda item: item.get("updated_at", ""), reverse=True)
+
+    @staticmethod
+    def _describe_project(project: Path, manifest: dict[str, Any]) -> dict[str, Any]:
+        value = dict(manifest)
+        value["path"] = str(project)
+        value["has_document"] = (project / "document" / "document.json").is_file()
+        value["asset_count"] = sum(1 for item in (project / "assets").glob("*") if item.is_file())
+        value["export_count"] = sum(1 for item in (project / "exports").glob("*") if item.is_file())
+        return value
 
     def project_path(self, project_id: str) -> Path:
         for manifest in self.root.glob("*/project.json"):
@@ -145,6 +182,65 @@ class ProjectStore:
         value["updated_at"] = utc_now()
         atomic_json(project / "project.json", value)
         return value
+
+    def describe_project(self, project_id: str) -> dict[str, Any]:
+        project = self.project_path(project_id)
+        return self._describe_project(project, self.load_manifest(project_id))
+
+    def rename_project(self, project_id: str, title: str) -> dict[str, Any]:
+        title = str(title).strip()
+        if not title:
+            raise StorageError("项目名称不能为空。")
+        if len(title) > 240:
+            raise StorageError("项目名称不能超过 240 个字符。")
+
+        project = self.project_path(project_id)
+        destination = self.root / safe_name(title)
+        if destination.exists():
+            try:
+                is_current = destination.samefile(project)
+            except OSError:
+                is_current = destination.resolve() == project.resolve()
+        else:
+            is_current = False
+        if not is_current:
+            base = destination
+            index = 2
+            while destination.exists():
+                destination = self.root / f"{base.name} ({index})"
+                index += 1
+            project.rename(destination)
+            project = destination
+
+        value = json.loads((project / "project.json").read_text(encoding="utf-8"))
+        value["title"] = title
+        value["updated_at"] = utc_now()
+        atomic_json(project / "project.json", value)
+
+        document_path = project / "document" / "document.json"
+        if document_path.is_file():
+            document = Document.from_dict(json.loads(document_path.read_text(encoding="utf-8")))
+            document.title = title
+            self.save_document(document)
+        return self._describe_project(project, value)
+
+    def delete_project(self, project_id: str) -> dict[str, Any]:
+        """Move a project out of the active library into a recoverable local trash."""
+        project = self.project_path(project_id)
+        value = json.loads((project / "project.json").read_text(encoding="utf-8"))
+        value["deleted_at"] = utc_now()
+        atomic_json(project / "project.json", value)
+        trash = self.root / ".trash"
+        trash.mkdir(parents=True, exist_ok=True)
+        destination = trash / f"{uuid.uuid4().hex}-{project.name}"
+        project.rename(destination)
+        return {
+            "project_id": project_id,
+            "title": value.get("title", project.name),
+            "deleted_at": value["deleted_at"],
+            "recoverable": True,
+            "trash_path": str(destination),
+        }
 
     def save_document(self, document: Document) -> None:
         project = self.project_path(document.project_id)

@@ -48,7 +48,26 @@ LITERATURE_SESSION_TOKEN=literature-dev .venv/bin/python -m literature.api
 VITE_LITERATURE_TOKEN=literature-dev pnpm --dir frontend dev
 ```
 
-默认 API 为 `http://127.0.0.1:41731`。项目数据默认保存在 `~/Documents/Literature/`；API key 保存在 macOS Keychain，不写入项目文件。
+默认 API 为 `http://127.0.0.1:41731`。独立仓库位于 `~/CdoexProject/Literature/`，文档项目数据保存在仓库内的 `library/` 并由 Git 忽略；API key 保存在 macOS Keychain，不写入项目文件。
+
+```text
+~/CdoexProject/Literature/
+  literature/、frontend/、docs/、tests/   # 程序源码与开发文档（Git 跟踪）
+  launcher/Literature.app                # 可重新生成的本地启动器（Git 忽略）
+  library/                                # 原文、MinerU raw、规范文档、译文与导出（Git 忽略）
+```
+
+上传暂存、任务恢复状态和启动器状态仍使用 `~/Library/Application Support/Literature/`，运行日志仍使用 `~/Library/Logs/Literature/`。因此默认运行不再访问 macOS“文稿”目录。
+
+macOS 不要求应用放在 `/Applications`。以下命令会在仓库的 `launcher/` 下生成一键 WebUI 启动器，并在桌面创建名为“Literature”的 Finder 替身：
+
+```bash
+./scripts/setup_macos_launcher.sh
+```
+
+桌面替身指向 `~/CdoexProject/Literature/launcher/Literature.app`。应用包会根据自己的位置找到仓库，不依赖用户名或固定绝对路径；点击后启动本地 API 与 WebUI，并在默认浏览器打开 Literature。运行日志位于 `~/Library/Logs/Literature/`。
+
+仓库迁移后应在新位置重新创建 `.venv`，不能继续使用绑定旧目录的 Python 解释器。启动器会拒绝 `pyvenv.cfg` 仍指向 `~/Documents/` 的虚拟环境，并回退到非 Documents 的可用 Python，避免无关的“文稿”权限请求。
 
 ## 设计边界
 

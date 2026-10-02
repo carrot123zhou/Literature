@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -55,17 +57,26 @@ class MinerUService:
         source = self.store.source_path(project_id)
         is_pdf = source.suffix.casefold() == ".pdf"
         is_html = source.suffix.casefold() == ".html"
-        job = self.workflow.create_job(
-            source, project / "exports" / ".mineru-workflow.epub",
-            model_version=model_version, language=LANGUAGE_MAP.get(language, language), is_ocr=is_ocr,
-            enable_table=enable_table, enable_formula=enable_formula,
-            page_ranges=page_ranges if is_pdf else "",
-            extra_formats=[] if is_html else extra_formats, page_limit=page_limit,
-            keep_original_pdf=False,
-        )
-        atomic_json(self._bridge_path(job.job_id), {"project_id": project_id})
-        self.store.update_manifest(project_id, state="ocr_queued", mineru_job_id=job.job_id)
-        return self.describe(job)
+        job: WorkflowJob | None = None
+        try:
+            job = self.workflow.create_job(
+                source, project / "exports" / ".mineru-workflow.epub",
+                model_version=model_version, language=LANGUAGE_MAP.get(language, language), is_ocr=is_ocr,
+                enable_table=enable_table, enable_formula=enable_formula,
+                page_ranges=page_ranges if is_pdf else "",
+                extra_formats=[] if is_html else extra_formats, page_limit=page_limit,
+                keep_original_pdf=False,
+            )
+            atomic_json(self._bridge_path(job.job_id), {"project_id": project_id})
+            self.store.update_manifest(project_id, state="ocr_queued", mineru_job_id=job.job_id)
+            return self.describe(job)
+        except Exception:
+            # A task that was never returned to the caller must not remain in
+            # the active runtime index.  This also prevents a later startup
+            # resume from running a half-created job without a valid bridge.
+            if job is not None:
+                shutil.rmtree(self.jobs_root / job.job_id, ignore_errors=True)
+            raise
 
     def run(self, job_id: str) -> dict[str, Any]:
         project_id = self._project_for_job(job_id)
@@ -89,17 +100,37 @@ class MinerUService:
     def stop(self) -> None:
         self.workflow.stop_waiting()
 
+    def archive_project_jobs(self, project_id: str) -> int:
+        """Move finished OCR job state out of the active runtime index."""
+        archived = 0
+        trash = self.jobs_root / ".trash"
+        for bridge in self.jobs_root.glob("*/literature-bridge.json"):
+            try:
+                value = json.loads(bridge.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            if value.get("project_id") != project_id:
+                continue
+            trash.mkdir(parents=True, exist_ok=True)
+            workspace = bridge.parent
+            workspace.rename(trash / f"{uuid.uuid4().hex}-{workspace.name}")
+            archived += 1
+        return archived
+
     def list(self, project_id: str | None = None) -> list[dict[str, Any]]:
         output = []
         for job in self.workflow.list_jobs():
             try:
                 mapped = self._project_for_job(job.job_id)
-            except StorageError:
+                manifest = self.store.load_manifest(mapped)
+            except (StorageError, OSError, ValueError, KeyError):
+                # Runtime state can outlive a recoverably deleted project or a
+                # manually moved library.  One orphan must never break the
+                # complete task list or startup resume pass.
                 continue
             if project_id and mapped != project_id:
                 continue
             value = self.describe(job)
-            manifest = self.store.load_manifest(mapped)
             value.update(
                 project_id=mapped,
                 title=manifest.get("title") or Path(job.source_pdf).stem,

@@ -5,7 +5,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 
 class ApiIntegrationTests(unittest.TestCase):
@@ -32,7 +32,8 @@ class ApiIntegrationTests(unittest.TestCase):
         from fastapi.testclient import TestClient
         from literature.api import create_app
         from literature.storage import ProjectStore
-        self.client = TestClient(create_app(ProjectStore(self.root / "library")))
+        self.store = ProjectStore(self.root / "library")
+        self.client = TestClient(create_app(self.store))
         self.headers = {"x-literature-token": self.client.app.state.session_token}
 
     def tearDown(self) -> None:
@@ -42,7 +43,10 @@ class ApiIntegrationTests(unittest.TestCase):
         os.environ.pop("LITERATURE_LIBRARY", None)
 
     def test_authenticated_project_import_and_exports(self) -> None:
-        self.assertEqual(self.client.get("/health").status_code, 200)
+        health = self.client.get("/health")
+        self.assertEqual(health.status_code, 200)
+        self.assertRegex(health.json()["runtime_revision"], r"^[0-9a-f]{20}$")
+        self.assertIn("intake_items_v1", health.json()["capabilities"])
         self.assertEqual(self.client.get("/projects").status_code, 401)
         preflight = self.client.options("/projects", headers={
             "origin": "http://127.0.0.1:1420", "access-control-request-method": "GET",
@@ -113,6 +117,47 @@ class ApiIntegrationTests(unittest.TestCase):
         self.assertEqual(missing.status_code, 400)
         self.assertEqual(self.client.get("/projects/not-real/source.pdf", headers=self.headers).status_code, 400)
 
+    def test_project_library_metadata_rename_and_recoverable_delete(self) -> None:
+        created = self.client.post("/projects", headers=self.headers, json={
+            "source_pdf": str(self.source), "title": "Initial project",
+        })
+        self.assertEqual(created.status_code, 200, created.text)
+        project_id = created.json()["project_id"]
+
+        listed = self.client.get("/projects", headers=self.headers)
+        self.assertEqual(listed.status_code, 200, listed.text)
+        descriptor = listed.json()[0]
+        self.assertFalse(descriptor["has_document"])
+        self.assertEqual(descriptor["asset_count"], 0)
+        self.assertEqual(descriptor["export_count"], 0)
+        self.assertEqual(descriptor["source_size"], self.source.stat().st_size)
+
+        renamed = self.client.patch(
+            f"/projects/{project_id}", headers=self.headers, json={"title": "Renamed before parsing"},
+        )
+        self.assertEqual(renamed.status_code, 200, renamed.text)
+        self.assertEqual(renamed.json()["title"], "Renamed before parsing")
+        self.assertEqual(Path(renamed.json()["path"]).name, "Renamed before parsing")
+
+        imported = self.client.post(
+            f"/projects/{project_id}/mineru/import", headers=self.headers, json={"paths": [str(self.mineru)]},
+        )
+        self.assertEqual(imported.status_code, 200, imported.text)
+        renamed_after_import = self.client.patch(
+            f"/projects/{project_id}", headers=self.headers, json={"title": "Final library title"},
+        )
+        self.assertEqual(renamed_after_import.status_code, 200, renamed_after_import.text)
+        self.assertEqual(renamed_after_import.json()["title"], "Final library title")
+        document = self.client.get(f"/projects/{project_id}/document", headers=self.headers)
+        self.assertEqual(document.json()["title"], "Final library title")
+
+        deleted = self.client.delete(f"/projects/{project_id}", headers=self.headers)
+        self.assertEqual(deleted.status_code, 200, deleted.text)
+        self.assertTrue(deleted.json()["recoverable"])
+        self.assertTrue(Path(deleted.json()["trash_path"]).is_dir())
+        self.assertEqual(self.client.get("/projects", headers=self.headers).json(), [])
+        self.assertEqual(self.client.get(f"/projects/{project_id}", headers=self.headers).status_code, 400)
+
     def test_batch_intake_creates_persistent_queued_jobs(self) -> None:
         with patch("literature.api.get_mineru_token", return_value=""):
             created = self.client.post("/intake/jobs", headers=self.headers, json={
@@ -152,9 +197,12 @@ class ApiIntegrationTests(unittest.TestCase):
         self.assertEqual(item["source_kind"], "word")
         with patch("literature.api.get_mineru_token", return_value=""):
             created = self.client.post("/intake/jobs", headers=self.headers, json={
-                "upload_ids": [item["upload_id"], html["upload_id"]], "language": "latin", "model_version": "pipeline",
+                "items": [
+                    {"upload_id": item["upload_id"], "page_ranges": "", "extra_formats": ["docx", "latex"]},
+                    {"upload_id": html["upload_id"], "page_ranges": "", "extra_formats": ["html"]},
+                ],
+                "language": "latin", "model_version": "pipeline",
                 "is_ocr": False, "enable_table": False, "enable_formula": True,
-                "extra_formats": ["docx", "latex"],
             })
         self.assertEqual(created.status_code, 200, created.text)
         jobs = created.json()["jobs"]
@@ -170,6 +218,24 @@ class ApiIntegrationTests(unittest.TestCase):
         self.assertEqual(html_job["model_version"], "MinerU-HTML")
         self.assertEqual(html_job["extra_formats"], [])
 
+    def test_intake_applies_page_ranges_and_extra_formats_per_file(self) -> None:
+        second = self.root / "second.pdf"
+        second.write_bytes(self.source.read_bytes())
+        with patch("literature.api.get_mineru_token", return_value=""):
+            created = self.client.post("/intake/jobs", headers=self.headers, json={
+                "items": [
+                    {"path": str(self.source), "page_ranges": "1", "extra_formats": ["docx"]},
+                    {"path": str(second), "page_ranges": "", "extra_formats": ["html", "latex"]},
+                ],
+                "language": "ch", "model_version": "vlm",
+            })
+        self.assertEqual(created.status_code, 200, created.text)
+        jobs = {value["source_name"]: value for value in created.json()["jobs"]}
+        self.assertEqual(jobs[self.source.name]["page_ranges"], "1")
+        self.assertEqual(jobs[self.source.name]["extra_formats"], ["docx"])
+        self.assertEqual(jobs[second.name]["page_ranges"], "")
+        self.assertEqual(jobs[second.name]["extra_formats"], ["html", "latex"])
+
     def test_batch_intake_rejects_formats_not_supported_by_mineru(self) -> None:
         document = self.root / "notes.txt"
         document.write_text("not supported", encoding="utf-8")
@@ -177,6 +243,90 @@ class ApiIntegrationTests(unittest.TestCase):
         self.assertEqual(rejected.status_code, 400)
         self.assertIn("MinerU 不支持", rejected.json()["detail"])
         self.assertEqual(self.client.get("/projects", headers=self.headers).json(), [])
+
+    def test_intake_rejects_unknown_newer_client_fields(self) -> None:
+        rejected = self.client.post(
+            "/intake/jobs", headers=self.headers,
+            json={"future_items": [{"path": str(self.source)}]},
+        )
+        self.assertEqual(rejected.status_code, 422, rejected.text)
+        self.assertIn("future_items", rejected.text)
+
+    def test_app_refuses_a_partially_visible_project_library(self) -> None:
+        from literature.api import create_app
+        from literature.storage import ProjectStore, StorageError
+
+        inaccessible = ProjectStore(self.root / "inaccessible-library")
+        with patch.object(inaccessible, "assert_accessible", side_effect=StorageError("library hidden")):
+            with self.assertRaisesRegex(RuntimeError, "library hidden"):
+                create_app(inaccessible)
+
+        filtered = ProjectStore(self.root / "filtered-library")
+        with patch.object(Path, "iterdir", return_value=iter(())):
+            with self.assertRaisesRegex(StorageError, "无法完整读写项目库"):
+                filtered.assert_accessible()
+        self.assertEqual(list(filtered.root.glob(".literature-access-*.tmp")), [])
+
+    def test_orphaned_runtime_job_does_not_break_job_listing(self) -> None:
+        with patch("literature.api.get_mineru_token", return_value=""):
+            created = self.client.post("/intake/jobs", headers=self.headers, json={
+                "paths": [str(self.source)], "language": "ch",
+            })
+        self.assertEqual(created.status_code, 200, created.text)
+        project_id = created.json()["jobs"][0]["project_id"]
+
+        # Simulate a project directory being moved manually while its runtime
+        # bridge remains behind.
+        self.store.delete_project(project_id)
+        listed = self.client.get("/ocr/jobs", headers=self.headers)
+        self.assertEqual(listed.status_code, 200, listed.text)
+        self.assertEqual(listed.json(), [])
+
+    def test_failed_intake_batch_rolls_back_projects_jobs_and_uploads(self) -> None:
+        uploaded = self.client.post(
+            "/intake/uploads", headers=self.headers,
+            files=[
+                ("files", ("first.html", b"<h1>First</h1>", "text/html")),
+                ("files", ("second.html", b"<h1>Second</h1>", "text/html")),
+            ],
+        )
+        self.assertEqual(uploaded.status_code, 200, uploaded.text)
+        upload_ids = [item["upload_id"] for item in uploaded.json()]
+        service = self.client.app.state.ocr_service
+        original_create = service.create
+        calls = 0
+
+        def fail_second(project_id: str, **options):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                from literature.mineru_workflow import WorkflowError
+                raise WorkflowError("synthetic second item failure")
+            return original_create(project_id, **options)
+
+        with patch.object(service, "create", side_effect=fail_second), \
+             patch("literature.api.get_mineru_token", return_value=""):
+            created = self.client.post("/intake/jobs", headers=self.headers, json={
+                "items": [{"upload_id": upload_id} for upload_id in upload_ids],
+            })
+        self.assertEqual(created.status_code, 400, created.text)
+        self.assertIn("synthetic second item failure", created.text)
+        self.assertEqual(self.client.get("/projects", headers=self.headers).json(), [])
+        self.assertEqual(self.client.get("/ocr/jobs", headers=self.headers).json(), [])
+        for upload_id in upload_ids:
+            self.assertFalse((self.root / "runtime" / "uploads" / upload_id).exists())
+
+    def test_mineru_connection_check_uses_saved_token_without_exposing_it(self) -> None:
+        fake_client = MagicMock()
+        with patch("literature.api.get_mineru_token", return_value="secret-token"), \
+             patch("literature.api.MinerUClient", return_value=fake_client) as client_type:
+            checked = self.client.post("/mineru/token/check", headers=self.headers)
+        self.assertEqual(checked.status_code, 200, checked.text)
+        self.assertEqual(checked.json(), {"configured": True, "connected": True})
+        client_type.assert_called_once_with("secret-token", max_attempts=2)
+        fake_client.check_token.assert_called_once_with()
+        fake_client.close.assert_called_once_with()
+        self.assertNotIn("secret-token", checked.text)
 
 
 if __name__ == "__main__":

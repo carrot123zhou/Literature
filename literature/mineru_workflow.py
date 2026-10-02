@@ -65,7 +65,7 @@ def default_output_root() -> Path:
     configured = os.environ.get("LITERATURE_LIBRARY", "").strip()
     if configured:
         return Path(configured).expanduser()
-    return Path.home() / "Documents" / "Literature"
+    return Path.home() / "CdoexProject" / "Literature" / "library"
 
 
 def _truncate_utf8(value: str, max_bytes: int) -> str:

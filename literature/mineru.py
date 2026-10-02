@@ -6,16 +6,20 @@ import json
 import re
 import shutil
 from html.parser import HTMLParser
+from math import isfinite
 from pathlib import Path
 from typing import Any, Iterable
 
-from .models import Block, Cell, Document, Page, TocNode, utc_now
+from .models import BBOX_SPACE_MINERU_1000, BBOX_SPACE_NONE, Block, Cell, Document, Page, TocNode, utc_now
 from .storage import ProjectStore, StorageError, atomic_json, sha256_file
 
 
 IGNORED_TYPES = {"header", "footer", "page_header", "page_footer", "page_number"}
 IMAGE_TYPES = {"image", "chart"}
 NOTE_TYPES = {"aside_text", "page_aside_text", "page_footnote"}
+
+# MinerU 在不同版本里把页面几何写在 middle.json 或 layout.json 的 pdf_info 中。
+PAGE_GEOMETRY_SOURCES = (("*_middle.json", "middle.json"), ("*_layout.json", "layout.json"))
 
 
 class MinerUImportError(RuntimeError):
@@ -136,6 +140,19 @@ def _asset_path(item: dict[str, Any], content: dict[str, Any], directory: Path) 
     return path if path.is_file() else None
 
 
+def _valid_bbox(value: Any) -> list[float]:
+    """只接受 4 个有限数字且 x1>x0、y1>y0 的 bbox；其他情况视为没有 bbox。"""
+    if not isinstance(value, list) or len(value) != 4:
+        return []
+    try:
+        bbox = [float(number) for number in value]
+    except (TypeError, ValueError):
+        return []
+    if not all(isfinite(number) for number in bbox) or bbox[2] <= bbox[0] or bbox[3] <= bbox[1]:
+        return []
+    return bbox
+
+
 def _normalized_block(
     item: dict[str, Any], *, project_id: str, order: int, page_index: int, source_file: str,
     source_directory: Path, assets_directory: Path, resources: dict[str, dict[str, Any]], legacy: bool = False,
@@ -144,7 +161,7 @@ def _normalized_block(
     if raw_kind in IGNORED_TYPES:
         return None
     content = item.get("content") if isinstance(item.get("content"), dict) else {}
-    bbox = item.get("bbox") if isinstance(item.get("bbox"), list) and len(item["bbox"]) == 4 else []
+    bbox = _valid_bbox(item.get("bbox"))
     block_id = f"blk-{order:08d}"
     kind = raw_kind
     level = 0
@@ -154,6 +171,9 @@ def _normalized_block(
     footnote: list[str] = []
     resource_refs: list[str] = []
     format_data: dict[str, Any] = {"mineru_type": raw_kind, "source_file": source_file}
+    if bbox:
+        # MinerU content_list/content_list_v2 的 bbox 是 0-1000 归一化坐标。
+        format_data["bbox_space"] = BBOX_SPACE_MINERU_1000
 
     if raw_kind == "title" or (legacy and raw_kind == "text" and item.get("text_level")):
         kind = "title"
@@ -208,7 +228,7 @@ def _normalized_block(
 
     block = Block(
         block_id=block_id, type=kind, order=order, page_index=page_index, source_text=text,
-        bbox=[float(number) for number in bbox], level=level, items=items,
+        bbox=bbox, level=level, items=items,
         resource_refs=resource_refs, caption=caption, footnote=footnote,
         format=format_data, raw=item,
     )
@@ -282,17 +302,24 @@ def build_toc(blocks: list[Block]) -> list[TocNode]:
     return roots
 
 
-def _page_metadata(directory: Path, project: Path, page_offset: int, page_count: int) -> list[Page]:
-    middle = find_one(directory, ("*_middle.json", "middle.json"))
-    values: list[dict[str, Any]] = []
-    if middle:
+def _page_geometry(directory: Path) -> tuple[Path | None, list[dict[str, Any]]]:
+    """读取页面几何：优先 middle.json，其次 layout.json（当前精准解析实际返回的文件）。"""
+    for patterns in PAGE_GEOMETRY_SOURCES:
+        path = find_one(directory, patterns)
+        if not path:
+            continue
         try:
-            payload = json.loads(middle.read_text(encoding="utf-8"))
-            candidate = payload.get("pdf_info", []) if isinstance(payload, dict) else []
-            if isinstance(candidate, list):
-                values = [item for item in candidate if isinstance(item, dict)]
+            payload = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
-            values = []
+            continue
+        candidate = payload.get("pdf_info") if isinstance(payload, dict) else None
+        if isinstance(candidate, list):
+            return path, [item for item in candidate if isinstance(item, dict)]
+    return None, []
+
+
+def _page_metadata(directory: Path, project: Path, page_offset: int, page_count: int) -> list[Page]:
+    geometry_file, values = _page_geometry(directory)
     pages = []
     for local_index in range(page_count):
         raw = values[local_index] if local_index < len(values) else {}
@@ -306,7 +333,7 @@ def _page_metadata(directory: Path, project: Path, page_offset: int, page_count:
         pages.append(Page(
             page_index=page_offset + local_index, width=width, height=height,
             rotation=int(raw.get("rotation") or 0),
-            source_file=str(middle.relative_to(project)) if middle else "",
+            source_file=str(geometry_file.relative_to(project)) if geometry_file else "",
             source_page_index=source_page_index,
             raw={key: value for key, value in raw.items() if key not in {"preproc_blocks", "para_blocks", "discarded_blocks"}},
         ))
@@ -423,6 +450,7 @@ def normalize_imported_project(store: ProjectStore, project_id: str) -> Document
         project_id=project_id, title=manifest["title"], source_language=source_language,
         source_language_mode=source_language_mode,
         target_language=manifest.get("target_language", "zh-CN"), page_count=page_offset, pages=pages,
+        bbox_space=BBOX_SPACE_MINERU_1000 if any(block.bbox for block in blocks) else BBOX_SPACE_NONE,
         blocks=blocks, resources=resources, source_files=source_files,
     )
     document.toc = build_toc(document.blocks)

@@ -8,13 +8,14 @@ from difflib import SequenceMatcher
 from typing import Any, Iterable
 
 from .mineru import build_toc, render_source_markdown
-from .models import Document, StructurePatch, utc_now
+from .models import Block, Document, StructurePatch, utc_now
 from .providers import ProviderError, ProviderResponse, TextProvider, extract_json
 from .storage import ProjectStore, StorageError
 
 
 AUTO_THRESHOLD = 0.97
 ALLOWED_AUTOMATIC_OPERATIONS = {"set_type", "set_level"}
+MANUAL_OPERATIONS = ("set_type", "set_level", "set_title")
 TOC_MARKERS = (
     "table of contents", "contents", "sommaire", "table des matières",
     "inhaltsverzeichnis", "inhalt", "目次", "もくじ",
@@ -180,31 +181,58 @@ def analyze_structure(document: Document, authoritative_toc: Iterable[dict[str, 
     return suggestions
 
 
+def _normalize_level(value: Any) -> int:
+    return max(1, min(6, int(value)))
+
+
+def _apply_set_type(block: Block, after: Any) -> tuple[Any, Any]:
+    """标题与正文互转；before 记录 type 与 level，保证撤销能完整还原。"""
+    target = str(after)
+    if target not in {"title", "paragraph"}:
+        raise StorageError("结构校对只允许标题与正文之间变更。")
+    before = {"type": block.type, "level": block.level}
+    block.type = target
+    if target != "title":
+        block.level = 0
+    elif block.level < 1:
+        block.level = 1
+    return before, {"type": block.type, "level": block.level}
+
+
+def _apply_set_level(block: Block, after: Any) -> tuple[Any, Any]:
+    """调整已有标题的层级；不改变 type。"""
+    before = block.level
+    block.level = _normalize_level(after)
+    return before, block.level
+
+
+def _apply_set_title(block: Block, after: Any) -> tuple[Any, Any]:
+    """正文升为标题或修正标题层级；before 记录完整状态，使正文↔标题可逆。"""
+    before = {"type": block.type, "level": block.level}
+    block.type = "title"
+    block.level = _normalize_level(after)
+    return before, {"type": block.type, "level": block.level}
+
+
+_OPERATIONS = {
+    "set_type": _apply_set_type,
+    "set_level": _apply_set_level,
+    "set_title": _apply_set_title,
+}
+
+
 def apply_patch(store: ProjectStore, project_id: str, proposal: dict[str, Any], *, source: str = "user") -> StructurePatch:
     document = store.load_document(project_id)
     block = document.block(str(proposal["block_id"]))
     operation = str(proposal["operation"])
     confidence = float(proposal.get("confidence", 1.0))
     automatic = bool(proposal.get("automatic", False))
+    handler = _OPERATIONS.get(operation)
+    if handler is None:
+        raise StorageError(f"不支持的结构变更：{operation}")
     if automatic and (operation not in ALLOWED_AUTOMATIC_OPERATIONS or confidence < AUTO_THRESHOLD):
         raise StorageError("该变更不符合自动应用边界。")
-    if operation == "set_type":
-        before = {"type": block.type, "level": block.level}
-        after = str(proposal["after"])
-        if after not in {"title", "paragraph"}:
-            raise StorageError("结构校对只允许标题与正文之间变更。")
-        block.type = after
-        if after != "title":
-            block.level = 0
-        after_value: Any = {"type": block.type, "level": block.level}
-    elif operation == "set_level":
-        before = block.level
-        after = max(1, min(6, int(proposal["after"])))
-        block.type = "title"
-        block.level = after
-        after_value = after
-    else:
-        raise StorageError(f"不支持的结构变更：{operation}")
+    before, after_value = handler(block, proposal["after"])
     patch = StructurePatch(
         patch_id=uuid.uuid4().hex, block_id=block.block_id, operation=operation,
         before=before, after=after_value, confidence=confidence,
@@ -234,16 +262,18 @@ def revert_patch(store: ProjectStore, project_id: str, patch_id: str) -> Structu
         raise StorageError("结构补丁已经撤销。")
     document = store.load_document(project_id)
     block = document.block(value["block_id"])
-    if value["operation"] == "set_type":
+    if value["operation"] in {"set_type", "set_title"}:
         before = value["before"]
         if isinstance(before, dict):
-            block.type = str(before["type"])
-            block.level = int(before.get("level", 0))
+            block.type = str(before.get("type", block.type))
+            block.level = int(before.get("level", 0) or 0)
         else:
+            # 历史补丁（schema 1.0）只记录了 type 字符串，没有完整状态。
             block.type = str(before)
-            if block.type == "title" and block.level == 0:
-                block.level = 1
+        if block.type == "title" and block.level < 1:
+            block.level = 1
     elif value["operation"] == "set_level":
+        block.type = "title"
         block.level = int(value["before"])
     else:
         raise StorageError("结构补丁类型不可撤销。")

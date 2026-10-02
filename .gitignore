@@ -46,6 +46,7 @@ src-tauri/gen/
 # Local runtime state and logs
 runtime/
 .runtime/
+/library/
 *.log
 *.sqlite
 *.sqlite-shm

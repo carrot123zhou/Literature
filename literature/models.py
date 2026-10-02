@@ -7,6 +7,16 @@ from datetime import datetime, timezone
 from typing import Any, Literal
 
 
+SCHEMA_VERSION = "1.1"
+
+# bbox 单位契约。MinerU 的 content_list/content_list_v2 在 0-1000 归一化坐标系中
+# 给出 x/y，分别按页宽和页高缩放；document.json 原样保留该数值，不做换算。
+# 消费方必须先读取 Document.bbox_space 才能解释 bbox。
+BBOX_SPACE_MINERU_1000 = "mineru-1000"
+BBOX_SPACE_NONE = "none"
+BBOX_SPACE_VALUES = (BBOX_SPACE_MINERU_1000, BBOX_SPACE_NONE)
+
+
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -74,7 +84,9 @@ class Document:
     source_language: str
     source_language_mode: str = "auto"
     target_language: str = "zh-CN"
-    schema_version: str = "1.0"
+    schema_version: str = SCHEMA_VERSION
+    # bbox 的解释方式；旧文档没有该字段时按 MinerU 0-1000 处理，因此无需数据迁移。
+    bbox_space: str = BBOX_SPACE_MINERU_1000
     page_count: int = 0
     pages: list[Page] = field(default_factory=list)
     blocks: list[Block] = field(default_factory=list)
@@ -85,11 +97,29 @@ class Document:
     created_at: str = field(default_factory=utc_now)
     updated_at: str = field(default_factory=utc_now)
 
+    @property
+    def bbox_available(self) -> bool:
+        """是否存在可用于原页对照的 bbox；非 PDF 或纯 Markdown 导入时为 False。"""
+        return self.bbox_space == BBOX_SPACE_MINERU_1000 and any(len(block.bbox) == 4 for block in self.blocks)
+
     def block(self, block_id: str) -> Block:
         for item in self.blocks:
             if item.block_id == block_id:
                 return item
         raise KeyError(block_id)
+
+    def block_position(self, block_id: str) -> int:
+        """返回 block 在阅读顺序中的下标，供对照阅读的前后跳转使用。"""
+        for index, item in enumerate(self.blocks):
+            if item.block_id == block_id:
+                return index
+        raise KeyError(block_id)
+
+    def page(self, page_index: int) -> Page | None:
+        for item in self.pages:
+            if item.page_index == page_index:
+                return item
+        return None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -114,6 +144,7 @@ class Document:
             source_language_mode=value.get("source_language_mode", value.get("source_language", "auto")),
             target_language=value.get("target_language", "zh-CN"),
             schema_version=value.get("schema_version", "1.0"),
+            bbox_space=value.get("bbox_space", BBOX_SPACE_MINERU_1000),
             page_count=int(value.get("page_count", 0)),
             pages=[Page(**item) for item in value.get("pages", [])], blocks=blocks,
             toc=[toc_node(item) for item in value.get("toc", [])],
@@ -124,7 +155,7 @@ class Document:
         )
 
 
-PatchOperation = Literal["set_type", "set_level"]
+PatchOperation = Literal["set_type", "set_level", "set_title"]
 
 
 @dataclass(slots=True)

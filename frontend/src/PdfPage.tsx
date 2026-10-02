@@ -1,10 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import * as pdfjs from "pdfjs-dist";
-import workerUrl from "pdfjs-dist/build/pdf.worker.min.mjs?url";
 import { apiHeaders, apiUrl } from "./api";
+import { pdfAssetOptions } from "./pdfAssets";
 import type { Block } from "./types";
-
-pdfjs.GlobalWorkerOptions.workerSrc = workerUrl;
 
 type Props = { projectId: string; page: number; blocks: Block[]; selected?: string; onSelect: (id: string) => void; onPageCount: (count: number) => void };
 
@@ -16,7 +14,7 @@ export default function PdfPage({ projectId, page, blocks, selected, onSelect, o
     let cancelled = false;
     (async () => {
       try {
-        const task = pdfjs.getDocument({ url: apiUrl(`/projects/${projectId}/source.pdf`), httpHeaders: apiHeaders() });
+        const task = pdfjs.getDocument({ url: apiUrl(`/projects/${projectId}/source.pdf`), httpHeaders: apiHeaders(), ...pdfAssetOptions });
         const pdf = await task.promise;
         onPageCount(pdf.numPages);
         const pdfPage = await pdf.getPage(Math.max(1, Math.min(page, pdf.numPages)));
