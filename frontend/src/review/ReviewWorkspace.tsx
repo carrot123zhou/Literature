@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api";
 import SplitPane from "../SplitPane";
-import type { Block, DocumentGraph, PageMeta, ProviderConfig, StructurePatch, StructureSuggestion } from "../types";
-import OutlinePane, { type TocCandidate } from "./OutlinePane";import PdfPane, { type FocusRequest } from "./PdfPane";
+import type { Block, DocumentGraph, Job, ModelService, PageMeta, StructurePatch, StructureSuggestion, StructureTocEntry } from "../types";
+import OutlinePane, { type StructureAnalysis, type StructureOptions, type TocCandidate } from "./OutlinePane";
+import PdfPane, { type FocusRequest } from "./PdfPane";
 import ResultPane, { type PatchProposal, type ResultTab } from "./ResultPane";
 import SourcePreview from "./SourcePreview";
 import { documentProjection, parseTocDraft, tocDraft } from "./projection";
@@ -18,12 +19,14 @@ type Props = {
   onSuggestions: (value: StructureSuggestion[]) => void;
   scope: Set<string>;
   onToggleScope: (blockId: string) => void;
-  provider: ProviderConfig;
   selected: string;
   onSelect: (blockId: string) => void;
   refresh: () => Promise<void>;
   setMessage: (value: string) => void;
   onOpenRead: () => void;
+  /** 结构校对角色绑定的模型服务。 */
+  modelService?: ModelService;
+  onConfigureModel: () => void;
 };
 
 function isTyping(target: EventTarget | null): boolean {
@@ -39,7 +42,7 @@ function isTyping(target: EventTarget | null): boolean {
  * block_id 互相定位；结构调整只写可逆补丁，不改变阅读顺序。
  */
 export default function ReviewWorkspace(props: Props) {
-  const { projectId, document, sourceType, sourceName, patches, suggestions, onSuggestions, scope, onToggleScope, provider, selected, onSelect, refresh, setMessage, onOpenRead } = props;
+  const { projectId, document, sourceType, sourceName, patches, suggestions, onSuggestions, scope, onToggleScope, selected, onSelect, refresh, setMessage, onOpenRead, modelService, onConfigureModel } = props;
   const bboxAvailable = document.bbox_space === "mineru-1000" && document.blocks.some(block => block.bbox.length === 4);
 
   const [tocText, setTocText] = useState(() => tocDraft(document.toc));
@@ -51,6 +54,10 @@ export default function ReviewWorkspace(props: Props) {
   const [focus, setFocus] = useState<FocusRequest | null>(null);
   const [follow, setFollow] = useState(true);
   const [busy, setBusy] = useState(false);
+  const [options, setOptions] = useState<StructureOptions>({ extractToc: true, proofread: true, autoApply: true });
+  const [structureJob, setStructureJob] = useState<Job | null>(null);
+  const [structureRunning, setStructureRunning] = useState(false);
+  const [proposedToc, setProposedToc] = useState<StructureTocEntry[] | null>(null);
   const nonce = useRef(0);
 
   useEffect(() => { setTocText(tocDraft(document.toc)); }, [document.updated_at, document.toc]);
@@ -132,18 +139,52 @@ export default function ReviewWorkspace(props: Props) {
     setMessage(`自动应用 ${value.applied.length} 项，另有 ${value.suggestions.length - value.applied.length} 项待核对`);
   });
 
-  const analyzeAI = () => void run(async () => {
-    const value = await api<{ suggestions: StructureSuggestion[]; applied: unknown[] }>(`/projects/${projectId}/structure/analyze-ai`, { method: "POST", body: JSON.stringify({ toc: parseTocDraft(tocText), provider, auto_apply: true }) });
-    onSuggestions(value.suggestions);
-    await refresh();
-    setMessage(`AI 结构分析完成；自动应用 ${value.applied.length} 项`);
-  });
+  // 异步结构分析：后台作业 + 轮询状态，界面展示进度与活动摘要。
+  const runModel = () => {
+    if (structureRunning) return;
+    setStructureRunning(true);
+    setProposedToc(null);
+    setMessage("结构分析任务已启动");
+    api<Job>(`/projects/${projectId}/structure/jobs`, {
+      method: "POST",
+      body: JSON.stringify({ service_id: "", toc: parseTocDraft(tocText), extract_toc: options.extractToc, proofread: options.proofread, auto_apply: options.autoApply }),
+    }).then(job => pollStructureJob(job.job_id)).catch(error => { setStructureRunning(false); setMessage(String(error instanceof Error ? error.message : error)); });
+  };
+
+  const pollStructureJob = async (jobId: string) => {
+    for (let attempt = 0; attempt < 600; attempt += 1) {
+      const job = await api<Job>(`/projects/${projectId}/structure/jobs/${jobId}`);
+      setStructureJob(job);
+      if (job.status === "completed" || job.status === "failed") {
+        setStructureRunning(false);
+        if (job.status === "failed") { setMessage(`结构分析失败：${job.error}`); return; }
+        const result = (job.result ?? {}) as { suggestions?: StructureSuggestion[]; applied?: unknown[]; proposed_toc?: StructureTocEntry[] };
+        const all = result.suggestions ?? [];
+        const pending = all.filter(value => !value.automatic).length;
+        onSuggestions(all);
+        setProposedToc(result.proposed_toc?.length ? result.proposed_toc : null);
+        await refresh();
+        setMessage(`结构分析完成：自动应用 ${result.applied?.length ?? 0} 项，待确认 ${pending} 项`);
+        return;
+      }
+      await new Promise(resolve => window.setTimeout(resolve, 900));
+    }
+    setStructureRunning(false);
+    setMessage("结构分析超时，请稍后重试");
+  };
+
+  const adoptProposed = () => {
+    if (!proposedToc?.length) return;
+    setTocText(proposedToc.map(entry => `${"#".repeat(Math.max(1, Math.min(6, entry.level)))} ${entry.title}`).join("\n"));
+    setProposedToc(null);
+    setMessage("已采用模型提取的目录，可继续本地或模型校对");
+  };
 
   const previewAudit = () => void run(async () => {
-    const value = await api<unknown>(`/projects/${projectId}/structure/audit-payload`, { method: "POST", body: JSON.stringify({ toc: parseTocDraft(tocText), auto_apply: false }) });
+    const value = await api<unknown>(`/projects/${projectId}/structure/plan`, { method: "POST", body: JSON.stringify({ toc: parseTocDraft(tocText), extract_toc: options.extractToc, proofread: options.proofread }) });
     setAuditPayload(value);
     setTab("json");
-    setMessage("JSON 视图正在显示发送给结构模型的完整数据（不含正文）");
+    setMessage(options.extractToc ? "JSON 正在显示发送给模型的完整数据：包含选中目录页文本（可在其中核对）" : "JSON 正在显示发送给模型的完整数据：不含正文与目录页文本");
   });
 
   const findTocPages = () => void run(async () => {
@@ -200,6 +241,9 @@ export default function ReviewWorkspace(props: Props) {
     if (block) locate(block.block_id);
   }, [document.blocks, locate]);
 
+  const analysis = useMemo<StructureAnalysis>(() => ({ job: structureJob, running: structureRunning, options, proposedToc }), [structureJob, structureRunning, options, proposedToc]);
+  const onOptions = (patch: Partial<StructureOptions>) => setOptions(current => ({ ...current, ...patch }));
+
   return (
     <SplitPane
       className="workspace review-grid"
@@ -216,7 +260,6 @@ export default function ReviewWorkspace(props: Props) {
         onFindTocPages={findTocPages}
         onJumpPage={jumpToPage}
         onAnalyze={analyze}
-        onAnalyzeAI={analyzeAI}
         onPreviewAudit={previewAudit}
         suggestions={suggestions}
         patches={patches}
@@ -231,6 +274,12 @@ export default function ReviewWorkspace(props: Props) {
         onRevertAll={revertAll}
         onPatch={applyPatch}
         busy={busy}
+        modelService={modelService}
+        onConfigureModel={onConfigureModel}
+        analysis={analysis}
+        onOptions={onOptions}
+        onRunModel={runModel}
+        onAdoptProposed={adoptProposed}
       />
       {bboxAvailable
         ? <PdfPane

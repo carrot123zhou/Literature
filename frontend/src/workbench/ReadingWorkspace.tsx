@@ -1,8 +1,9 @@
 import SplitPane from "../SplitPane";
 import TocTree from "../TocTree";
 import JobPanel from "./JobPanel";
+import ModelServiceField from "./ModelServiceField";
 import TranslationBlock from "./TranslationBlock";
-import type { Block, DocumentGraph, Job, TranslationLayer } from "../types";
+import type { Block, DocumentGraph, Job, ModelService, TranslationLayer } from "../types";
 
 type Props = {
   projectId: string;
@@ -22,11 +23,14 @@ type Props = {
   onRefresh: () => void;
   onInstant: (event: React.MouseEvent<HTMLElement>) => void;
   onOpenReview: () => void;
+  /** 翻译角色绑定的模型服务，用于在本页显示与配置。 */
+  translationService?: ModelService;
+  onConfigureModel: () => void;
 };
 
 /** 阅读与翻译工作区：翻译范围 / 原文 / 译文三栏，栏宽可拖动并记忆。 */
 export default function ReadingWorkspace(props: Props) {
-  const { projectId, document, translation, selected, checked, selectedScopeCount, jobs, glossary, onToggle, onSelectBlock, onPause, onResume, onOpenGlossary, onTranslate, onRefresh, onInstant, onOpenReview } = props;
+  const { projectId, document, translation, selected, checked, selectedScopeCount, jobs, glossary, onToggle, onSelectBlock, onPause, onResume, onOpenGlossary, onTranslate, onRefresh, onInstant, onOpenReview, translationService, onConfigureModel } = props;
   const selectedBlock = document.blocks.find(block => block.block_id === selected);
 
   return <SplitPane
@@ -39,6 +43,7 @@ export default function ReadingWorkspace(props: Props) {
     <aside className="sidebar reader-sidebar">
       <div className="panel-title"><strong>选择翻译范围</strong><span>{selectedScopeCount || "全书"} blocks</span></div>
       <div className="pane-scroll">
+        <ModelServiceField label="翻译模型" service={translationService} onConfigure={onConfigureModel}/>
         <TocTree nodes={document.toc} checked={checked} onToggle={onToggle} onSelect={onSelectBlock}/>
         <button className="glossary-button" onClick={onOpenGlossary}>术语表 · {Object.keys(glossary).length} 项</button>
         <JobPanel jobs={jobs} onPause={onPause} onResume={onResume}/>

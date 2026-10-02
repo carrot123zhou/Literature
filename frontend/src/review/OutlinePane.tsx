@@ -1,8 +1,16 @@
 import { memo } from "react";
-import type { DocumentGraph, StructurePatch, StructureSuggestion, TocNode } from "../types";
+import ModelServiceField from "../workbench/ModelServiceField";
+import type { DocumentGraph, Job, ModelService, StructurePatch, StructureSuggestion, StructureTocEntry, TocNode } from "../types";
 import type { PatchProposal } from "./ResultPane";
 
 export type TocCandidate = { page_index: number; page_number: number; confidence: number; reasons: string[] };
+export type StructureOptions = { extractToc: boolean; proofread: boolean; autoApply: boolean };
+export type StructureAnalysis = {
+  job: Job | null;
+  running: boolean;
+  options: StructureOptions;
+  proposedToc: StructureTocEntry[] | null;
+};
 
 type Props = {
   document: DocumentGraph;
@@ -12,7 +20,6 @@ type Props = {
   onFindTocPages: () => void;
   onJumpPage: (page: number) => void;
   onAnalyze: () => void;
-  onAnalyzeAI: () => void;
   onPreviewAudit: () => void;
   suggestions: StructureSuggestion[];
   patches: StructurePatch[];
@@ -27,6 +34,12 @@ type Props = {
   onRevertAll: () => void;
   onPatch: (proposal: PatchProposal) => void;
   busy: boolean;
+  modelService?: ModelService;
+  onConfigureModel: () => void;
+  analysis: StructureAnalysis;
+  onOptions: (patch: Partial<StructureOptions>) => void;
+  onRunModel: () => void;
+  onAdoptProposed: () => void;
 };
 
 const OPERATION_LABEL: Record<string, string> = {
@@ -67,19 +80,43 @@ function TocRow({ node, depth, selected, activeBlock, checked, onSelect, onToggl
   );
 }
 
-/** 左侧结构栏：目录基准、目录页候选、可编辑目录树、建议队列与修订历史。 */
+/** 模型运行状态：进度、当前步骤与精简活动摘要，不展示完整对话。 */
+function StructureRunPanel({ analysis, onAdoptProposed }: { analysis: StructureAnalysis; onAdoptProposed: () => void }) {
+  const { job, running, proposedToc } = analysis;
+  const activity = job?.activity ?? [];
+  const recent = activity.slice(-6);
+  const failed = job?.status === "failed";
+  if (!job && !proposedToc) return null;
+  return <div className={`structure-run-panel${running ? " is-running" : ""}${failed ? " is-failed" : ""}`}>
+    <div className="structure-run-status">
+      <span className={`run-dot${running ? " running" : failed ? " failed" : " done"}`}/>
+      <strong>{running ? "模型运行中" : failed ? "运行失败" : "运行完成"}</strong>
+      <span>{job ? `${Math.round((job.progress || 0) * 100)}%` : ""}</span>
+    </div>
+    {job && job.progress > 0 && <progress max={1} value={job.progress}/>}
+    {job?.message && <p className="structure-run-message">{job.message}</p>}
+    {recent.length > 0 && <ul className="structure-activity">
+      {recent.map((item, index) => <li key={`${item.at}-${index}`} className={`activity-${item.level}`}><span>{item.text}</span></li>)}
+    </ul>}
+    {!running && proposedToc && proposedToc.length > 0 && <button className="primary block-button" onClick={onAdoptProposed}>采用模型提取的目录（{proposedToc.length} 条）</button>}
+  </div>;
+}
+
+/** 左侧结构栏：目录基准（含模型运行）、可编辑目录树、建议队列与修订历史。 */
 export default memo(function OutlinePane(props: Props) {
-  const { document, tocText, onTocText, tocCandidates, onFindTocPages, onJumpPage, onAnalyze, onAnalyzeAI, onPreviewAudit, suggestions, patches, selected, activeBlock, checked, onSelect, onToggleCheck, onConfirm, onConfirmAll, onRevert, onRevertAll, onPatch, busy } = props;
+  const { document, tocText, onTocText, tocCandidates, onFindTocPages, onJumpPage, onAnalyze, onPreviewAudit, suggestions, patches, selected, activeBlock, checked, onSelect, onToggleCheck, onConfirm, onConfirmAll, onRevert, onRevertAll, onPatch, busy, modelService, onConfigureModel, analysis, onOptions, onRunModel, onAdoptProposed } = props;
   const pending = suggestions.filter(value => !value.automatic);
   const live = patches.filter(value => !value.reverted_at);
+  const { options, running } = analysis;
 
   return (
     <aside className="sidebar mineru-control-column">
       <div className="panel-title"><strong>结构与任务</strong><span>规范主数据</span></div>
       <div className="pane-scroll">
-      <details className="outline-section">
+      <details className="outline-section" open>
         <summary>确认原书目录基准</summary>
-        <button className="block-button" onClick={onFindTocPages} disabled={busy}>寻找目录页候选</button>
+        <ModelServiceField label="目录模型" service={modelService} onConfigure={onConfigureModel}/>
+        <button className="block-button" onClick={onFindTocPages} disabled={busy || running}>寻找目录页候选</button>
         {tocCandidates.length > 0 && <div className="toc-candidates">
           {tocCandidates.map(candidate => (
             <button key={candidate.page_index} onClick={() => onJumpPage(candidate.page_number)}>
@@ -89,18 +126,25 @@ export default memo(function OutlinePane(props: Props) {
           ))}
         </div>}
         <textarea value={tocText} onChange={event => onTocText(event.target.value)} rows={8} spellCheck={false}/>
-        <button className="primary block-button" onClick={onAnalyze} disabled={busy}>本地保守分析</button>
-        <button className="block-button" onClick={onAnalyzeAI} disabled={busy}>AI 辅助分析</button>
-        <button className="link-button block-button" onClick={onPreviewAudit} disabled={busy}>预览发送给 AI 的数据</button>
-        <small className="audit-note">目录页候选在本地计算；AI 结构分析只使用目录文本、标题候选、bbox 与相邻 block 类型，不发送正文。</small>
+        <div className="structure-options">
+          <label title="把选中目录页的文本发送给模型，由模型提取目录条目"><input type="checkbox" checked={options.extractToc} onChange={() => onOptions({ extractToc: !options.extractToc })}/>从目录页提取</label>
+          <label title="把标题候选与目录基准发送给模型，校对误识别标题与层级"><input type="checkbox" checked={options.proofread} onChange={() => onOptions({ proofread: !options.proofread })}/>校对标题</label>
+          <label title="置信度达到 0.97 的建议自动应用，可随时撤销"><input type="checkbox" checked={options.autoApply} onChange={() => onOptions({ autoApply: !options.autoApply })}/>自动应用高置信</label>
+        </div>
+        <button className="primary block-button" onClick={onRunModel} disabled={busy || running}>{running ? "模型运行中…" : "识别并校对目录"}</button>
+        <button className="block-button" onClick={onAnalyze} disabled={busy || running}>本地保守分析</button>
+        <button className="link-button block-button" onClick={onPreviewAudit} disabled={busy || running}>预览发送给模型的数据</button>
+        <small className="audit-note">本地分析只使用确认目录与标题候选。开启「从目录页提取」会把选中目录页的文本发送给模型，可在预览中核对；正文永不发送。</small>
+        <StructureRunPanel analysis={analysis} onAdoptProposed={onAdoptProposed}/>
       </details>
 
-      <div className="outline-section">
-        <div className="section-head"><strong>目录（{live.length} 项已校对）</strong><span>← → 调层级 · ✕ 降正文</span></div>
+      <details className="outline-section" open>
+        <summary>目录 · {document.toc.length} 项标题</summary>
+        <div className="section-head"><strong>{live.length} 项已校对</strong><span>← → 调层级 · ✕ 降正文</span></div>
         {document.toc.length === 0
           ? <p className="empty-note">当前没有标题级 block。可在右侧把正文块设为标题。</p>
           : <ul className="toc-tree">{document.toc.map(node => <TocRow key={node.node_id} node={node} depth={0} selected={selected} activeBlock={activeBlock} checked={checked} onSelect={onSelect} onToggleCheck={onToggleCheck} onPatch={onPatch} busy={busy}/>)}</ul>}
-      </div>
+      </details>
 
       {pending.length > 0 && <div className="structure-queue">
         <details open>

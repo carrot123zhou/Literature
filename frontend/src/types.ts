@@ -26,7 +26,20 @@ export type Project = {
 export type TranslationEntry = { block_id: string; text: string; status: string; locked: boolean; items: string[]; caption: string[]; footnote: string[]; cells: Record<string, string>; selection_translations: {source_text:string;translated_text:string;created_at:string}[] };
 export type TranslationLayer = { project_id: string; locale: string; entries: Record<string, TranslationEntry>; glossary_snapshot: Record<string, string> };
 export type ProviderConfig = { provider: string; model: string; base_url: string; temperature: number; max_output_tokens: number; input_price_per_million?: number; output_price_per_million?: number };
-export type Job = { job_id: string; kind: string; status: string; progress: number; error: string; scope: Record<string, unknown> };
+export type JobActivity = { at: string; level: string; text: string };
+export type Job = {
+  job_id: string; kind: string; status: string; progress: number; error: string; scope: Record<string, unknown>;
+  message?: string; activity?: JobActivity[]; result?: Record<string, unknown>;
+};
+export type ModelService = {
+  service_id: string; name: string; preset: string; base_url: string; model: string;
+  temperature: number; max_output_tokens: number;
+  input_price_per_million?: number | null; output_price_per_million?: number | null;
+  configured: boolean;
+};
+export type ModelRole = "structure" | "translation";
+export type ModelRoles = { structure: string; translation: string };
+export type StructureTocEntry = { title: string; level: number };
 export type StructureSuggestion = { block_id: string; operation: "set_type" | "set_level" | "set_title"; before: unknown; after: unknown; confidence: number; reason: string; automatic: boolean };
 export type StructurePatch = StructureSuggestion & { patch_id: string; source: "ai" | "user"; reverted_at?: string; created_at: string };
 export type UsageRecord = { usage_id: string; job_id: string; provider: string; model: string; scope: string; input_tokens: number; output_tokens: number; cached_tokens: number; reasoning_tokens: number; estimated_cost?: number; request_id: string; created_at: string };

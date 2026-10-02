@@ -14,12 +14,14 @@ type Props = {
   openHome: () => void;
   openResources: () => void;
   /**
-   * 工作区标签的统一入口。没有打开项目时也能点击：由调用方决定跳转到
-   * 文件资源页并给出提示，而不是渲染成不可用的灰色死按钮。
+   * 工作区标签的统一入口。没有打开项目时也能点击：由调用方决定进入
+   * 该模块的空白页并给出提示，而不是渲染成不可用的灰色死按钮。
    */
   openWork: (view: WorkView) => void;
   /** 传入后顶栏标题区显示项目名与用量；未传入时三个标签呈提示态。 */
   project?: ProjectInfo;
+  /** 关闭当前任务（清空项目上下文，停留在当前模块）。 */
+  closeProject: () => void;
   openSettings: () => void;
 };
 
@@ -31,11 +33,12 @@ const WORK_TABS: { view: WorkView; label: string }[] = [
 
 // 主导航是全部页面共用的唯一外壳：首页 → 文件资源 → 结构校对 → 阅读与翻译 → 导出。
 // 打开项目后三个工作区标签激活；未打开项目时点击会得到“先去文件资源打开任务”的引导。
-export default function HomeTopbar({ active, openHome, openResources, openWork, project, openSettings }: Props) {
+export default function HomeTopbar({ active, openHome, openResources, openWork, project, closeProject, openSettings }: Props) {
   return <header className={`intake-topbar home-topbar${project ? " project-topbar" : ""}`}>
     <div className="intake-brand-group">
       <button className="intake-brand" onClick={openHome}>Literature</button>
       {project && <span className="project-topbar-title"><strong>{project.title}</strong>{project.subtitle && <small>{project.subtitle}</small>}</span>}
+      {project && <button className="project-close-button" title="关闭当前任务" aria-label="关闭当前任务" onClick={closeProject}>✕</button>}
     </div>
     <nav aria-label="主导航">
       <button className={active === "home" ? "active" : ""} onClick={openHome}>首页</button>

@@ -2,6 +2,29 @@
 
 > 本日志记录可验证事实、架构决策和仍需外部条件完成的验收。更新代码时应同步更新本文，避免把“已编码”“已测试”和“已用真实服务验证”混为一谈。
 
+## 2026-10-02：任务生命周期、模块空白页、可收起目录与模型服务库
+
+### 已实现
+
+- 任务生命周期：顶栏项目区新增「关闭任务」(✕)，关闭后清空项目上下文并停留在当前模块；三个工作区（结构校对 / 阅读与翻译 / 导出）都支持无项目进入并显示空白页，内含可搜索的已有文档简列表与「去首页上传新文件」（`frontend/src/workbench/TaskPicker.tsx`）。
+- hash 路由支持无项目工作区：`#/review`、`#/read`、`#/export`；带项目仍为 `#/p/<id>/<view>`。
+- 结构栏「目录」改为可收起的 `<details>`，与「确认原书目录基准」「修订历史」一致。
+- 模型服务库（`literature/model_services.py` + `frontend/src/modelServices.ts` + `workbench/ModelServicesDialog.tsx`）：集中管理多个模型服务（OpenAI/DeepSeek/GLM/Qwen 预设或自定义中转站 base_url + key + model），并绑定到 `structure` / `translation` 两个任务角色；密钥只进 macOS Keychain（account = service_id，预设可回退旧 providers Keychain）。API：`GET/POST /model-services`、`PUT/DELETE /model-services/{id}`、`PUT /model-services/{id}/key`、`POST /model-services/{id}/check`、`PUT /model-services/roles`。
+- 结构基准交给模型：新增异步作业 `POST /projects/{id}/structure/jobs`（后台线程 + SQLite `jobs` 新增 `message/result_json/activity_json` 列，幂等迁移），步骤为 本地识别目录页 → 模型从目录页提取目录条目 → 模型校对标题层级（0.97 自动应用）。界面在「确认原书目录基准」显示进度、当前步骤与精简活动摘要，并可「采用模型提取的目录」。
+- 审计边界：`POST /projects/{id}/structure/plan` 返回与实际作业完全一致的输入；开启「从目录页提取」会把选中目录页文本发送给模型，预览里明确展示，正文永不发送（`body_text_included: false`）。
+- 翻译与即时翻译改为按 `service_id`（翻译角色）调用；全局设置不再配置模型，改为入口链接。
+- `/health` 新增能力标记 `model_services_v1`、`structure_job_v1`。
+
+### 已验证
+
+- 后端 `pytest` 44 passed（新增 `tests/test_model_services.py` 3 项：服务 CRUD 与角色绑定、plan 的目录页文本开关、后台作业活动与结果）。
+- `tsc --noEmit` 与 Vite 生产构建通过。
+- Chrome headless 截图核对：`#/review` 无项目时显示任务选择空白页；`#/p/<id>/review` 显示模型字段、可收起目录、作业入口与关闭按钮；`#/p/<id>/read` 布局与模型字段正常。
+
+### 未验证
+
+- 模型服务弹窗、真实模型调用与目录提取、拖动分隔条、窄视口均未经肉眼或真实凭据验收。
+
 ## 2026-10-02：可拖拽三栏、面板内滚动与跨页任务导航
 
 ### 已实现

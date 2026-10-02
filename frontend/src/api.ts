@@ -2,7 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 
 const base = import.meta.env.VITE_API_URL || "http://127.0.0.1:41731";
 let token = import.meta.env.VITE_LITERATURE_TOKEN || "";
-const requiredCapabilities = ["intake_items_v1", "structure_review_v2"];
+const requiredCapabilities = ["intake_items_v1", "structure_review_v2", "model_services_v1", "structure_job_v1"];
 
 export async function initializeApi() {
   if (!token && "__TAURI_INTERNALS__" in window) token = await invoke<string>("session_token");

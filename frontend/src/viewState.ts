@@ -27,12 +27,14 @@ export function parseHash(hash: string): Route {
     const view = candidate && isWorkView(candidate) ? candidate : "review";
     return { view, projectId: decodeURIComponent(parts[1]) };
   }
+  // 工作区可以不带项目进入：显示该模块的空白页与任务选择列表。
+  if (parts[0] && isWorkView(parts[0] as View)) return { view: parts[0] as View, projectId: "" };
   if (parts[0] === "resources") return { view: "resources", projectId: "" };
   return { view: "home", projectId: "" };
 }
 
 export function hashFor(view: View, projectId: string): string {
-  if (projectId && isWorkView(view)) return `#/p/${encodeURIComponent(projectId)}/${view}`;
+  if (isWorkView(view)) return projectId ? `#/p/${encodeURIComponent(projectId)}/${view}` : `#/${view}`;
   return view === "resources" ? "#/resources" : "#/home";
 }
 

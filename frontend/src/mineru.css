@@ -471,3 +471,74 @@ body.is-resizing { cursor: col-resize; user-select: none; }
   .home-topbar nav button { padding: 0 8px; font-size: 12px; }
   .home-topbar nav button:nth-last-child(-n+3) { display: inline-block; }
 }
+
+/* ===== 任务生命周期、模型服务与结构分析活动 ===== */
+.project-close-button { width: 26px; height: 26px; flex: none; border: 0; border-radius: 50%; padding: 0; background: transparent; color: #98a29b; font-size: 13px; }
+.project-close-button:hover { background: #f0ece7; color: #b54334; }
+
+.model-dot { width: 8px; height: 8px; flex: none; border-radius: 50%; background: #d1d5db; }
+.model-dot.configured { background: var(--mineru-green); }
+.model-service-field { display: flex; align-items: center; gap: 8px; margin: 8px 0; padding: 7px 9px; border: 1px solid var(--mineru-border); border-radius: 8px; background: #fff; font-size: 11px; }
+.model-service-field-text { flex: 1; min-width: 0; display: grid; gap: 1px; }
+.model-service-field-text strong, .model-service-field-text small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.model-service-field-text small { color: #8a948d; }
+
+.structure-options { display: flex; flex-wrap: wrap; gap: 6px 12px; margin: 6px 0; font-size: 11px; color: #5f6e66; }
+.structure-options label { display: flex; align-items: center; gap: 4px; }
+.structure-run-panel { margin-top: 9px; padding: 10px; border: 1px solid var(--mineru-border); border-radius: 8px; background: #fff; }
+.structure-run-panel.is-running { border-color: #fdba74; background: #fffdf9; }
+.structure-run-panel.is-failed { border-color: #fca5a5; }
+.structure-run-status { display: flex; align-items: center; gap: 7px; font-size: 11px; }
+.structure-run-status span:last-child { margin-left: auto; color: #8a948d; }
+.run-dot { width: 8px; height: 8px; border-radius: 50%; background: #c7cec8; }
+.run-dot.running { background: var(--mineru-accent); box-shadow: 0 0 0 3px #f9731638; }
+.run-dot.done { background: var(--mineru-green); }
+.run-dot.failed { background: #dc2626; }
+.structure-run-panel progress { width: 100%; margin-top: 6px; accent-color: var(--mineru-accent); }
+.structure-run-message { margin: 7px 0 0; font-size: 11px; color: #6b7280; line-height: 1.45; }
+.structure-activity { list-style: none; margin: 7px 0 0; padding: 7px 0 0; border-top: 1px solid #f0f2ef; display: grid; gap: 4px; }
+.structure-activity li { position: relative; padding-left: 10px; font-size: 10px; line-height: 1.45; color: #6b7280; }
+.structure-activity li::before { content: ""; position: absolute; left: 0; top: 5px; width: 4px; height: 4px; border-radius: 50%; background: #cbd4cd; }
+.structure-activity li.activity-model::before { background: #2563eb; }
+.structure-activity li.activity-success::before { background: var(--mineru-green); }
+.structure-activity li.activity-warning::before { background: #d97706; }
+.structure-activity li.activity-error::before { background: #dc2626; }
+.structure-run-panel .block-button { margin-top: 9px; }
+
+/* 模块空白页：已有任务简列表 + 上传入口。 */
+.workspace-state.task-picker { place-content: center; align-content: center; gap: 12px; }
+.task-picker-search { display: flex; align-items: center; gap: 8px; width: min(520px, 90vw); height: 42px; padding: 0 12px; border: 1px solid #d8ded8; border-radius: 9px; background: #fff; }
+.task-picker-search input { flex: 1; border: 0; outline: 0; background: transparent; }
+.task-picker-search span { color: #7d8981; font-size: 20px; transform: rotate(-18deg); }
+.task-picker-list { width: min(520px, 90vw); max-height: 46vh; overflow: auto; display: grid; gap: 6px; padding: 8px; border: 1px solid #e0e5e0; border-radius: 10px; background: #fff; }
+.task-picker-item { display: grid; gap: 3px; text-align: left; padding: 10px 12px; border: 1px solid transparent; border-radius: 8px; background: #f7f8f3; }
+.task-picker-item:hover { border-color: #b6c59b; background: #f1f6e2; }
+.task-picker-item small { color: #7a867e; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.task-picker-actions { display: flex; align-items: center; gap: 12px; }
+
+/* 模型服务库。 */
+.model-services-backdrop { align-items: center; justify-content: center; padding: 24px; }
+.model-services-dialog { width: min(900px, calc(100vw - 48px)); max-height: min(720px, calc(100vh - 48px)); display: grid; grid-template-rows: auto auto minmax(0, 1fr); overflow: hidden; border: 1px solid #dce2dc; border-radius: 13px; background: #fffefa; box-shadow: 0 24px 70px #20322b3d; }
+.model-services-dialog > header { display: flex; justify-content: space-between; gap: 20px; padding: 20px 24px 16px; border-bottom: 1px solid #e0e5e0; }
+.model-services-dialog h2 { margin: 0 0 6px; font: 600 24px Georgia, "Noto Serif CJK SC", serif; }
+.model-services-dialog header p { margin: 0; max-width: 620px; color: #68766f; font-size: 12px; line-height: 1.55; }
+.model-services-dialog header > button { width: 32px; height: 32px; border: 0; background: transparent; color: #7a867e; font-size: 23px; }
+.model-role-row { display: flex; gap: 16px; padding: 12px 24px; border-bottom: 1px solid #e0e5e0; background: #f8f9f5; }
+.model-role-row label { flex: 1; display: grid; gap: 5px; color: #5f6e66; font-size: 11px; }
+.model-role-row select { width: 100%; border: 1px solid #cbd4cd; border-radius: 7px; padding: 8px; background: #fff; }
+.model-services-body { min-height: 0; display: grid; grid-template-columns: minmax(200px, 32%) minmax(0, 1fr); }
+.model-service-list { min-height: 0; overflow: auto; padding: 12px; border-right: 1px solid #e7eae6; display: grid; gap: 6px; align-content: start; }
+.model-service-list-head { display: flex; justify-content: space-between; align-items: center; font-size: 12px; margin-bottom: 4px; }
+.model-service-item { display: grid; grid-template-columns: 8px minmax(0, 1fr) auto; align-items: center; gap: 8px; text-align: left; padding: 9px 10px; border: 1px solid #e0e5e0; border-radius: 8px; background: #fff; }
+.model-service-item.selected { border-color: var(--mineru-accent); background: #fff7ed; }
+.model-service-item > span { display: grid; min-width: 0; }
+.model-service-item strong, .model-service-item small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.model-service-item small { color: #7a867e; font-size: 10px; }
+.model-service-item em { font-style: normal; color: #526b18; font-size: 9px; }
+.model-service-form { min-height: 0; overflow: auto; padding: 16px 20px; display: grid; gap: 10px; align-content: start; }
+.model-service-form label { display: grid; gap: 5px; color: #5f6e66; font-size: 11px; }
+.model-service-form input, .model-service-form select { width: 100%; border: 1px solid #cbd4cd; border-radius: 7px; padding: 8px; background: #fff; }
+.model-form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.model-form-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 4px; }
+.model-form-actions .primary { margin-left: auto; }
+.model-form-status { margin: 0; color: #526b18; font-size: 11px; overflow-wrap: anywhere; }

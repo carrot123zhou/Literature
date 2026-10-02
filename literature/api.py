@@ -20,12 +20,13 @@ from .exporters import export_all
 from .mineru import detect_language, import_mineru
 from .mineru_capabilities import MAX_BATCH_FILES, validate_source
 from .mineru_workflow import MinerUClient, WorkflowError
+from .model_services import MODEL_ROLES, ROLE_STRUCTURE, ROLE_TRANSLATION, ModelServiceStore, save_service_key
 from .models import UsageRecord
 from .ocr import MinerUService, delete_mineru_token, get_mineru_token, save_mineru_token
 from .providers import PROVIDER_PRESETS, OpenAICompatibleProvider, ProviderConfig, ProviderError, delete_api_key, get_api_key, save_api_key
 from .runtime_revision import RUNTIME_REVISION
 from .storage import ProjectStore, StorageError
-from .structure import analyze_structure, analyze_structure_with_provider, apply_automatic, apply_patch, find_toc_page_candidates, revert_patch, structure_model_payload
+from .structure import analyze_structure, analyze_structure_with_provider, apply_automatic, apply_patch, find_toc_page_candidates, plan_structure_analysis, revert_patch, run_structure_job, structure_model_payload
 from .tbl import TBLBridge
 from .translation import TranslationService, draft_glossary
 from .uploads import UploadStore
@@ -140,12 +141,46 @@ class ProviderInput(BaseModel):
 
 class StructureAIAnalyze(BaseModel):
     toc: list[dict[str, Any]]
-    provider: ProviderInput
+    provider: ProviderInput | None = None
+    service_id: str = ""
     auto_apply: bool = False
 
 
+class StructureJobInput(BaseModel):
+    service_id: str = ""
+    toc: list[dict[str, Any]] = Field(default_factory=list)
+    extract_toc: bool = True
+    proofread: bool = True
+    auto_apply: bool = True
+    toc_page_limit: int = Field(default=12, ge=1, le=40)
+
+
+class StructurePlanInput(BaseModel):
+    toc: list[dict[str, Any]] = Field(default_factory=list)
+    extract_toc: bool = True
+    proofread: bool = True
+    toc_page_limit: int = Field(default=12, ge=1, le=40)
+
+
+class ModelServiceInput(BaseModel):
+    name: str = ""
+    preset: str = "custom"
+    base_url: str = ""
+    model: str = ""
+    temperature: float = 0.2
+    max_output_tokens: int = 8192
+    input_price_per_million: float | None = None
+    output_price_per_million: float | None = None
+
+
+class ModelRolesInput(BaseModel):
+    structure: str | None = None
+    translation: str | None = None
+
+
 class TranslationJobInput(BaseModel):
-    provider: ProviderInput
+    provider: ProviderInput | None = None
+    service_id: str = ""
     block_ids: list[str] = Field(default_factory=list)
     locale: str = "zh-CN"
     glossary: dict[str, str] | None = None
@@ -155,7 +190,8 @@ class TranslationJobInput(BaseModel):
 
 
 class InstantInput(BaseModel):
-    provider: ProviderInput
+    provider: ProviderInput | None = None
+    service_id: str = ""
     text: str
     locale: str = "zh-CN"
     block_id: str | None = None
@@ -202,13 +238,60 @@ class TBLConfigInput(BaseModel):
 
 
 class JobManager:
-    def __init__(self, store: ProjectStore, ocr: MinerUService) -> None:
+    def __init__(self, store: ProjectStore, ocr: MinerUService, models: ModelServiceStore | None = None) -> None:
         self.store = store
         self.ocr = ocr
+        self.models = models or ModelServiceStore()
         self.executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="literature-job")
         self.pause_events: dict[str, threading.Event] = {}
         self.ocr_running: set[str] = set()
         self.ocr_lock = threading.Lock()
+
+    def provider_from(self, service_id: str, provider_input: ProviderInput | None = None) -> OpenAICompatibleProvider:
+        """优先按模型服务库解析（密钥只从 Keychain 取）；否则兼容旧的随请求 ProviderInput。"""
+        if service_id:
+            return self.models.config_for(service_id)
+        if provider_input is not None:
+            return OpenAICompatibleProvider(provider_input.config())
+        raise ProviderError("尚未选择模型服务，请先在当前模块配置模型。")
+
+    def service_id_for(self, role: str, explicit: str = "") -> str:
+        if explicit:
+            return explicit
+        if role not in MODEL_ROLES:
+            raise ProviderError(f"未知任务角色：{role}")
+        resolved = self.models.roles().get(role, "")
+        if not resolved:
+            raise ProviderError("尚未为当前模块绑定模型服务，请先配置模型。")
+        return resolved
+
+    def start_structure(self, project_id: str, request: "StructureJobInput") -> str:
+        if not request.extract_toc and not request.proofread:
+            raise ProviderError("至少需要勾选“提取目录”或“校对标题”中的一项。")
+        service_id = self.service_id_for(ROLE_STRUCTURE, request.service_id)
+        provider = self.provider_from(service_id)
+        service = self.models.get(service_id)
+        config_value = request.model_dump()
+        config_value["service_id"] = service_id
+        scope = {
+            "toc_entries": len(request.toc),
+            "extract_toc": request.extract_toc,
+            "proofread": request.proofread,
+            "body_text_included": False,
+            "toc_page_text_included": request.extract_toc,
+            "model": service.get("model", ""),
+            "service_name": service.get("name", ""),
+        }
+        job_id = self.store.create_job(project_id, "structure_ai", scope, config_value)
+
+        def run() -> None:
+            try:
+                run_structure_job(self.store, project_id, job_id, config_value, provider)
+            except Exception:
+                logger.exception("Structure job %s failed", job_id)
+
+        self.executor.submit(run)
+        return job_id
 
     def start_translation(self, project_id: str, request: TranslationJobInput, *, existing_job_id: str | None = None) -> str:
         scope = {"block_ids": request.block_ids, "locale": request.locale}
@@ -221,7 +304,7 @@ class JobManager:
 
         def run() -> None:
             try:
-                provider = OpenAICompatibleProvider(request.provider.config())
+                provider = self.provider_from(request.service_id, request.provider)
                 service = TranslationService(self.store, provider)
                 service.run(
                     project_id, block_ids=request.block_ids, locale=request.locale, glossary=request.glossary,
@@ -297,7 +380,8 @@ def create_app(store: ProjectStore | None = None):
         # startup fail instead of running against a partially visible library.
         raise RuntimeError(str(error)) from error
     ocr = MinerUService(store)
-    manager = JobManager(store, ocr)
+    models = ModelServiceStore(application_support())
+    manager = JobManager(store, ocr, models)
     uploads = UploadStore(application_support() / "uploads")
     tbl = TBLBridge(store)
     token = session_token()
@@ -350,7 +434,7 @@ def create_app(store: ProjectStore | None = None):
             "status": "ok",
             "version": "0.1.0",
             "runtime_revision": RUNTIME_REVISION,
-            "capabilities": ["intake_items_v1", "structure_review_v2"],
+            "capabilities": ["intake_items_v1", "structure_review_v2", "model_services_v1", "structure_job_v1"],
         }
 
     @app.get("/projects")
@@ -643,7 +727,27 @@ def create_app(store: ProjectStore | None = None):
 
     @app.post("/projects/{project_id}/structure/audit-payload")
     def structure_audit_payload(project_id: str, request: StructureAnalyze):
+        # v1 审计：只包含目录文本与标题候选，不含任何正文/目录页文本。
         return structure_model_payload(store.load_document(project_id), request.toc)
+
+    @app.post("/projects/{project_id}/structure/plan")
+    def structure_plan(project_id: str, request: StructurePlanInput):
+        # v2 审计：与异步作业完全一致的输入，包含将要发送的目录页文本。
+        return plan_structure_analysis(
+            store.load_document(project_id), request.toc,
+            extract_toc=request.extract_toc, proofread=request.proofread,
+            toc_page_limit=request.toc_page_limit,
+        )
+
+    @app.post("/projects/{project_id}/structure/jobs")
+    def structure_job_create(project_id: str, request: StructureJobInput):
+        store.load_document(project_id)  # 提前校验文档存在，避免创建无效任务
+        job_id = manager.start_structure(project_id, request)
+        return store.get_job(project_id, job_id)
+
+    @app.get("/projects/{project_id}/structure/jobs/{job_id}")
+    def structure_job_get(project_id: str, job_id: str):
+        return store.get_job(project_id, job_id)
 
     @app.post("/projects/{project_id}/structure/analyze-ai")
     def structure_analyze_ai(project_id: str, request: StructureAIAnalyze):
@@ -651,9 +755,9 @@ def create_app(store: ProjectStore | None = None):
         job_id = store.create_job(project_id, "structure_ai", scope, request.model_dump())
         store.update_job(project_id, job_id, status="running")
         try:
+            provider = manager.provider_from(request.service_id, request.provider)
             suggestions, response = analyze_structure_with_provider(
-                store.load_document(project_id), request.toc,
-                OpenAICompatibleProvider(request.provider.config()),
+                store.load_document(project_id), request.toc, provider,
             )
             applied = [asdict(value) for value in apply_automatic(store, project_id, suggestions)] if request.auto_apply else []
             store.record_usage(UsageRecord(
@@ -724,6 +828,58 @@ def create_app(store: ProjectStore | None = None):
         delete_api_key(provider)
         return {"configured": False}
 
+    def _service_view() -> dict[str, Any]:
+        return {
+            "services": [{**item, "configured": models.configured(item["service_id"])} for item in models.list()],
+            "roles": models.roles(),
+        }
+
+    @app.get("/model-services")
+    def model_service_list():
+        return _service_view()
+
+    @app.post("/model-services")
+    def model_service_create(request: ModelServiceInput):
+        created = models.create(request.model_dump())
+        return {**created, "configured": models.configured(created["service_id"])}
+
+    @app.put("/model-services/roles")
+    def model_service_roles(request: ModelRolesInput):
+        return models.set_roles(request.model_dump(exclude_none=True))
+
+    @app.put("/model-services/{service_id}")
+    def model_service_update(service_id: str, request: ModelServiceInput):
+        updated = models.update(service_id, request.model_dump())
+        return {**updated, "configured": models.configured(service_id)}
+
+    @app.delete("/model-services/{service_id}")
+    def model_service_delete(service_id: str):
+        models.delete(service_id)
+        return {"deleted": service_id}
+
+    @app.put("/model-services/{service_id}/key")
+    def model_service_key(service_id: str, request: SecretInput):
+        models.get(service_id)  # 校验存在
+        save_service_key(service_id, request.value)
+        return {"configured": True}
+
+    @app.post("/model-services/{service_id}/check")
+    def model_service_check(service_id: str):
+        import time as _time
+        started = _time.perf_counter()
+        provider = models.config_for(service_id, timeout=30.0)
+        response = provider.complete(
+            system="你是连接性探测助手。只返回 JSON {\"ok\":true}。",
+            user="ping",
+        )
+        return {
+            "ok": True,
+            "service_id": service_id,
+            "model": response.model,
+            "latency_ms": round((_time.perf_counter() - started) * 1000),
+            "sample": response.content[:160],
+        }
+
     @app.post("/projects/{project_id}/translation/jobs")
     def translation_job(project_id: str, request: TranslationJobInput):
         job_id = manager.start_translation(project_id, request)
@@ -751,7 +907,7 @@ def create_app(store: ProjectStore | None = None):
 
     @app.post("/projects/{project_id}/translate/instant")
     def translate_instant(project_id: str, request: InstantInput):
-        service = TranslationService(store, OpenAICompatibleProvider(request.provider.config()))
+        service = TranslationService(store, manager.provider_from(request.service_id, request.provider))
         return service.instant(project_id, request.text, locale=request.locale, block_id=request.block_id, save=request.save)
 
     @app.put("/projects/{project_id}/translations/{block_id}")

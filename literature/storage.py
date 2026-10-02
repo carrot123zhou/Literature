@@ -366,7 +366,7 @@ class ProjectStore:
             )
         return job_id
 
-    def update_job(self, project_id: str, job_id: str, *, status: str | None = None, progress: float | None = None, error: str | None = None) -> None:
+    def update_job(self, project_id: str, job_id: str, *, status: str | None = None, progress: float | None = None, error: str | None = None, message: str | None = None, result: dict[str, Any] | None = None, activity: list[dict[str, Any]] | None = None) -> None:
         assignments = ["updated_at=?"]
         values: list[Any] = [utc_now()]
         if status is not None:
@@ -378,6 +378,15 @@ class ProjectStore:
         if error is not None:
             assignments.append("error=?")
             values.append(error)
+        if message is not None:
+            assignments.append("message=?")
+            values.append(message)
+        if result is not None:
+            assignments.append("result_json=?")
+            values.append(json.dumps(result, ensure_ascii=False))
+        if activity is not None:
+            assignments.append("activity_json=?")
+            values.append(json.dumps(activity, ensure_ascii=False))
         values.append(job_id)
         database = self.project_path(project_id) / "literature.sqlite"
         with self._connect(database) as connection:
@@ -390,23 +399,24 @@ class ProjectStore:
             row = connection.execute("SELECT * FROM jobs WHERE job_id=?", (job_id,)).fetchone()
         if row is None:
             raise StorageError("任务不存在。")
-        value = dict(row)
-        value["scope"] = json.loads(value.pop("scope_json"))
-        value["config"] = json.loads(value.pop("config_json"))
-        return value
+        return self._decode_job(row)
 
     def list_jobs(self, project_id: str) -> list[dict[str, Any]]:
         database = self.project_path(project_id) / "literature.sqlite"
         with self._connect(database) as connection:
             connection.row_factory = sqlite3.Row
             rows = connection.execute("SELECT * FROM jobs ORDER BY created_at DESC").fetchall()
-        result = []
-        for row in rows:
-            value = dict(row)
-            value["scope"] = json.loads(value.pop("scope_json"))
-            value["config"] = json.loads(value.pop("config_json"))
-            result.append(value)
-        return result
+        return [self._decode_job(row) for row in rows]
+
+    @staticmethod
+    def _decode_job(row: sqlite3.Row) -> dict[str, Any]:
+        value = dict(row)
+        value["scope"] = json.loads(value.pop("scope_json"))
+        value["config"] = json.loads(value.pop("config_json"))
+        value["result"] = json.loads(value.pop("result_json", "{}") or "{}")
+        value["activity"] = json.loads(value.pop("activity_json", "[]") or "[]")
+        value.setdefault("message", "")
+        return value
 
     def usage_summary(self, project_id: str) -> dict[str, Any]:
         database = self.project_path(project_id) / "literature.sqlite"
@@ -456,3 +466,18 @@ class ProjectStore:
                 CREATE INDEX IF NOT EXISTS idx_usage_project ON usage_records(project_id);
                 """
             )
+        ProjectStore._migrate_database(path)
+
+    @staticmethod
+    def _migrate_database(path: Path) -> None:
+        """幂等增量迁移：为既有数据库补齐后续版本新增的列。"""
+        with ProjectStore._connect(path) as connection:
+            columns = {row[1] for row in connection.execute("PRAGMA table_info(jobs)").fetchall()}
+            additions = {
+                "message": "ALTER TABLE jobs ADD COLUMN message TEXT NOT NULL DEFAULT ''",
+                "result_json": "ALTER TABLE jobs ADD COLUMN result_json TEXT NOT NULL DEFAULT '{}'",
+                "activity_json": "ALTER TABLE jobs ADD COLUMN activity_json TEXT NOT NULL DEFAULT '[]'",
+            }
+            for name, statement in additions.items():
+                if name not in columns:
+                    connection.execute(statement)
