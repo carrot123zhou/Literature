@@ -71,7 +71,7 @@ export default function ReviewWorkspace(props: Props) {
   const [focus, setFocus] = useState<FocusRequest | null>(null);
   const [follow, setFollow] = useState(true);
   const [busy, setBusy] = useState(false);
-  const [options, setOptions] = useState<StructureOptions>({ extractToc: !tocText.trim(), proofread: true, autoApply: false, useVision: false, requestTimeoutSeconds: 600 });
+  const [options, setOptions] = useState<StructureOptions>({ extractToc: !tocText.trim(), proofread: true, autoApply: false, useVision: false, requestTimeoutSeconds: 600, proofreadFull: false, proofreadConcurrency: 2 });
   const [structureJob, setStructureJob] = useState<Job | null>(null);
   const [structureRunning, setStructureRunning] = useState(false);
   const [proposedToc, setProposedToc] = useState<StructureTocEntry[] | null>(null);
@@ -273,7 +273,7 @@ export default function ReviewWorkspace(props: Props) {
     setMessage("结构分析任务已启动");
     api<Job>(`/projects/${projectId}/structure/jobs`, {
       method: "POST",
-      body: JSON.stringify({ service_id: modelService?.service_id || "", toc: parseTocDraft(tocText), extract_toc: options.extractToc, proofread: options.proofread, auto_apply: options.autoApply, toc_page_indexes: tocPages, use_vision: options.useVision, request_timeout_seconds: options.requestTimeoutSeconds, reuse_job_id: reuseJobId }),
+      body: JSON.stringify({ service_id: modelService?.service_id || "", toc: parseTocDraft(tocText), extract_toc: options.extractToc, proofread: options.proofread, auto_apply: options.autoApply, toc_page_indexes: tocPages, use_vision: options.useVision, request_timeout_seconds: options.requestTimeoutSeconds, reuse_job_id: reuseJobId, proofread_full: options.proofreadFull, proofread_concurrency: options.proofreadConcurrency }),
     }).then(job => {
       if (!mounted.current) return;
       trackedJob.current = job.job_id;

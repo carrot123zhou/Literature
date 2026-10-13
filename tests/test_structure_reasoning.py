@@ -171,8 +171,12 @@ class StructureReasoningTests(unittest.TestCase):
                 options = {**options, "reuse_job_id": job}
                 retry = store.create_job(project, "structure_ai", {}, options)
                 result = run_structure_job(store, project, retry, options, provider)
-                self.assertEqual(len(provider.calls), 4)
+                # 上下文（文档/模型/输入）变化后不得复用任何已缓存响应；
+                # 选择性复核会减少第二次请求数量，因此这里校验缓存契约而不是固定调用次数。
                 self.assertEqual(result["audit"]["reused_requests"], 0)
+                self.assertTrue(result["audit"]["requests"])
+                self.assertTrue(all(item.get("status") != "reused" for item in result["audit"]["requests"]))
+                self.assertGreater(len(provider.calls), 0)
 
     def test_cross_batch_parent_is_readonly_context(self):
         candidates = [candidate(f"b{i}", "Title") for i in range(45)]

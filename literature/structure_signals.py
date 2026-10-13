@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import re
 import json
+from functools import lru_cache
 from pathlib import Path
 import unicodedata
 from collections import Counter
@@ -518,6 +519,7 @@ def extract_printed_toc(document: Document, pages: Iterable[int] | None = None) 
 # --------------------------------------------------------------------------- 对齐
 
 
+@lru_cache(maxsize=16384)
 def heading_key(value: str) -> str:
     value = strip_inline_markers(value).casefold()
     value = re.sub(r"^\s*(?:chapter|part|book|section|appendix)\s+(?:[ivxlcdm]+|\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)\b[.:]?\s*", " ", value)
@@ -528,12 +530,19 @@ def heading_key(value: str) -> str:
     return re.sub(r"[\W_]+", "", value, flags=re.UNICODE)
 
 
+@lru_cache(maxsize=65536)
 def heading_similarity(left: str, right: str) -> float:
     a, b = heading_key(left), heading_key(right)
     if not a or not b:
         return 0.0
     if a == b:
         return 1.0
+    # SequenceMatcher.ratio() 的上界是 2*min/(len_a+len_b)。低于匹配下限时
+    # 调用方只会把它当成“不匹配”（对齐 DP 用 MATCH_FLOOR 做阈值），直接返回上界
+    # 可以跳过昂贵的逐字符比较，且不改变任何决策。
+    upper = 2.0 * min(len(a), len(b)) / (len(a) + len(b))
+    if upper < MATCH_FLOOR:
+        return upper
     score = SequenceMatcher(a=a, b=b).ratio()
     if (a in b or b in a) and min(len(a), len(b)) / max(len(a), len(b)) >= 0.7:
         score = max(score, 0.88)

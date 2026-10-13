@@ -754,7 +754,7 @@ class StructureCalibrationTests(unittest.TestCase):
             {"proofread": True, "extract_toc": True, "auto_apply": True}, Provider())
         self.assertEqual(len(result["suggestions"]), 1)
         self.assertFalse(result["applied"])
-        self.assertEqual(result["review_coverage"], {"candidates": 1, "reviewed": 1, "needs_review": 0})
+        self.assertEqual(result["review_coverage"], {"candidates": 1, "reviewed": 1, "second_pass": 1, "reused": 0, "needs_review": 0})
 
     def test_duplicate_roles_do_not_choose_arbitrary_conflict(self):
         class Provider:

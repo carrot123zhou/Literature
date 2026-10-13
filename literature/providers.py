@@ -32,7 +32,11 @@ class ProviderTimeoutError(ProviderError):
     def __init__(self, kind: str, seconds: float) -> None:
         self.kind, self.seconds = kind, seconds
         action = {"read": "等待模型响应", "connect": "连接模型服务", "write": "发送模型输入", "pool": "等待模型连接"}[kind]
-        super().__init__(f"{action}超时（等待上限 {seconds:g} 秒）。可稍后重试或更换模型服务。")
+        hint = (
+            "若本任务用量里 reasoning 占比很高，可在模型服务里关闭思考模式或换用非思考模型。"
+            if kind == "read" else ""
+        )
+        super().__init__(f"{action}超时（等待上限 {seconds:g} 秒）。可稍后重试或更换模型服务。{hint}")
 
 
 def normalize_proxy_environment() -> None:
@@ -79,6 +83,11 @@ class ProviderConfig:
     input_price_per_million: float | None = None
     output_price_per_million: float | None = None
     extra_headers: dict[str, str] = field(default_factory=dict)
+    # 思考模式/预算：默认全空，不向服务发送任何未声明支持的字段。
+    # 只有用户显式选择 reasoning_style 后才按该风格的显式协议拼请求体。
+    reasoning_style: str = ""
+    reasoning_effort: str = ""
+    reasoning_budget: int = 0
 
     @classmethod
     def preset(cls, provider: str, **overrides: Any) -> "ProviderConfig":
@@ -109,6 +118,35 @@ class TextProvider(Protocol):
     config: ProviderConfig
 
     def complete(self, *, system: str, user: str) -> ProviderResponse: ...
+
+
+# 显式、可审计的思考参数协议。默认不选任何风格就不发送额外字段，
+# 避免把未声明支持的参数发给中转站被静默忽略或直接报错。
+REASONING_STYLES = ("openai_effort", "qwen_thinking", "glm_thinking")
+REASONING_EFFORTS = ("minimal", "low", "medium", "high")
+THINKING_TOGGLES = ("on", "off")
+
+
+def reasoning_request_fields(config: Any) -> dict[str, Any]:
+    """按用户显式选择的协议返回请求体附加字段；未选择或不合法则返回空。"""
+    style = str(getattr(config, "reasoning_style", "") or "").strip()
+    effort = str(getattr(config, "reasoning_effort", "") or "").strip()
+    try:
+        budget = int(getattr(config, "reasoning_budget", 0) or 0)
+    except (TypeError, ValueError):
+        budget = 0
+    if style == "openai_effort" and effort in REASONING_EFFORTS:
+        return {"reasoning_effort": effort}
+    if style == "qwen_thinking":
+        fields: dict[str, Any] = {}
+        if effort in THINKING_TOGGLES:
+            fields["enable_thinking"] = effort == "on"
+        if budget > 0:
+            fields["thinking_budget"] = budget
+        return fields
+    if style == "glm_thinking" and effort in THINKING_TOGGLES:
+        return {"thinking": {"type": "enabled" if effort == "on" else "disabled"}}
+    return {}
 
 
 def save_api_key(provider: str, api_key: str) -> None:
@@ -289,6 +327,7 @@ class OpenAICompatibleProvider:
             "max_tokens": self.config.max_output_tokens,
             "stream": False,
         }
+        body.update(reasoning_request_fields(self.config))
         timeouts = httpx.Timeout(self.timeout, connect=min(20.0, self.timeout),
                                  write=min(60.0, self.timeout), pool=min(30.0, self.timeout))
         client = self._client_instance(httpx)

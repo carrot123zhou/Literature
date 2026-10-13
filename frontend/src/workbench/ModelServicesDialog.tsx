@@ -12,8 +12,15 @@ const PRESETS: Record<string, { label: string; base_url: string; model: string }
 
 type Draft = ModelServicePayload & { service_id: string };
 
+const REASONING_STYLES: { value: string; label: string }[] = [
+  { value: "", label: "不设置（跟随服务默认）" },
+  { value: "openai_effort", label: "OpenAI · reasoning_effort" },
+  { value: "qwen_thinking", label: "Qwen · enable_thinking" },
+  { value: "glm_thinking", label: "智谱 GLM · thinking" },
+];
+
 function emptyDraft(): Draft {
-  return { service_id: "", name: "", preset: "custom", base_url: "", model: "", temperature: 0.2, max_output_tokens: 8192, input_price_per_million: null, output_price_per_million: null };
+  return { service_id: "", name: "", preset: "custom", base_url: "", model: "", temperature: 0.2, max_output_tokens: 8192, input_price_per_million: null, output_price_per_million: null, reasoning_style: "", reasoning_effort: "", reasoning_budget: 0 };
 }
 function draftFrom(service: ModelService): Draft {
   return {
@@ -21,6 +28,9 @@ function draftFrom(service: ModelService): Draft {
     temperature: service.temperature, max_output_tokens: service.max_output_tokens,
     input_price_per_million: service.input_price_per_million ?? null,
     output_price_per_million: service.output_price_per_million ?? null,
+    reasoning_style: service.reasoning_style ?? "",
+    reasoning_effort: service.reasoning_effort ?? "",
+    reasoning_budget: service.reasoning_budget ?? 0,
   };
 }
 
@@ -156,6 +166,35 @@ export default function ModelServicesDialog({ api, role, close, onMessage }: { a
             <label>输入单价（USD/百万）<input type="number" min="0" step="0.01" value={draft.input_price_per_million ?? ""} onChange={event => setDraft({ ...draft, input_price_per_million: event.target.value ? Number(event.target.value) : null })}/></label>
             <label>输出单价（USD/百万）<input type="number" min="0" step="0.01" value={draft.output_price_per_million ?? ""} onChange={event => setDraft({ ...draft, output_price_per_million: event.target.value ? Number(event.target.value) : null })}/></label>
           </div>
+          <label>思考模式协议
+            <select value={draft.reasoning_style ?? ""} onChange={event => setDraft({ ...draft, reasoning_style: event.target.value, reasoning_effort: "", reasoning_budget: 0 })}>
+              {REASONING_STYLES.map(item => <option key={item.value} value={item.value}>{item.label}</option>)}
+            </select>
+          </label>
+          {draft.reasoning_style === "openai_effort" && (
+            <label>思考强度
+              <select value={draft.reasoning_effort ?? ""} onChange={event => setDraft({ ...draft, reasoning_effort: event.target.value })}>
+                <option value="">不设置</option>
+                <option value="minimal">minimal</option>
+                <option value="low">low</option>
+                <option value="medium">medium</option>
+                <option value="high">high</option>
+              </select>
+            </label>
+          )}
+          {(draft.reasoning_style === "qwen_thinking" || draft.reasoning_style === "glm_thinking") && (
+            <label>思考开关
+              <select value={draft.reasoning_effort ?? ""} onChange={event => setDraft({ ...draft, reasoning_effort: event.target.value })}>
+                <option value="">不设置</option>
+                <option value="off">关闭（翻译任务推荐）</option>
+                <option value="on">开启</option>
+              </select>
+            </label>
+          )}
+          {draft.reasoning_style === "qwen_thinking" && (
+            <label>思考预算（token，0 为沿用服务默认）<input type="number" min="0" step="1024" value={draft.reasoning_budget ?? 0} onChange={event => setDraft({ ...draft, reasoning_budget: Math.max(0, Number(event.target.value) || 0) })}/></label>
+          )}
+          {draft.reasoning_style && <p className="empty-note">用量里 reasoning 占比很高时，关闭思考模式可能降低耗时与费用；请对照结果检查质量。</p>}
           <label>API Key<input type="password" value={keyInput} onChange={event => setKeyInput(event.target.value)} placeholder={selected?.configured ? "已保存，留空则不变" : "只保存到 macOS Keychain"}/></label>
           <div className="model-form-actions">
             <button type="button" onClick={saveKey} disabled={busy || isNew || !keyInput.trim()}>保存密钥</button>

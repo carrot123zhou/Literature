@@ -59,11 +59,13 @@ export type JobActivity = { at: string; level: string; text: string };
 export type Job = {
   job_id: string; kind: string; status: string; progress: number; error: string; scope: Record<string, unknown>;
   message?: string; activity?: JobActivity[]; result?: Record<string, unknown>;
+  created_at?: string; updated_at?: string;
 };
 export type ModelService = {
   service_id: string; name: string; preset: string; base_url: string; model: string;
   temperature: number; max_output_tokens: number;
   input_price_per_million?: number | null; output_price_per_million?: number | null;
+  reasoning_style?: string; reasoning_effort?: string; reasoning_budget?: number;
   configured: boolean;
 };
 export type ModelRole = "structure" | "translation";

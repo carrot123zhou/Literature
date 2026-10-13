@@ -4,7 +4,7 @@ import type { DocumentGraph, Job, ModelService, StructurePatch, StructureSuggest
 import { flattenToc, formatTocDraft, parseTocDraft } from "./projection";
 
 export type TocCandidate = { page_index: number; page_number: number; confidence: number; reasons: string[] };
-export type StructureOptions = { extractToc: boolean; proofread: boolean; autoApply: boolean; useVision: boolean; requestTimeoutSeconds: number };
+export type StructureOptions = { extractToc: boolean; proofread: boolean; autoApply: boolean; useVision: boolean; requestTimeoutSeconds: number; proofreadFull: boolean; proofreadConcurrency: number };
 export type StructureAnalysis = { job: Job | null; running: boolean; options: StructureOptions; proposedToc: StructureTocEntry[] | null };
 type Props = {
   document: DocumentGraph; tocText: string; onTocText: (value: string) => void;
@@ -32,6 +32,12 @@ function TocRow({ node, selected, activeBlock, onSelect }: { node: TocNode; sele
     {node.children.length > 0 && <ul>{node.children.map(child => <TocRow key={child.node_id} node={child} selected={selected} activeBlock={activeBlock} onSelect={onSelect}/>)}</ul>}
   </li>;
 }
+function formatDuration(seconds: number): string {
+  if (seconds < 60) return `${seconds} 秒`;
+  return `${Math.floor(seconds / 60)} 分 ${seconds % 60} 秒`;
+}
+const SCOPE_LABELS: Record<string, string> = { structure_extract: "目录核对", structure_outline: "整体标题树规划", structure_proofread: "标题角色复核" };
+function stageLabel(scope?: string): string { return (scope && SCOPE_LABELS[scope]) || "模型请求"; }
 function targetLabel(value: unknown): string {
   const labels: Record<string, string> = { title: "标题", paragraph: "正文", list: "列表", footnote: "脚注" };
   if (typeof value === "object" && value) {
@@ -50,6 +56,13 @@ export default memo(function OutlinePane(props: Props) {
   const pending = allPending.filter(value => queue === "all" || group(value) === queue);
   const live = patches.filter(value => !value.reverted_at);
   const { options, running, job, proposedToc } = analysis;
+  const [clock, setClock] = useState(() => Date.now());
+  useEffect(() => {
+    if (!running) return;
+    setClock(Date.now());
+    const timer = window.setInterval(() => setClock(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, [running]);
   const [draftText, setDraftText] = useState("");
   useEffect(() => { setDraftText(proposedToc ? formatTocDraft(proposedToc) : ""); }, [proposedToc]);
   const draftEntries = parseTocDraft(draftText);
@@ -58,7 +71,13 @@ export default memo(function OutlinePane(props: Props) {
   const textFor = (id: string) => document.blocks.find(block => block.block_id === id)?.source_text || "结构块";
   const reconciliation = (job?.result as { reconciliation?: Record<string, number> } | undefined)?.reconciliation;
   const skippedModel = (job?.result as { audit?: { skipped_model_suggestions?: number } } | undefined)?.audit?.skipped_model_suggestions ?? 0;
-  const coverage = (job?.result as { review_coverage?: { reviewed: number; candidates: number; needs_review: number } } | undefined)?.review_coverage;
+  const coverage = (job?.result as { review_coverage?: { reviewed: number; candidates: number; needs_review: number; reused?: number; second_pass?: number } } | undefined)?.review_coverage;
+  const auditRequests = (job?.result as { audit?: { requests?: Array<{ scope?: string; status?: string; started_at?: string }> } } | undefined)?.audit?.requests ?? [];
+  const createdMs = job?.created_at ? Date.parse(job.created_at) : NaN;
+  const totalElapsed = running && Number.isFinite(createdMs) ? Math.max(0, Math.round((clock - createdMs) / 1000)) : null;
+  const inFlight = [...auditRequests].reverse().find(item => item.status === "started" && item.started_at);
+  const inFlightMs = inFlight?.started_at ? Date.parse(inFlight.started_at) : NaN;
+  const inFlightElapsed = running && Number.isFinite(inFlightMs) ? Math.max(0, Math.round((clock - inFlightMs) / 1000)) : null;
   const hierarchy = (job?.result as { hierarchy_review?: { checked: number; headings: number }; hierarchy_plan?: { profile?: { toc_scope?: string; root_convention?: string } } } | undefined);
   const baselineCount = parseTocDraft(tocText).length;
   return <aside className="sidebar mineru-control-column review-outline">
@@ -85,11 +104,12 @@ export default memo(function OutlinePane(props: Props) {
         {job && <div className={`structure-run-panel${job.status === "failed" ? " is-failed" : ""}`} role="status">
           <strong>{running ? "正在处理" : job.status === "failed" ? "校准失败" : "校准完成"}</strong>
           <progress max={1} value={job.progress || 0}/>
+          {running && totalElapsed !== null && <p>已运行 {formatDuration(totalElapsed)}{inFlight && inFlightElapsed !== null ? ` · ${stageLabel(inFlight.scope)}进行中 ${formatDuration(inFlightElapsed)}` : ""}</p>}
           {job.status === "failed"
             ? <p role="alert" className="review-error">{job.error || job.message}</p>
             : <p>{job.message}</p>}
           {job.status === "failed" && <small>再次校准时，已完成且文档、模型与输入一致的请求会复用。</small>}
-          {coverage && <p>角色有效回答 {coverage.reviewed}/{coverage.candidates}{coverage.needs_review > 0 ? `，${coverage.needs_review} 个仍需核对` : ""}；回答完整不代表层级准确。</p>}
+          {coverage && <p>候选 {coverage.candidates} 个 · 第一遍复用 {coverage.reused ?? 0} 个 · 第二遍复核 {coverage.second_pass ?? 0} 个{coverage.needs_review > 0 ? `，${coverage.needs_review} 个仍需核对` : ""}；复用按角色、父子关系与目录一致性检查，冲突项一律复核。</p>}
           {hierarchy?.hierarchy_review?.headings !== undefined && <p>父子关系检查通过 {hierarchy.hierarchy_review.checked}/{hierarchy.hierarchy_review.headings} 个标题；未通过的层级修改不进入建议。</p>}
           {hierarchy?.hierarchy_plan?.profile?.toc_scope && <p className="review-hint">目录范围：{hierarchy.hierarchy_plan.profile.toc_scope}<br/>层级约定：{hierarchy.hierarchy_plan.profile.root_convention}</p>}
           {reconciliation && <p className="reconciliation-summary">目录 {reconciliation.toc_entries ?? 0} · 已定位 {reconciliation.matched ?? 0} · 层级修正 {reconciliation.level_corrections ?? 0} · 疑似漏标 {reconciliation.promotions ?? 0} · 未定位 {reconciliation.missing ?? 0} · 未收录标题 {reconciliation.unlisted_titles ?? 0}</p>}
@@ -108,7 +128,9 @@ export default memo(function OutlinePane(props: Props) {
           </div>}
           <label className="structure-option"><input type="checkbox" checked={options.useVision} disabled={blocked} onChange={() => onOptions({ useVision: !options.useVision })}/>对照原页图片 <small>需视觉模型</small></label>
           <label className="structure-option"><input type="checkbox" checked={options.autoApply} disabled={blocked} onChange={() => onOptions({ autoApply: !options.autoApply })}/>自动采用高置信修正</label>
-          <small>自动采用仅用于本地校准；AI 整体推理的修改均待确认。</small>
+          <label className="structure-option"><input type="checkbox" checked={options.proofreadFull} disabled={blocked} onChange={() => onOptions({ proofreadFull: !options.proofreadFull })}/>全量复核每个候选（更慢，回退用）</label>
+          <label>复核并发（1–4 路）<input aria-label="复核并发" type="number" min={1} max={4} value={options.proofreadConcurrency} disabled={blocked} onChange={event => onOptions({ proofreadConcurrency: Math.max(1, Math.min(4, Number(event.target.value) || 1)) })}/></label>
+          <small>默认只复核第一遍规划中缺失、不确定、冲突或证据不足的候选；全量复核会重新判断每个候选，仅作回退。自动采用仅用于本地校准，AI 整体推理的修改均待确认。</small>
           <button className="block-button" onClick={onAnalyze} disabled={blocked}>只做本地校准 · 无模型费用</button>
           <button className="link-button block-button" onClick={onPreviewAudit} disabled={blocked}>预览启动输入</button>
         </details>

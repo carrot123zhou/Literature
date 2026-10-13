@@ -11,6 +11,9 @@ export type ModelServicePayload = {
   max_output_tokens?: number;
   input_price_per_million?: number | null;
   output_price_per_million?: number | null;
+  reasoning_style?: string;
+  reasoning_effort?: string;
+  reasoning_budget?: number;
 };
 
 export type ModelServicesApi = {

@@ -9,8 +9,10 @@ import threading
 import uuid
 import time
 from collections import Counter
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import asdict, is_dataclass
 from difflib import SequenceMatcher
+from functools import lru_cache
 from typing import Any, Iterable
 from pathlib import Path
 
@@ -55,6 +57,7 @@ def _structure_cache_put(request_key: str, context_key: str, content: str, metad
             oldest = _STRUCTURE_CACHE_ORDER.pop(0)
             _STRUCTURE_CACHE.pop(oldest, None)
 from .storage import ProjectStore, StorageError
+from .request_coordinator import BudgetExhausted
 
 
 AUTO_THRESHOLD = 0.97
@@ -152,21 +155,26 @@ def structure_model_payload(document: Document, authoritative_toc: Iterable[dict
         if block.type not in EDITABLE_STRUCTURE_TYPES:
             continue
         signal = by_signal.get(block.block_id)
-        score, _level = _toc_matches(block.source_text, toc)
         if block.type in TEXT_STRUCTURE_TYPES:
             if len(block.bbox) == 4 and block.bbox[2] - block.bbox[0] <= 40 and block.bbox[3] - block.bbox[1] >= 100:
                 continue  # 竖向页边标签不是横排标题候选。
+            # looks_like_heading 要求不超过 120 字符；更长的正文不可能成为标题候选，
+            # 先按长度跳过，避免对它做昂贵的目录相似度计算。标题块仍需 toc_score。
+            if len(block.source_text) > 120:
+                continue
+            score, _level = _toc_matches(block.source_text, toc)
             looks_like_heading = (
-                len(block.source_text) <= 120
-                and (score >= 0.92 or numbered_heading_candidate(block)
-                     or (signal is not None and signal.heading_score >= 0.5)
-                     or (block.type == "paragraph" and len(block.bbox) == 4
-                         and 0 < block.bbox[3] - block.bbox[1] <= 25
-                         and 0 < block.bbox[2] - block.bbox[0] <= 650
-                         and not re.search(r"[。.!?;；]$", block.source_text)))
+                score >= 0.92 or numbered_heading_candidate(block)
+                or (signal is not None and signal.heading_score >= 0.5)
+                or (block.type == "paragraph" and len(block.bbox) == 4
+                    and 0 < block.bbox[3] - block.bbox[1] <= 25
+                    and 0 < block.bbox[2] - block.bbox[0] <= 650
+                    and not re.search(r"[。.!?;；]$", block.source_text))
             )
             if not looks_like_heading:
                 continue
+        else:
+            score, _level = _toc_matches(block.source_text, toc)
         previous = document.blocks[index - 1] if index else None
         following = document.blocks[index + 1] if index + 1 < len(document.blocks) else None
         candidates.append({
@@ -402,9 +410,25 @@ MAX_BATCH_SPLIT_DEPTH = 3
 MIN_SPLIT_SIZE = 8
 STRUCTURE_PROMPT_VERSION = "hierarchy-v2"
 
+# 第二遍复核默认并发 2 路（公共 RequestCoordinator 仍按服务/预算/退避封顶），
+# 用户可显式调高到 4。全局规划保持顺序依赖，不并发。
+DEFAULT_PROOFREAD_CONCURRENCY = 2
+MAX_PROOFREAD_CONCURRENCY = 4
+
+# 并发复核需要把每个请求归属到具体批次，才能在审计里回填 rejected_count/reasons。
+_BATCH_TAG = threading.local()
+
+
+def _current_batch_tag() -> str:
+    return getattr(_BATCH_TAG, "value", "")
+
 
 class StructureResponseError(ProviderError):
     """仅输出格式问题可以缩小批次重试；鉴权/网络错误直接失败。"""
+
+
+class _StructureStopped(ProviderError):
+    """另一批复核失败后中止：不再发送任何新请求。"""
 
 
 def _structure_json(content: str) -> dict[str, Any]:
@@ -471,19 +495,26 @@ def run_structure_job(
                              "request_timeout_seconds": options.get("request_timeout_seconds", 600)}
     cached_requests: dict[str, dict[str, Any]] = {}
     current_scope = "structure_extract"
+    # 并发复核时审计、activity、进度与写账必须串行化，避免 JSON 序列化正在被追加的
+    # 列表、进度回退或重复计数。用 RLock：emit 可能在已持锁的 _call 内再次调用。
+    state_lock = threading.RLock()
+    # 任一复核批失败即置位：阻止排队/拆批重试再发新请求（避免失败后继续付费）。
+    stop_event = threading.Event()
 
     def emit(text: str, *, level: str = "info", progress: float | None = None) -> None:
-        activity.append({"at": utc_now(), "level": level, "text": text})
-        store.update_job(project_id, job_id, activity=activity, message=text, progress=progress)
+        with state_lock:
+            activity.append({"at": utc_now(), "level": level, "text": text})
+            store.update_job(project_id, job_id, activity=activity, message=text, progress=progress)
 
     def record(response: ProviderResponse, scope: str) -> None:
-        store.record_usage(UsageRecord(
-            usage_id=uuid.uuid4().hex, project_id=project_id, job_id=job_id,
-            provider=response.provider, model=response.model, scope=scope,
-            input_tokens=response.input_tokens, output_tokens=response.output_tokens,
-            cached_tokens=response.cached_tokens, reasoning_tokens=response.reasoning_tokens,
-            estimated_cost=response.estimated_cost, request_id=response.request_id,
-        ))
+        with state_lock:
+            store.record_usage(UsageRecord(
+                usage_id=uuid.uuid4().hex, project_id=project_id, job_id=job_id,
+                provider=response.provider, model=response.model, scope=scope,
+                input_tokens=response.input_tokens, output_tokens=response.output_tokens,
+                cached_tokens=response.cached_tokens, reasoning_tokens=response.reasoning_tokens,
+                estimated_cost=response.estimated_cost, request_id=response.request_id,
+            ))
 
     class AuditedProvider:
         """Persist actual inputs and usage before parsing potentially invalid output."""
@@ -494,32 +525,36 @@ def run_structure_job(
             return self._call(system, user, images)
 
         def _call(self, system: str, user: str, images: list[dict[str, Any]]) -> ProviderResponse:
+            if stop_event.is_set():
+                raise _StructureStopped("结构复核已中止，未发送新请求")
             request = {"scope": current_scope, "system": system, "user": user, "status": "started", "started_at": utc_now(),
+                       "batch_tag": _current_batch_tag(),
                        "images": [{**{key: value for key, value in item.items() if key != "image_url"},
                                    "sha256": hashlib.sha256(item["image_url"].encode()).hexdigest()}
                                   for item in images]}
             request_key = hashlib.sha256(json.dumps({"scope": current_scope, "system": system,
                 "user": user, "images": request["images"]}, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
             request["request_key"] = request_key
-            audit["requests"].append(request)
             context_key = audit.get("context_key", "")
-            cached = cached_requests.get(request_key)
-            if cached is None and context_key:
-                # 仅当能确定模型/文档上下文时才用进程缓存，避免无法界定失效边界。
-                process_entry = _structure_cache_get(request_key, context_key)
-                if process_entry is not None:
-                    cached = {"response_content": process_entry["content"], "response_metadata": process_entry["metadata"]}
-            if cached:
-                response = ProviderResponse(content=cached["response_content"], **cached["response_metadata"])
-                request.update(status="reused", reused_from_job=options.get("reuse_job_id") or "process_cache",
-                               cacheable=True,
-                               request_id=response.request_id, response_content=response.content,
-                               response_metadata=cached["response_metadata"], elapsed_seconds=0, finished_at=utc_now())
-                audit["reused_requests"] += 1
+            with state_lock:
+                audit["requests"].append(request)
+                cached = cached_requests.get(request_key)
+                if cached is None and context_key:
+                    # 仅当能确定模型/文档上下文时才用进程缓存，避免无法界定失效边界。
+                    process_entry = _structure_cache_get(request_key, context_key)
+                    if process_entry is not None:
+                        cached = {"response_content": process_entry["content"], "response_metadata": process_entry["metadata"]}
+                if cached:
+                    response = ProviderResponse(content=cached["response_content"], **cached["response_metadata"])
+                    request.update(status="reused", reused_from_job=options.get("reuse_job_id") or "process_cache",
+                                   cacheable=True,
+                                   request_id=response.request_id, response_content=response.content,
+                                   response_metadata=cached["response_metadata"], elapsed_seconds=0, finished_at=utc_now())
+                    audit["reused_requests"] += 1
+                    store.update_job(project_id, job_id, result={"audit": audit})
+                    emit("复用上次已完成且输入一致的模型响应", level="info")
+                    return response
                 store.update_job(project_id, job_id, result={"audit": audit})
-                emit("复用上次已完成且输入一致的模型响应", level="info")
-                return response
-            store.update_job(project_id, job_id, result={"audit": audit})
             started = time.monotonic()
             budget_coordinator = getattr(provider, "_coordinator", None)
             budget_project = getattr(provider, "_budget_project", "")
@@ -538,21 +573,68 @@ def run_structure_job(
 
             try:
                 response = complete_structure(provider, system=system, user=user, evidence=images)
+            except BudgetExhausted as error:
+                # 预算在发送前拦截：请求未发出，不产生费用、不记未知费用、不留待对账。
+                # 只释放可能存在的旧句柄，审计显式标记未发送。
+                handle = getattr(attempt_state, "handle", None) if attempt_state is not None else None
+                if attempt_state is not None:
+                    attempt_state.handle = None
+                if handle is not None and budget_coordinator is not None:
+                    budget_coordinator.release(handle)
+                with state_lock:
+                    request.update(status="blocked", error=str(error), error_type="BudgetExhausted",
+                                   sent=False, elapsed_seconds=0, finished_at=utc_now())
+                    store.update_job(project_id, job_id, result={"audit": audit})
+                raise
             except Exception as error:
-                # 失败/超时：attempt 预留按未知结算，不静默变零。
-                settle_structure(None)
-                request.update(status="failed", error=str(error), error_type=type(error).__name__,
-                               elapsed_seconds=round(time.monotonic() - started, 3), finished_at=utc_now())
-                if isinstance(error, ProviderTimeoutError):
-                    request.update(timeout_kind=error.kind, timeout_seconds=error.seconds)
-                store.update_job(project_id, job_id, result={"audit": audit})
+                # 失败/超时：即使服务端已回带了部分 usage，也不能静默变零、也不能漏对账。
+                captured = getattr(error, "response", None)
+                if isinstance(captured, ProviderResponse):
+                    try:
+                        record(captured, current_scope)
+                    except Exception:
+                        # 写账失败时保留可恢复的待对账证据，而不是丢掉已知费用。
+                        store.record_pending_cost(
+                            project_id, job_id=job_id, reason="usage-write-failed",
+                            provider=captured.provider, model=captured.model, request_id=captured.request_id,
+                            input_tokens=captured.input_tokens, output_tokens=captured.output_tokens,
+                            estimated_cost=captured.estimated_cost,
+                        )
+                    settle_structure(captured.estimated_cost)
+                else:
+                    store.record_pending_cost(
+                        project_id, job_id=job_id, reason="timeout-or-no-response",
+                        provider=getattr(getattr(provider, "config", None), "provider", ""),
+                        model=getattr(getattr(provider, "config", None), "model", ""),
+                    )
+                    settle_structure(None)
+                with state_lock:
+                    request.update(status="failed", error=str(error), error_type=type(error).__name__,
+                                   elapsed_seconds=round(time.monotonic() - started, 3), finished_at=utc_now())
+                    if isinstance(error, ProviderTimeoutError):
+                        request.update(timeout_kind=error.kind, timeout_seconds=error.seconds)
+                    store.update_job(project_id, job_id, result={"audit": audit})
                 if isinstance(error, ProviderTimeoutError):
                     label = {"structure_extract": "目录核对", "structure_outline": "整体标题树规划", "structure_proofread": "标题角色复核"}[current_scope]
                     raise ProviderError(f"{label}：{error}") from error
                 raise
-            record(response, current_scope)
-            # 逐结构响应把实际费用对账入协调层（不再用作业结束的项目总额 delta）。
-            settle_structure(response.estimated_cost)
+            try:
+                record(response, current_scope)
+            except Exception:
+                # 写账失败：保留可恢复的待对账证据；finally 仍用已知用量对账预算句柄，
+                # 不能因写账异常漏掉 settle、把已花的钱变成“从未花钱”。
+                try:
+                    store.record_pending_cost(
+                        project_id, job_id=job_id, reason="usage-write-failed",
+                        provider=response.provider, model=response.model, request_id=response.request_id,
+                        input_tokens=response.input_tokens, output_tokens=response.output_tokens,
+                        estimated_cost=response.estimated_cost,
+                    )
+                except Exception:
+                    pass
+            finally:
+                # 逐结构响应把实际费用对账入协调层（不再用作业结束的项目总额 delta）。
+                settle_structure(response.estimated_cost)
             try:
                 response_json = extract_json(response.content)
                 fields = {"structure_extract": ("toc",), "structure_outline": ("outline",),
@@ -560,13 +642,14 @@ def run_structure_job(
                 cacheable = any(isinstance(response_json.get(field), list) for field in fields)
             except ProviderError:
                 cacheable = False
-            request.update(status="responded", request_id=response.request_id, response_content=response.content,
-                           cacheable=cacheable,
-                           response_metadata={key: value for key, value in asdict(response).items() if key not in {"content", "raw"}},
-                           elapsed_seconds=round(time.monotonic() - started, 3), finished_at=utc_now())
-            if cacheable and context_key:
-                _structure_cache_put(request_key, context_key, response.content, request["response_metadata"])
-            store.update_job(project_id, job_id, result={"audit": audit})
+            with state_lock:
+                request.update(status="responded", request_id=response.request_id, response_content=response.content,
+                               cacheable=cacheable,
+                               response_metadata={key: value for key, value in asdict(response).items() if key not in {"content", "raw"}},
+                               elapsed_seconds=round(time.monotonic() - started, 3), finished_at=utc_now())
+                if cacheable and context_key:
+                    _structure_cache_put(request_key, context_key, response.content, request["response_metadata"])
+                store.update_job(project_id, job_id, result={"audit": audit})
             return response
 
     audited_provider = AuditedProvider()
@@ -633,6 +716,8 @@ def run_structure_job(
         decisions: dict[str, dict[str, Any]] = {}
         hierarchy_plan: dict[str, Any] = {}
         hierarchy_review: dict[str, Any] = {}
+        selection_stats: dict[str, Any] = {}
+        full_review = False
         if proofread:
             if not baseline:
                 emit("未找到目录：AI 将依据标题群与版面推断结构；证据不足的项保留待复核。", level="warning", progress=0.7)
@@ -657,9 +742,11 @@ def run_structure_job(
             audit["short_paragraph_candidates_included"] = any(item["type"] != "title" for item in candidates)
             current_scope = "structure_outline"
             emit(f"AI 建立整体标题树：{len(candidates)} 个候选，判断目录收录范围与父子关系", level="model", progress=0.70)
+            outline_started = time.monotonic()
             hierarchy_plan = reasoning.plan_outline(model_payload, audited_provider,
-                on_window=lambda number, total, count: emit(f"整体标题树规划第 {number}/{total} 批 · {count} 个候选",
-                    level="model", progress=0.70 + 0.01 * (number - 1) / total))
+                on_window=lambda number, total, count: emit(
+                    f"整体标题树规划第 {number}/{total} 批 · {count} 个候选 · 已用时 {time.monotonic() - outline_started:.0f}s",
+                    level="model", progress=0.70 + 0.10 * (number - 1) / max(1, total)))
             model_payload["hierarchy_plan"] = hierarchy_plan
             if hierarchy_plan["issues"]:
                 emit(f"整体规划有 {len(hierarchy_plan['issues'])} 项待复核，继续逐项检查", level="warning")
@@ -668,28 +755,124 @@ def run_structure_job(
                 emit(
                     "目录对账：{toc_entries} 条目录 · 已定位 {matched} · 层级修正 {level_corrections} · "
                     "疑似漏标 {promotions} · 未定位 {missing} · 未收录标题 {unlisted_titles}".format(**reconciliation),
-                    progress=0.71,
+                    progress=0.80,
                 )
-            emit(f"整体规划覆盖 {hierarchy_plan['planned']}/{len(candidates)} 个候选；逐批复核保留父标题上下文", progress=0.72)
-            total_batches = max(1, (len(candidates) + STRUCTURE_BATCH_SIZE - 1) // STRUCTURE_BATCH_SIZE)
-            for number, offset in enumerate(range(0, len(candidates), STRUCTURE_BATCH_SIZE), start=1):
-                chunk = candidates[offset:offset + STRUCTURE_BATCH_SIZE]
-                emit(f"校对第 {number}/{total_batches} 批 · {len(chunk)} 个候选", level="model", progress=0.72 + 0.12 * offset / len(candidates))
+            emit(f"整体规划覆盖 {hierarchy_plan['planned']}/{len(candidates)} 个候选；按证据完整性选择复核范围", progress=0.81)
+            # 选择性复核：第一遍规划经过完整性/角色/父子关系/目录一致性检查后复用，
+            # 第二遍只复核缺失、uncertain、冲突、证据不足与高风险方向（漏标/降级）。
+            full_review = bool(options.get("proofread_full"))
+            reuse_reasons: dict[str, str] = {}
+            if full_review:
+                reused_decisions: dict[str, dict[str, Any]] = {}
+                review_ids = [item["block_id"] for item in candidates]
+                selection_stats: dict[str, Any] = {"reused": 0, "review": len(review_ids), "full_review": True}
+            else:
+                reused_decisions, review_ids, reuse_reasons, selection_stats = reasoning.select_review_targets(
+                    candidates, hierarchy_plan,
+                    {"matched": model_payload.get("matched_titles") or [],
+                     "unlisted_titles": model_payload.get("unlisted_titles") or []})
+            decisions.update(reused_decisions)
+            for value in _decision_suggestions(document, reused_decisions.values()):
+                value["automatic"] = False
+                by_block[value["block_id"]] = value
+            review_id_set = set(review_ids)
+            review_candidates = [item for item in candidates if item["block_id"] in review_id_set]
+            if full_review:
+                emit(f"全量复核已开启：{len(review_candidates)} 个候选全部进入第二遍", level="model", progress=0.82)
+            elif reused_decisions:
+                emit(f"复用第一遍规划已完整覆盖的 {len(reused_decisions)} 个候选；第二遍只复核 {len(review_candidates)} 个风险项",
+                     level="info", progress=0.82)
+            else:
+                emit(f"第二遍复核 {len(review_candidates)} 个候选", level="model", progress=0.82)
+            # 第二遍固定整体标题树上下文，按 40 条一批；默认 2 路并发、最多 4 路，
+            # 服务并发/退避/预算仍由公共 RequestCoordinator 统一封顶。
+            chunks = [review_candidates[offset:offset + STRUCTURE_BATCH_SIZE]
+                      for offset in range(0, len(review_candidates), STRUCTURE_BATCH_SIZE)]
+            total_batches = len(chunks)
+            concurrency = 1
+            if chunks:
+                try:
+                    concurrency = int(options.get("proofread_concurrency") or DEFAULT_PROOFREAD_CONCURRENCY)
+                except (TypeError, ValueError):
+                    concurrency = DEFAULT_PROOFREAD_CONCURRENCY
+                concurrency = max(1, min(MAX_PROOFREAD_CONCURRENCY, concurrency, len(chunks)))
+
+            def run_batch(index: int, chunk: list[dict[str, Any]]) -> tuple[int, list[dict[str, Any]], list[dict[str, Any]], dict[str, dict[str, Any]]]:
+                if stop_event.is_set():
+                    raise _StructureStopped("结构复核已中止，未发送新请求")
+                _BATCH_TAG.value = f"proofread-{index}"
                 batch_skipped: list[dict[str, Any]] = []
-                requests_before = len(audit["requests"])
-                values = _proofread_batch(document, baseline, audited_provider, model_payload, chunk, batch_skipped, decisions=decisions)
-                for item in batch_skipped:
-                    skipped_model.append({**item, "batch": number})
-                if batch_skipped:
-                    # 把本批被拒数量与原因写进该批的实际请求审计（block_id 等不属敏感数据）。
-                    reasons = sorted({str(item["reason"]) for item in batch_skipped})
-                    for request in audit["requests"][requests_before:]:
-                        request["rejected_count"] = len(batch_skipped)
-                        request["rejected_reasons"] = reasons
+                batch_decisions: dict[str, dict[str, Any]] = {}
+                values = _proofread_batch(document, baseline, audited_provider, model_payload, chunk,
+                                          batch_skipped, decisions=batch_decisions)
+                return index, values, batch_skipped, batch_decisions
+
+            def apply_batch_audit(index: int, batch_skipped: list[dict[str, Any]]) -> None:
+                if not batch_skipped:
+                    return
+                # 把本批被拒数量与原因写进该批的实际请求审计（按 batch_tag 归属，并发下不会错配）。
+                tag = f"proofread-{index}"
+                reasons = sorted({str(item["reason"]) for item in batch_skipped})
+                with state_lock:
+                    for request in audit["requests"]:
+                        if request.get("batch_tag") == tag:
+                            request["rejected_count"] = len(batch_skipped)
+                            request["rejected_reasons"] = reasons
                     store.update_job(project_id, job_id, result={"audit": audit})
+
+            results: dict[int, tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, dict[str, Any]]]] = {}
+            done_batches = 0
+            done_candidates = 0
+            proofread_started = time.monotonic()
+            if chunks and concurrency <= 1:
+                for index, chunk in enumerate(chunks, start=1):
+                    emit(f"标题角色复核第 {index}/{total_batches} 批 · {len(chunk)} 个候选（串行）· 已用时 {time.monotonic() - proofread_started:.0f}s", level="model",
+                         progress=0.82 + 0.10 * done_batches / total_batches)
+                    _, values, batch_skipped, batch_decisions = run_batch(index, chunk)
+                    results[index] = (values, batch_skipped, batch_decisions)
+                    apply_batch_audit(index, batch_skipped)
+                    done_batches += 1
+                    done_candidates += len(chunk)
+                    emit(f"标题角色复核完成 {done_batches}/{total_batches} 批 · 已处理 {done_candidates}/{len(review_candidates)} 个候选 · 已用时 {time.monotonic() - proofread_started:.0f}s",
+                         level="model", progress=0.82 + 0.10 * done_batches / total_batches)
+            elif chunks:
+                emit(f"标题角色复核：{len(review_candidates)} 个候选 · {total_batches} 批 · {concurrency} 路并发（固定整体标题树上下文）",
+                     level="model", progress=0.82)
+                pool = ThreadPoolExecutor(max_workers=concurrency, thread_name_prefix="literature-structure")
+                running: dict[Future, int] = {}
+                try:
+                    next_index = 1
+                    while next_index <= total_batches or running:
+                        # 有界提交：未完成的批次不超过并发上限；失败后不再提交新批次，避免继续付费。
+                        while next_index <= total_batches and len(running) < concurrency:
+                            running[pool.submit(run_batch, next_index, chunks[next_index - 1])] = next_index
+                            next_index += 1
+                        done, _ = wait(list(running), return_when=FIRST_COMPLETED)
+                        for future in done:
+                            index = running.pop(future)
+                            _index, values, batch_skipped, batch_decisions = future.result()
+                            results[index] = (values, batch_skipped, batch_decisions)
+                            apply_batch_audit(index, batch_skipped)
+                            done_batches += 1
+                            done_candidates += len(chunks[index - 1])
+                            emit(f"标题角色复核完成 {done_batches}/{total_batches} 批 · 已处理 {done_candidates}/{len(review_candidates)} 个候选 · 已用时 {time.monotonic() - proofread_started:.0f}s",
+                                 level="model", progress=0.82 + 0.10 * done_batches / total_batches)
+                except BaseException:
+                    # 任一批失败：置位停止标记、取消尚未开始的分批，避免继续付费；已在途的由
+                    # shutdown 收尾，已成功的 results/usage 已持久化，失败/重试只复用已完成响应。
+                    stop_event.set()
+                    for pending in running:
+                        pending.cancel()
+                    raise
+                finally:
+                    pool.shutdown(wait=True)
+            # 稳定合并：按批次顺序落地 decisions/suggestions，避免并发完成顺序影响建议顺序。
+            for index in range(1, total_batches + 1):
+                values, batch_skipped, batch_decisions = results[index]
+                for item in batch_skipped:
+                    skipped_model.append({**item, "batch": index})
+                decisions.update(batch_decisions)
                 for value in values:
-                    # 同一块可能被本地和模型同时命中：本地自动定案的精确结论优先，
-                    # 其余情况下保留置信度更高、依据更充分的结论。
                     value["automatic"] = False
                     by_block[value["block_id"]] = value
             hierarchy_review = reasoning.validate_hierarchy(candidates, decisions, hierarchy_plan)
@@ -710,8 +893,8 @@ def run_structure_job(
             if skipped_model:
                 # 不把被丢弃的模型建议当成“已验证”：显式警告并计入审计。
                 emit(f"模型有 {len(skipped_model)} 条建议未通过校验被丢弃（已在批次审计记录 rejected_count/reasons），未计入结果。",
-                     level="warning", progress=0.84)
-            emit(f"模型返回 {len(suggestions)} 条结构建议", level="success", progress=0.85)
+                     level="warning", progress=0.93)
+            emit(f"模型返回 {len(suggestions)} 条结构建议", level="success", progress=0.94)
         if store.load_document(project_id).updated_at != document.updated_at:
             raise StorageError("分析期间文档结构已改变，请刷新后重新校准。")
         # 建议携带生成时的文档版本，确认时后端可拒绝用陈旧建议覆盖新修订。
@@ -745,7 +928,18 @@ def run_structure_job(
             "decisions": list(decisions.values()),
             "hierarchy_plan": hierarchy_plan,
             "hierarchy_review": hierarchy_review,
-            "review_coverage": {"candidates": title_count if proofread else 0, "reviewed": len(decisions), "needs_review": max(0, title_count - len(decisions))},
+            "review_coverage": {
+                "candidates": title_count if proofread else 0,
+                "reviewed": len(decisions),
+                "second_pass": len(review_candidates) if proofread else 0,
+                "reused": len(reused_decisions) if proofread else 0,
+                "needs_review": max(0, title_count - len(decisions)),
+            },
+            "review_selection": ({
+                "stats": selection_stats,
+                "reasons": dict(Counter(reuse_reasons.values())),
+                "full_review": full_review,
+            } if proofread else {}),
             "baseline_source": "model" if proposed_toc else "confirmed" if options.get("toc") else "local_draft" if baseline else "none",
             # 应用完成后（含自动应用）的文档修订时间戳，供恢复时判断建议是否已过时。
             "document_updated_at": store.load_document(project_id).updated_at,
@@ -918,12 +1112,23 @@ def _role_suggestions(document: Document, payload: dict[str, Any], value: dict[s
             reject(block_id, "候选未得到有效角色判断，需人工核对")
     if decisions is not None:
         decisions.update(accepted)
+    return _decision_suggestions(document, accepted.values())
+
+
+def _decision_unchanged(block: Block, role: str) -> bool:
+    if block.type == "title":
+        return role == f"h{block.level}"
+    return role in {"body", "furniture", "caption"} or (role == "footnote" and block.type == "footnote")
+
+
+def _decision_suggestions(document: Document, decisions: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
+    """把角色判断转换成结构建议；保持不变的判断不产出建议。"""
     result = []
-    for block_id, decision in accepted.items():
-        if decision["unchanged"]:
-            continue
-        block = document.block(block_id)
+    for decision in decisions:
+        block = document.block(decision["block_id"])
         role = decision["role"]
+        if decision.get("unchanged", _decision_unchanged(block, role)):
+            continue
         if role.startswith("h"):
             operation = "set_level" if block.type == "title" else "set_title"
             after: Any = int(role[1])
@@ -933,12 +1138,13 @@ def _role_suggestions(document: Document, payload: dict[str, Any], value: dict[s
         else:
             # 本阶段只整理标题；普通正文不转换成其他正文角色。
             continue
-        result.append({"block_id": block_id, "operation": operation, "before": before, "after": after,
+        result.append({"block_id": decision["block_id"], "operation": operation, "before": before, "after": after,
                        "confidence": decision["confidence"], "reason": decision["reason"], "automatic": False,
                        "evidence_role": role})
     return result
 
 
+@lru_cache(maxsize=16384)
 def normalize_heading(value: str) -> str:
     # 先去措 MinerU 泄漏进标题的脚注/公式标记，否则精确匹配会失败。
     value = signals.strip_inline_markers(value).casefold()
@@ -997,6 +1203,7 @@ def analyze_structure(document: Document, authoritative_toc: Iterable[dict[str, 
     return reconcile_toc(document, authoritative_toc, excluded_pages=excluded_pages)["suggestions"]
 
 
+@lru_cache(maxsize=65536)
 def _heading_similarity(left: str, right: str) -> float:
     """归一化标题相似度，编号前缀一致时提高下限，弥补 OCR 文字差异。"""
     target = normalize_heading(left)
@@ -1066,8 +1273,12 @@ def reconcile_toc(
             continue
         if signal.block_type not in EDITABLE_STRUCTURE_TYPES or signal.role_hint in {"furniture", "page_number", "caption", "footnote"}:
             continue
+        # 只有短块可能成为标题候选（对齐补充也要求 ≤140 字符），先按长度过滤，
+        # 避免对长正文做逐条目录相似度比较。
+        if len(signal.text) > 140:
+            continue
         score, _ = _toc_matches(signal.text, entries_raw)
-        if score >= 0.9 and len(signal.text) <= 140:
+        if score >= 0.9:
             candidates.append(signal)
             candidate_ids.add(signal.block_id)
     candidates.sort(key=lambda signal: order[signal.block_id])

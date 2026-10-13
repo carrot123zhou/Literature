@@ -8,7 +8,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
-from .providers import PROVIDER_PRESETS, ProviderConfig, ProviderError, get_api_key
+from .providers import PROVIDER_PRESETS, ProviderConfig, ProviderError, REASONING_EFFORTS, REASONING_STYLES, THINKING_TOGGLES, get_api_key
 
 # 密钥仍只保存在 macOS Keychain；模型服务的账户名用自己的 service_id，
 # 预设厂商可回退到旧 providers Keychain，保持已有配置继续可用。
@@ -37,6 +37,9 @@ class ModelService:
     max_output_tokens: int = 16384
     input_price_per_million: float | None = None
     output_price_per_million: float | None = None
+    reasoning_style: str = ""
+    reasoning_effort: str = ""
+    reasoning_budget: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -47,6 +50,8 @@ class ModelService:
             temperature=self.temperature, max_output_tokens=self.max_output_tokens,
             input_price_per_million=self.input_price_per_million,
             output_price_per_million=self.output_price_per_million,
+            reasoning_style=self.reasoning_style, reasoning_effort=self.reasoning_effort,
+            reasoning_budget=self.reasoning_budget,
         )
 
 
@@ -101,6 +106,18 @@ class ModelServiceStore:
             raise ProviderError("请填写模型 ID。")
         if not base_url:
             raise ProviderError("请填写 Base URL。")
+        reasoning_style = _clean_text(payload.get("reasoning_style"), maximum=40)
+        if reasoning_style not in ("", *REASONING_STYLES):
+            raise ProviderError("不支持的思考模式协议；请留空或选择已声明的协议。")
+        reasoning_effort = _clean_text(payload.get("reasoning_effort"), maximum=20)
+        allowed_effort = REASONING_EFFORTS if reasoning_style == "openai_effort" else THINKING_TOGGLES
+        if reasoning_effort and reasoning_effort not in allowed_effort:
+            raise ProviderError("思考强度/开关与所选协议不匹配。")
+        try:
+            reasoning_budget = int(payload.get("reasoning_budget", 0) or 0)
+        except (TypeError, ValueError):
+            reasoning_budget = 0
+        reasoning_budget = max(0, min(200_000, reasoning_budget))
         return ModelService(
             service_id=service_id,
             name=_clean_text(payload.get("name"), maximum=120) or str(defaults.get("label") or model),
@@ -111,6 +128,9 @@ class ModelServiceStore:
             max_output_tokens=max(256, min(128_000, int(payload.get("max_output_tokens", 16384) or 16384))),
             input_price_per_million=_clean_price(payload.get("input_price_per_million")),
             output_price_per_million=_clean_price(payload.get("output_price_per_million")),
+            reasoning_style=reasoning_style,
+            reasoning_effort=reasoning_effort,
+            reasoning_budget=reasoning_budget,
         )
 
     def list(self) -> list[dict[str, Any]]:

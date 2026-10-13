@@ -176,6 +176,9 @@ class ProviderInput(BaseModel):
     max_output_tokens: int = 16384
     input_price_per_million: float | None = None
     output_price_per_million: float | None = None
+    reasoning_style: str = ""
+    reasoning_effort: str = ""
+    reasoning_budget: int = 0
 
     def config(self) -> ProviderConfig:
         if self.provider not in PROVIDER_PRESETS:
@@ -186,6 +189,8 @@ class ProviderInput(BaseModel):
             temperature=self.temperature, max_output_tokens=self.max_output_tokens,
             input_price_per_million=self.input_price_per_million,
             output_price_per_million=self.output_price_per_million,
+            reasoning_style=self.reasoning_style, reasoning_effort=self.reasoning_effort,
+            reasoning_budget=self.reasoning_budget,
         )
 
 
@@ -194,6 +199,9 @@ class StructureAIAnalyze(BaseModel):
     provider: ProviderInput | None = None
     service_id: str = ""
     auto_apply: bool = False
+    # 兼容旧入口：默认选择性复核，可显式回退全量。
+    proofread_full: bool = False
+    proofread_concurrency: int = Field(default=2, ge=1, le=4)
 
 
 class StructureJobInput(BaseModel):
@@ -207,6 +215,9 @@ class StructureJobInput(BaseModel):
     use_vision: bool = False
     request_timeout_seconds: int = Field(default=600, ge=30, le=1800)
     reuse_job_id: str = ""
+    # 第二遍复核：默认选择性（第一遍规划通过一致性检查后复用），可回退全量。
+    proofread_full: bool = False
+    proofread_concurrency: int = Field(default=2, ge=1, le=4)
 
 
 class StructurePlanInput(BaseModel):
@@ -227,6 +238,9 @@ class ModelServiceInput(BaseModel):
     max_output_tokens: int = 16384
     input_price_per_million: float | None = None
     output_price_per_million: float | None = None
+    reasoning_style: str = ""
+    reasoning_effort: str = ""
+    reasoning_budget: int = 0
 
 
 class ModelRolesInput(BaseModel):

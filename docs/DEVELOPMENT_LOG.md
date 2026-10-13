@@ -2,6 +2,49 @@
 
 > 本日志记录可验证事实、架构决策和仍需外部条件完成的验收。更新代码时应同步更新本文，避免把“已编码”“已测试”和“已用真实服务验证”混为一谈。
 
+## 2026-10-14（第十八轮）：AI 结构校对提速保质（Orca Worker 实施，已编码/自动测试/tsc/生产构建/隔离浏览器，未真实模型 A/B、未安装）
+
+目标：在不牺牲漏标召回的前提下加快 AI 结构校对。不改数据分层、不改真实库/raw、不调付费服务。
+
+### A. 本地候选构建（语义不变）
+
+- `structure_model_payload` 对 `TEXT_STRUCTURE_TYPES` 先按 `>120` 字符、`reconcile_toc` 补充匹配先按 `>140` 字符跳过，均在逐条目录相似度之前；`normalize_heading`/`_heading_similarity`（structure.py）与 `heading_key`/`heading_similarity`（structure_signals.py）加有界 `lru_cache`，`heading_similarity` 用 `2*min/(len_a+len_b)` 上界在低于 `MATCH_FLOOR` 时直接返回（对齐 DP 只按该阈值判断）。
+- **语义一致**：只读快照重跑完整 payload（含 `local.toc_score` 等）SHA-256 与修改前逐字一致，候选数不变。
+- 自然 cold 本地耗时：White Lotus **37.744503→3.263567s**（348）、Metropolitan Journal **12.810176→1.177188s**（228）、On Being Authentic **2.556754→0.343734s**（58）。只代表本地候选构建，不是 AI 总时长。
+- 手动可选基准 `tests/manual/structure_selection_benchmark.py`（cold/warm、payload SHA、复核统计），不进全量 pytest、不依赖真实库。
+
+### B. 选择性第二遍复核
+
+- 新增 `structure_reasoning.select_review_targets`：第一遍规划只在“有节点、角色合法、置信度有限且在 [0,1]、父子关系成立（含 `validate_hierarchy` 预检）、与确认目录锚点不冲突、父标题已复用”时复用。
+- 必复核：疑似漏标、现有标题降为非标题、与确认目录层级冲突、目录已定位但判非标题、未收录小标题判非标题、改层级但无确认目录锚点（锚点要求 `score≥0.92` 且 `level_source=="confirmed"`）、本地仍像标题或非散文短块。
+- `proofread_full=true` 可回退全量。历史规划响应回放（不是新模型 A/B）：White Lotus 348 候选复用 87、复核 261（7 批 vs 原 9 批），其中 241 本地形态保守、18 置信不足、2 树冲突。
+
+### C. 并发复核（默认 2 路，最多 4 路）
+
+- 全局规划保持顺序依赖；第二遍固定整体标题树上下文、40 条一批并发。**有界在途调度**：在途 future 不超过并发上限，成功才提交下一批；失败即 `stop_event`、取消未开始批次、等待在途收尾，`_call` 发送前检查 `stop_event`，失败后不再付费。
+- 线程安全：审计/缓存/写账/进度用 `RLock`；每批独立 `decisions`/`skipped` 按批次顺序稳定合并；`rejected_count/reasons` 按 `batch_tag` 归属；`_attempt_state` 线程本地；服务并发/退避/预算仍由公共 `RequestCoordinator` 封顶。
+- `BudgetExhausted` 发送前拦截：不记未知费用、不留待对账、不 commit，审计标 `status=blocked/sent=false`；写账异常 `finally` 仍用已知 usage 对账句柄并保留 `record_pending_cost`。
+
+### D. 思考模式/预算（显式协议，默认关闭）
+
+- 模型服务新增 `reasoning_style`（`openai_effort`/`qwen_thinking`/`glm_thinking`）+ `reasoning_effort`/`reasoning_budget`；`reasoning_request_fields` 仅在显式选择且值合法时拼字段，默认全空、向后兼容。
+- 规划/复核 `reason` 上限收紧到 30 字；不缩小 `max_tokens`。
+- 同时移除未充分验证的全局默认 SSE 扩展（恢复非流式 `stream:false`，删除 `_read_stream`/`_StreamUnsupported`/`_HTTPStatusError`/`_stream_disabled`）与翻译模块新增的超时二分自动重发（越界且可能重复付费）；`ProviderTimeoutError` 改为条件提示。
+
+### E. 进度与 UI
+
+- 规划 70%→80%、复核 82%→92%、校验 93%、建议 94%；活动逐批输出候选数、批数、实时完成数与已用时。
+- 结构结果栏显示“候选 N · 第一遍复用 X · 第二遍复核 Y”；运行中显示总耗时与当前阶段（含进行中秒数）；高级选项可切全量复核与 1–4 并发并真实 POST。思考预算 0 标注“沿用服务默认”，关闭思考提示不承诺准确率。
+
+### 验证 / 未验收
+
+- 全量 `pytest` **364 passed**；新增 `tests/test_structure_speed.py`（复用边界、可移植合成夹具、并发并行度/顺序、实时进度、失败停止付费、全量回退、MockTransport 级结构预算集成、思考字段）。`tsc --noEmit` 与 Vite 生产构建通过。
+- 新增隔离真实浏览器 `tests/manual/structure_ui_browser_check.py`（阻断非本地网络与业务 Keychain 读取、fitz 生成有效 PDF）：**19/19 PASS、0 脚本错误**，覆盖 POST `proofread_full`/`proofread_concurrency`、运行时总/阶段耗时真实递增、覆盖口径、思考配置保存与兼容默认；原有 `parse_ui_browser_check.py` 全流程仍全部通过。
+- **构建**：重建自包含 Python sidecar（revision `21664b1e108399c8335c`，sha256 `7aec110812917c52c8fcee552a7b8ee60c6404e42ec0beeb2708c2b003364052`，size 42888192），并用 `node scripts/tauri-run.cjs build --config src-tauri/tauri.bundle.conf.json --config '{"build":{"beforeBuildCommand":""}}'`（前端 dist 已单独构建，避免总脚本安装）生成 `src-tauri/target/release/bundle/macos/Literature.app`（54.52 MiB）；包内 sidecar 与 `src-tauri/binaries/manifest.json` 及源二进制 SHA-256/大小逐字一致，`codesign --force --deep --sign -` 后 `codesign --verify --deep --strict` 通过（adhoc，TeamIdentifier 不设）。**未安装/未启动客户端。**
+- **Lead 独立复验**：禁用真实凭据及外部请求的隔离全量测试 **364 passed**（13.22 秒）；TypeScript 检查、结构浏览器 **19/19**（0 脚本错误）通过。三份只读文献快照的新旧完整 payload 一致；两路复核的预算拦截无未知费用或残留预留；包内 sidecar 的源码 revision、manifest SHA-256/大小及严格签名检查通过。原有解析浏览器全流程通过为 Orca Worker 报告，本轮 Lead 未重复执行。
+- **安装/提交**（用户 2026-10-14 授权）：安装前目标客户端未运行；先把上一版 `launcher/Literature.app`（sidecar sha256 `6915c3a4…`）备份到 `launcher/.rollback-Literature-6915c3a4.app`（不提交），再用 `scripts/setup_macos_launcher.sh --app-only` 安装到 `launcher/Literature.app`。安装后内置 sidecar 与源包及 `src-tauri/binaries` 逐字节一致（sha256 `7aec1108…`，size 42888192，revision `21664b1e108399c8335c`），`codesign --verify --deep --strict` 通过（adhoc）。**未启动客户端**。本轮创建本地 Git 提交，仅含结构优化相关源码/测试/手动验收脚本与两份文档，不含产物/缓存/真实库与既有未跟踪文件；只本地 commit，不 push。
+- **未验收**：无真实模型 A/B，不能声称真实准确率或 AI 总时长提升；未启动客户端、未改真实库/raw、未调付费服务。真实 MinerU/付费模型、原生交互、公证安装仍未验收。
+
 ## 2026-10-14（第十七轮）：客户端安装与本地 Git 提交（用户授权）
 
 用户明确授权“安装新版 app，提交 Git”。本轮仅安装已验收包并做本地提交，不新增功能、不重建、不 push。

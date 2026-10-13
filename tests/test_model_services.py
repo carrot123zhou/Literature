@@ -55,7 +55,7 @@ class ModelServiceApiTests(unittest.TestCase):
         provider = StructureMockProvider()
         with patch("literature.model_services.ModelServiceStore.config_for", return_value=provider):
             response = self.client.post(f"/projects/{self.project_id}/structure/analyze-ai", headers=self.headers,
-                json={"service_id": service["service_id"], "toc": [{"title": "Chapter One", "level": 1}], "auto_apply": True})
+                json={"service_id": service["service_id"], "toc": [{"title": "Chapter One", "level": 1}], "auto_apply": True, "proofread_full": True})
         self.assertEqual(response.status_code, 200, response.text)
         result = response.json()
         self.assertEqual(result["audit"]["prompt_version"], "hierarchy-v2")
@@ -117,6 +117,20 @@ class ModelServiceApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200, response.text)
         return response.json()
 
+    def test_model_service_reasoning_fields_validate_and_persist(self) -> None:
+        service = self.create_service(reasoning_style="qwen_thinking", reasoning_effort="off", reasoning_budget=2048)
+        self.assertEqual(service["reasoning_style"], "qwen_thinking")
+        self.assertEqual(service["reasoning_effort"], "off")
+        self.assertEqual(service["reasoning_budget"], 2048)
+        bad_style = self.client.post("/model-services", headers=self.headers, json={
+            "name": "bad", "preset": "custom", "base_url": "https://relay.example.invalid/v1",
+            "model": "m", "reasoning_style": "unknown"})
+        self.assertGreaterEqual(bad_style.status_code, 400)
+        mismatch = self.client.post("/model-services", headers=self.headers, json={
+            "name": "bad", "preset": "custom", "base_url": "https://relay.example.invalid/v1",
+            "model": "m", "reasoning_style": "openai_effort", "reasoning_effort": "off"})
+        self.assertGreaterEqual(mismatch.status_code, 400)
+
     def test_model_services_crud_and_role_binding(self) -> None:
         self.assertIn("model_services_v1", self.client.get("/health").json()["capabilities"])
         service = self.create_service()
@@ -177,6 +191,7 @@ class ModelServiceApiTests(unittest.TestCase):
         with patch("literature.model_services.ModelServiceStore.config_for", return_value=provider):
             created = self.client.post(f"/projects/{self.project_id}/structure/jobs", headers=self.headers, json={
                 "service_id": service["service_id"], "toc": [], "extract_toc": True, "proofread": True, "auto_apply": True,
+                "proofread_full": True,
             })
             self.assertEqual(created.status_code, 200, created.text)
             job_id = created.json()["job_id"]
