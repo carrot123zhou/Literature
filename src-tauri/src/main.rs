@@ -1,1 +1,3 @@
-fn main() { literature_lib::run(); }
+fn main() {
+    literature_lib::run();
+}

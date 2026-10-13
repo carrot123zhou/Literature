@@ -42,6 +42,35 @@ class ApiIntegrationTests(unittest.TestCase):
         os.environ.pop("LITERATURE_RUNTIME", None)
         os.environ.pop("LITERATURE_LIBRARY", None)
 
+    def test_native_intake_inspection_is_authenticated_and_has_no_copies(self) -> None:
+        self.assertEqual(self.client.post("/intake/files/inspect", json={"paths": [str(self.source)]}).status_code, 401)
+        missing = self.root / "missing.pdf"
+        unsupported = self.root / "notes.txt"
+        unsupported.write_text("notes")
+        before = self.source.read_bytes()
+        response = self.client.post("/intake/files/inspect", headers=self.headers, json={
+            "paths": [str(self.source), str(self.source), str(missing), str(unsupported)],
+        })
+        self.assertEqual(response.status_code, 200)
+        value = response.json()
+        self.assertEqual(len(value["files"]), 1)
+        self.assertEqual(value["files"][0]["page_count"], 1)
+        self.assertEqual(value["files"][0]["path"], str(self.source.resolve()))
+        self.assertEqual(len(value["errors"]), 2)
+        self.assertEqual(self.store.list_projects(), [])
+        self.assertEqual(self.source.read_bytes(), before)
+        self.assertEqual(list((self.root / "runtime" / "uploads").iterdir()), [])
+        self.assertEqual(self.client.post("/intake/files/inspect", headers=self.headers, json={"paths": []}).status_code, 422)
+
+    def test_desktop_resource_locations_and_webview_cors(self) -> None:
+        self.assertEqual(self.client.get("/desktop/resources").status_code, 401)
+        response = self.client.get("/desktop/resources", headers=self.headers)
+        self.assertEqual(response.json()["library"], str(self.store.root))
+        self.assertIn("desktop_resources_v1", self.client.get("/health").json()["capabilities"])
+        preflight = self.client.options("/projects", headers={"origin": "tauri://localhost", "access-control-request-method": "GET", "access-control-request-headers": "x-literature-token"})
+        self.assertEqual(preflight.status_code, 200)
+        self.assertEqual(preflight.headers["access-control-allow-origin"], "tauri://localhost")
+
     def test_authenticated_project_import_and_exports(self) -> None:
         health = self.client.get("/health")
         self.assertEqual(health.status_code, 200)
@@ -81,6 +110,7 @@ class ApiIntegrationTests(unittest.TestCase):
             }]},
         )
         self.assertEqual(patched.status_code, 200, patched.text)
+        self.assertEqual(patched.json()[0]["source"], "user")
         patch_id = patched.json()[0]["patch_id"]
         reverted = self.client.post(
             f"/projects/{project_id}/structure/patches/revert-batch", headers=self.headers,
@@ -96,21 +126,66 @@ class ApiIntegrationTests(unittest.TestCase):
         self.assertEqual(frozen.json()["entries"]["Paradigm"], "范式")
         records = self.client.get(f"/projects/{project_id}/usage/records", headers=self.headers)
         self.assertEqual(records.json(), [])
-        tbl_config = self.client.put(
-            "/tbl/config", headers=self.headers,
-            json={"command": "", "url": "http://127.0.0.1:5001"},
-        )
-        self.assertEqual(tbl_config.status_code, 200, tbl_config.text)
-        self.assertFalse(tbl_config.json()["configured"])
-        self.assertEqual(self.client.get("/tbl/config", headers=self.headers).json()["url"], "http://127.0.0.1:5001")
         verified = self.client.get(f"/projects/{project_id}/mineru/verify", headers=self.headers)
         self.assertEqual(verified.json(), {"valid": True, "errors": []})
-        exported = self.client.post(
-            f"/projects/{project_id}/exports", headers=self.headers,
-            json={"mode": "source", "locale": "zh-CN", "formats": ["html", "md+json", "epub", "docx"]},
-        )
-        self.assertEqual(exported.status_code, 200, exported.text)
-        self.assertEqual(set(exported.json()), {"html", "md+json", "epub", "docx"})
+        # 导出与外部 TBL 已从 Literature 整体移除：废止接口必须明确拒绝，不能静默成功。
+        for method, path in (("post", "tbl/start"), ("get", "tbl/config"), ("get", "tbl/status")):
+            response = getattr(self.client, method)(f"/{path}", headers=self.headers)
+            self.assertEqual(response.status_code, 410, response.text)
+        legacy_export = self.client.post(f"/projects/{project_id}/exports", headers=self.headers, json={"mode": "source"})
+        self.assertEqual(legacy_export.status_code, 410, legacy_export.text)
+        legacy_readiness = self.client.get(f"/projects/{project_id}/export/readiness", headers=self.headers)
+        self.assertEqual(legacy_readiness.status_code, 410, legacy_readiness.text)
+
+    def test_removed_export_does_not_touch_existing_files(self) -> None:
+        created = self.client.post("/projects", headers=self.headers, json={"source_pdf": str(self.source), "title": "Keep Exports"})
+        project_id = created.json()["project_id"]
+        exports = Path(created.json()["path"]) / "exports"
+        exports.mkdir(parents=True, exist_ok=True)
+        marker = exports / "legacy-note.md"
+        marker.write_text("kept by user", encoding="utf-8")
+        # 废止的接口只拒绝，不生成也不删除任何成品。
+        self.assertEqual(self.client.post(f"/projects/{project_id}/exports", headers=self.headers, json={"mode": "source"}).status_code, 410)
+        self.assertEqual(self.client.get(f"/projects/{project_id}/export/readiness", headers=self.headers).status_code, 410)
+        self.assertTrue(marker.is_file())
+        self.assertEqual(marker.read_text(encoding="utf-8"), "kept by user")
+        # 新建项目不再预建 exports/ 目录；旧项目已存在的目录保留。
+        other = self.client.post("/projects", headers=self.headers, json={"source_pdf": str(self.source), "title": "No Exports"})
+        self.assertFalse((Path(other.json()["path"]) / "exports").exists())
+
+    def test_project_status_is_lightweight(self) -> None:
+        created = self.client.post("/projects", headers=self.headers, json={"source_pdf": str(self.source), "title": "Status"})
+        project_id = created.json()["project_id"]
+        job_id = self.store.create_job(project_id, "translate", {"scope": "book"}, {})
+        self.store.update_job(project_id, job_id, result={"counts": {"target_blocks": 1}})
+        status = self.client.get(f"/projects/{project_id}/status", headers=self.headers)
+        self.assertEqual(status.status_code, 200, status.text)
+        jobs = status.json()["jobs"]
+        self.assertEqual(len(jobs), 1)
+        # 高频轮询接口不下发重型审计。
+        self.assertNotIn("result", jobs[0])
+        self.assertNotIn("activity", jobs[0])
+        self.assertIn("usage", status.json())
+        # 完整详情仍保留审计，供需要时读取。
+        full = self.client.get(f"/projects/{project_id}", headers=self.headers).json()["jobs"][0]
+        self.assertIn("result", full)
+
+    def test_translation_revision_invalidates_on_source_change(self) -> None:
+        created = self.client.post("/projects", headers=self.headers, json={"source_pdf": str(self.source), "title": "Revision"})
+        project_id = created.json()["project_id"]
+        imported = self.client.post(f"/projects/{project_id}/mineru/import", headers=self.headers, json={"paths": [str(self.mineru)]})
+        self.assertEqual(imported.status_code, 200, imported.text)
+        first = self.client.get(f"/projects/{project_id}/translations/zh-CN", headers=self.headers).json()
+        revision = first["revision"]
+        same = self.client.get(f"/projects/{project_id}/translations/zh-CN?since={revision}", headers=self.headers).json()
+        self.assertTrue(same.get("unchanged"))
+        # 改源文（document 保存）后，revision 必须失效，不能返回 unchanged。
+        document = self.store.load_document(project_id)
+        document.block(document.blocks[0].block_id).source_text = "Changed source text"
+        self.store.save_document(document)
+        changed = self.client.get(f"/projects/{project_id}/translations/zh-CN?since={revision}", headers=self.headers).json()
+        self.assertFalse(changed.get("unchanged", False))
+        self.assertNotEqual(changed["revision"], revision)
 
     def test_path_and_session_boundaries(self) -> None:
         missing = self.client.post("/projects", headers=self.headers, json={"source_pdf": str(self.root / "missing.pdf")})
@@ -129,7 +204,7 @@ class ApiIntegrationTests(unittest.TestCase):
         descriptor = listed.json()[0]
         self.assertFalse(descriptor["has_document"])
         self.assertEqual(descriptor["asset_count"], 0)
-        self.assertEqual(descriptor["export_count"], 0)
+        self.assertNotIn("export_count", descriptor)
         self.assertEqual(descriptor["source_size"], self.source.stat().st_size)
 
         renamed = self.client.patch(
@@ -180,6 +255,221 @@ class ApiIntegrationTests(unittest.TestCase):
         # does not expose a misleading per-job pause operation.
         paused = self.client.post(f"/ocr/jobs/{job['job_id']}/pause", headers=self.headers)
         self.assertEqual(paused.status_code, 404)
+
+    def test_startup_marks_interrupted_project_jobs_failed(self) -> None:
+        """上次进程遗留的 queued/running 项目作业必须被标为失败。
+
+        否则结构校对页的恢复逻辑会把僵尸任务当成进行中任务无限重连。
+        """
+        created = self.client.post("/projects", headers=self.headers, json={"source_pdf": str(self.source)})
+        self.assertEqual(created.status_code, 200, created.text)
+        project_id = created.json()["project_id"]
+        job_id = self.store.create_job(project_id, "structure_ai", {}, {})
+        recovered = self.client.app.state.job_manager.recover_interrupted_jobs()
+        self.assertGreaterEqual(recovered, 1)
+        job = self.store.get_job(project_id, job_id)
+        self.assertEqual(job["status"], "failed")
+        self.assertIn("中断", job["error"])
+        # 已完成的任务不会被改写。
+        self.store.update_job(project_id, job_id, status="completed")
+        self.client.app.state.job_manager.recover_interrupted_jobs()
+        self.assertEqual(self.store.get_job(project_id, job_id)["status"], "completed")
+
+    def test_structure_baseline_round_trip(self) -> None:
+        created = self.client.post("/projects", headers=self.headers, json={"source_pdf": str(self.source)})
+        self.assertEqual(created.status_code, 200, created.text)
+        project_id = created.json()["project_id"]
+        self.assertEqual(self.client.get(f"/projects/{project_id}/structure/baseline").status_code, 401)
+        saved = self.client.put(
+            f"/projects/{project_id}/structure/baseline", headers=self.headers,
+            json={"toc": [{"title": "Intro", "level": 1}], "source": "confirmed"},
+        )
+        self.assertEqual(saved.status_code, 200, saved.text)
+        loaded = self.client.get(f"/projects/{project_id}/structure/baseline", headers=self.headers)
+        self.assertEqual(loaded.json()["toc"], [{"title": "Intro", "level": 1}])
+        self.assertEqual(loaded.json()["source"], "confirmed")
+
+    def test_local_printed_toc_endpoint_returns_entries_without_model(self) -> None:
+        directory = self.root / "with_toc"
+        directory.mkdir()
+        toc_text = "\n".join(f"Chapter {index}. Title {index} {index * 10}" for index in range(1, 10))
+        content = [[
+            {"type": "title", "bbox": [20, 20, 300, 50], "content": {"level": 1, "title_content": [{"content": "Contents"}]}},
+            {"type": "paragraph", "bbox": [20, 70, 560, 700], "content": {"paragraph_content": [{"content": toc_text}]}},
+        ]]
+        (directory / "book_content_list_v2.json").write_text(json.dumps(content), encoding="utf-8")
+        (directory / "book_middle.json").write_text(json.dumps({"pdf_info": [{"page_idx": 0, "page_size": [600, 800]}]}), encoding="utf-8")
+        created = self.client.post("/projects", headers=self.headers, json={"source_pdf": str(self.source)})
+        project_id = created.json()["project_id"]
+        imported = self.client.post(f"/projects/{project_id}/mineru/import", headers=self.headers, json={"paths": [str(directory)]})
+        self.assertEqual(imported.status_code, 200, imported.text)
+        self.assertEqual(self.client.get(f"/projects/{project_id}/structure/local-toc").status_code, 401)
+        response = self.client.get(f"/projects/{project_id}/structure/local-toc", headers=self.headers)
+        self.assertEqual(response.status_code, 200, response.text)
+        value = response.json()
+        self.assertGreaterEqual(len(value["entries"]), 8)
+        self.assertEqual(value["entries"][0]["title"], "Chapter 1. Title 1")
+        self.assertEqual(value["entries"][0]["printed_page"], "10")
+
+    def test_structure_suggestion_decision_endpoint_applies_and_records(self) -> None:
+        created = self.client.post("/projects", headers=self.headers, json={"source_pdf": str(self.source)})
+        project_id = created.json()["project_id"]
+        imported = self.client.post(f"/projects/{project_id}/mineru/import", headers=self.headers, json={"paths": [str(self.mineru)]})
+        self.assertEqual(imported.status_code, 200, imported.text)
+        title_id = imported.json()["blocks"][0]["block_id"]
+        self.store.save_structure_suggestions(project_id, "job-api", [{
+            "block_id": title_id, "operation": "set_level", "before": 1, "after": 3, "confidence": 0.9, "reason": "test",
+        }], document_updated_at="")
+        pending = self.client.get(f"/projects/{project_id}/structure/suggestions", headers=self.headers).json()
+        self.assertEqual(len(pending), 1)
+        suggestion_id = pending[0]["suggestion_id"]
+        applied = self.client.post(
+            f"/projects/{project_id}/structure/suggestions/{suggestion_id}/decision",
+            headers=self.headers, json={"decision": "applied"},
+        )
+        self.assertEqual(applied.status_code, 200, applied.text)
+        self.assertIsNotNone(applied.json()["patch"])
+        self.assertEqual(applied.json()["patch"]["source"], "ai")
+        self.assertFalse(applied.json()["patch"]["automatic"])
+        document = self.client.get(f"/projects/{project_id}/document", headers=self.headers).json()
+        block = next(item for item in document["blocks"] if item["block_id"] == title_id)
+        self.assertEqual(block["level"], 3)
+        self.assertEqual(self.client.get(f"/projects/{project_id}/structure/suggestions", headers=self.headers).json(), [])
+        again = self.client.post(
+            f"/projects/{project_id}/structure/suggestions/{suggestion_id}/decision",
+            headers=self.headers, json={"decision": "applied"},
+        )
+        self.assertEqual(again.status_code, 400)
+
+        manual = self.client.post(
+            f"/projects/{project_id}/structure/patches", headers=self.headers,
+            json={"block_id": title_id, "operation": "set_level", "before": 3, "after": 2},
+        )
+        self.assertEqual(manual.status_code, 200, manual.text)
+        self.assertEqual(manual.json()["source"], "user")
+        self.store.save_structure_suggestions(project_id, "job-api-batch", [{
+            "block_id": title_id, "operation": "set_level", "before": 2, "after": 1,
+            "confidence": 0.9, "reason": "batch test",
+        }])
+        pending = self.client.get(f"/projects/{project_id}/structure/suggestions", headers=self.headers).json()
+        batch = self.client.post(
+            f"/projects/{project_id}/structure/suggestions/decide-batch", headers=self.headers,
+            json={"suggestion_ids": [pending[0]["suggestion_id"]], "decision": "applied"},
+        )
+        self.assertEqual(batch.status_code, 200, batch.text)
+        self.assertEqual(batch.json()["patches"][0]["source"], "ai")
+        self.assertFalse(batch.json()["patches"][0]["automatic"])
+        history = self.client.get(f"/projects/{project_id}/structure/patches", headers=self.headers).json()
+        by_id = {value["patch_id"]: value for value in history}
+        for value in (applied.json()["patch"], manual.json(), batch.json()["patches"][0]):
+            self.assertEqual(by_id[value["patch_id"]]["source"], value["source"])
+
+        # 旧版未持久化建议的兼容入口也保留采用来源。
+        for endpoint, payload in (
+            ("patches", {"block_id": title_id, "operation": "set_level", "after": 2, "source": "ai"}),
+            ("patches/batch", {"patches": [{"block_id": title_id, "operation": "set_level", "after": 1}], "source": "ai"}),
+        ):
+            response = self.client.post(f"/projects/{project_id}/structure/{endpoint}", headers=self.headers, json=payload)
+            self.assertEqual(response.status_code, 200, response.text)
+            value = response.json()[0] if endpoint.endswith("batch") else response.json()
+            self.assertEqual(value["source"], "ai")
+            self.assertFalse(value["automatic"])
+
+    def test_project_pipeline_summarizes_independent_workflows(self) -> None:
+        created = self.client.post("/projects", headers=self.headers, json={"source_pdf": str(self.source)})
+        project_id = created.json()["project_id"]
+        imported = self.client.post(f"/projects/{project_id}/mineru/import", headers=self.headers, json={"paths": [str(self.mineru)]})
+        self.assertEqual(imported.status_code, 200, imported.text)
+        graph = imported.json()
+        title_id = graph["blocks"][0]["block_id"]
+
+        descriptor = self.client.get("/projects", headers=self.headers).json()[0]
+        self.assertEqual(descriptor["review"]["state"], "todo")
+        self.assertEqual(descriptor["review"]["pending"], 0)
+        self.assertEqual(descriptor["pipeline"]["review"]["state"], "todo")
+        self.assertEqual(descriptor["pipeline"]["translate"]["state"], "none")
+        self.assertNotIn("export", descriptor["pipeline"])
+
+        self.store.save_structure_suggestions(project_id, "job-pipeline", [{
+            "block_id": title_id, "operation": "set_level", "before": 1, "after": 2,
+            "confidence": 0.9, "reason": "pipeline test",
+        }], document_updated_at="")
+        confirm = self.client.get("/projects", headers=self.headers).json()[0]
+        self.assertEqual(confirm["review"]["state"], "confirm")
+        self.assertEqual(confirm["review"]["pending"], 1)
+
+        suggestion_id = self.client.get(
+            f"/projects/{project_id}/structure/suggestions", headers=self.headers,
+        ).json()[0]["suggestion_id"]
+        applied = self.client.post(
+            f"/projects/{project_id}/structure/suggestions/{suggestion_id}/decision",
+            headers=self.headers, json={"decision": "applied"},
+        )
+        self.assertEqual(applied.status_code, 200, applied.text)
+        after_apply = self.client.get("/projects", headers=self.headers).json()[0]
+        # 单个补丁/采用不等于全书已校对：现在是 partial，需显式确认。
+        self.assertEqual(after_apply["review"]["state"], "partial")
+        confirmed = self.client.post(f"/projects/{project_id}/structure/confirm", headers=self.headers)
+        self.assertEqual(confirmed.status_code, 200, confirmed.text)
+        done = self.client.get("/projects", headers=self.headers).json()[0]
+        self.assertEqual(done["review"]["state"], "done")
+        # 确认绑定文档结构版本：文档改变后确认失效。
+        patched = self.client.post(
+            f"/projects/{project_id}/structure/patches", headers=self.headers,
+            json={"block_id": title_id, "operation": "set_level", "after": 3, "source": "user"},
+        )
+        self.assertEqual(patched.status_code, 200, patched.text)
+        stale = self.client.get("/projects", headers=self.headers).json()[0]
+        self.assertEqual(stale["review"]["state"], "partial")
+
+        draft = self.client.get(f"/projects/{project_id}/glossary/draft", headers=self.headers).json()
+        frozen = self.client.put(
+            f"/projects/{project_id}/translations/zh-CN/glossary", headers=self.headers,
+            json={"entries": {**draft, "Paradigm": "范式"}},
+        )
+        self.assertEqual(frozen.status_code, 200, frozen.text)
+        # 冻结术语表后，只要译文层被读取一次，项目摘要应立即反映 glossary_frozen。
+        self.client.get(f"/projects/{project_id}/translations/zh-CN", headers=self.headers)
+        frozen_summary = self.client.get("/projects", headers=self.headers).json()[0]
+        self.assertTrue(frozen_summary["pipeline"]["translate"]["glossary_frozen"])
+
+        # 写入一段人工译文并让摘要落盘，再修正标题层级：纯层级变化应自动对齐，不产生 stale。
+        self.client.put(
+            f"/projects/{project_id}/translations/{title_id}", headers=self.headers,
+            json={"text": "第一章", "locale": "zh-CN"},
+        )
+        self.client.get(f"/projects/{project_id}/translations/zh-CN", headers=self.headers)
+        patched = self.client.post(
+            f"/projects/{project_id}/structure/patches", headers=self.headers,
+            json={"block_id": title_id, "operation": "set_level", "after": 3, "source": "user"},
+        )
+        self.assertEqual(patched.status_code, 200, patched.text)
+        aligned = self.client.get("/projects", headers=self.headers).json()[0]
+        self.assertEqual(aligned["pipeline"]["translate"]["stale"], 0)
+        self.assertEqual(aligned["pipeline"]["translate"]["stale_source"], 0)
+
+        # 正文转列表会改变源字段布局：这才是需要人工复核的 source stale。
+        paragraph_id = next(item["block_id"] for item in graph["blocks"] if item["type"] == "paragraph")
+        self.client.put(
+            f"/projects/{project_id}/translations/{paragraph_id}", headers=self.headers,
+            json={"text": "人工段落", "locale": "zh-CN"},
+        )
+        source_patch = self.client.post(
+            f"/projects/{project_id}/structure/patches", headers=self.headers,
+            json={"block_id": paragraph_id, "operation": "set_type", "after": "list", "source": "user"},
+        )
+        self.assertEqual(source_patch.status_code, 200, source_patch.text)
+        stale = self.client.get("/projects", headers=self.headers).json()[0]
+        self.assertGreaterEqual(stale["pipeline"]["translate"]["stale"], 1)
+        self.assertEqual(stale["pipeline"]["translate"]["state"], "partial")
+
+        exported = self.client.post(
+            f"/projects/{project_id}/exports", headers=self.headers,
+            json={"mode": "source", "locale": "zh-CN", "formats": ["html"]},
+        )
+        # 已移除的内置导出不再影响流水线统计，并且必须明确拒绝而不是报成功。
+        self.assertEqual(exported.status_code, 410, exported.text)
+        self.assertNotIn("export", self.client.get("/projects", headers=self.headers).json()[0]["pipeline"])
 
     def test_web_upload_accepts_mineru_document_types_and_persists_settings(self) -> None:
         document = self.root / "notes.docx"

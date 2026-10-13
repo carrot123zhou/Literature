@@ -93,7 +93,7 @@ export default function SplitPane({ storageKey, initial, minPx = [], handleLabel
   };
 
   const template = sizes
-    .flatMap((size, index) => (index < count - 1 ? [`minmax(0,${size}fr)`, `${HANDLE_PX}px`] : [`minmax(0,${size}fr)`]))
+    .flatMap((size, index) => (index < count - 1 ? [`minmax(${minPx[index] ?? 0}px,${size * 100}fr)`, `${HANDLE_PX}px`] : [`minmax(${minPx[index] ?? 0}px,${size * 100}fr)`]))
     .join(" ");
 
   return (

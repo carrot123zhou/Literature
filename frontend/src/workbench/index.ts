@@ -1,4 +1,3 @@
-export { default as ExportPanel } from "./ExportPanel";
 export { default as GlossaryEditor } from "./GlossaryEditor";
 export { default as InstantPanel } from "./InstantPanel";
 export { default as JobPanel } from "./JobPanel";

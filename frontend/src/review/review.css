@@ -1,0 +1,61 @@
+/* Structure review keeps the source and the editable projection visually primary. */
+.review-outline .toc-row { display:flex; padding:7px 4px; gap:6px; }
+.review-outline .toc-tree ul { padding-left:12px; }
+.review-outline .toc-title { min-width:0; text-align:left; }
+.review-outline .toc-level { flex-shrink:0; color:#9a6b48; font-size:10px; }
+.review-outline .toc-page { color:#9ca3af; }
+.review-hint, .review-page-picker small, .review-advanced > small { font-size:11px; color:#6b7280; line-height:1.6; }
+.review-outline .structure-option { display:flex; align-items:center; gap:6px; margin:10px 0; font-size:12px; }
+.review-outline .structure-option small { color:#9ca3af; margin-left:auto; font-size:10px; }
+.review-page-picker { padding:8px 10px; border-radius:8px; background:#f8fafc; margin-bottom:10px; }
+.review-baseline-mode { display:grid; gap:6px; margin:10px 0; font-size:11px; }
+.review-baseline-mode select { width:100%; border:1px solid #d6d9de; border-radius:6px; padding:7px; background:white; font:12px system-ui; }
+.review-manual-baseline textarea { width:100%; box-sizing:border-box; resize:vertical; }
+.review-page-picker label, .review-advanced label { display:grid; gap:6px; font-size:11px; }
+.review-page-picker input { width:100%; box-sizing:border-box; border:1px solid #d6d9de; border-radius:6px; padding:7px; }
+.review-page-picker .toc-candidates { grid-template-columns:repeat(2,minmax(0,1fr)); }
+.review-page-picker .toc-candidates button { display:block; }
+.review-page-picker small { display:block; margin-top:6px; }
+.review-advanced { margin-top:12px; border-top:1px solid #edf0f2; padding-top:10px; }
+.review-advanced > summary { color:#6b7280; font-size:11px; }
+.review-advanced textarea { width:100%; box-sizing:border-box; margin-bottom:7px; }
+.review-baseline > div { max-height:180px; overflow:auto; font-size:11px; }
+.review-baseline p { margin:6px 0; }
+.review-outline .structure-run-panel progress { width:100%; }
+.review-outline .structure-run-panel p { font-size:11px; }
+.review-outline .reconciliation-summary { padding:6px 8px; border-radius:6px; background:#f1f5f9; color:#475569; line-height:1.7; }
+.review-outline .suggestion-title { text-align:left; border:0; padding:0; color:#4b5563; font-size:12px; background:transparent; display:block; width:100%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; margin-bottom:6px; }
+.review-suggestion-actions { display:flex; gap:6px; }
+.review-grid .block-card .card-actions { justify-content:space-between; align-items:center; padding-top:8px; }
+.review-grid .card-actions label { display:flex; align-items:center; gap:8px; font:12px system-ui; }
+.review-grid .card-actions small { font:10px system-ui; color:#9ca3af; }
+.review-grid .card-actions select, .review-grid .batch-actions select { border:1px solid #d6d9de; border-radius:6px; padding:5px 8px; background:white; font:12px system-ui; }
+.review-grid .block-card-meta { gap:6px; }
+.review-grid .block-card-meta input { width:13px; height:13px; cursor:pointer; }
+.review-grid .result-toolbar { min-height:34px; flex-wrap:wrap; }
+.review-grid .viewer-toolbar { flex-wrap:wrap; gap:8px; padding:10px 12px; }
+.review-viewer-controls { display:flex; align-items:center; gap:6px; flex-wrap:wrap; }
+.review-viewer-controls label { display:flex; align-items:center; gap:4px; font-size:11px; }
+.review-viewer-controls input { width:44px; padding:3px; border:1px solid #d6d9de; border-radius:5px; font-size:11px; }
+.review-viewer-controls select { border:1px solid #d6d9de; border-radius:5px; padding:4px; font-size:11px; background:white; }
+.review-viewer-controls button { padding:4px 6px; font-size:11px; }
+.review-viewer-controls .is-active { color:#c55f0b; background:#fff7ed; }
+.review-grid .pdf-stack { width:max-content; min-width:100%; align-items:center; }
+.review-grid .pdf-overlay.hide-boxes .bbox:not(.selected) { border-color:transparent; background:transparent; }
+.review-audit { overflow:auto; min-height:0; }
+.review-audit .result-code { overflow:visible; }
+.review-evidence { display:grid; gap:12px; padding:12px; }
+.review-evidence figure { margin:0; font-size:11px; }
+.review-evidence img { max-width:100%; margin-top:6px; border:1px solid #e5e7eb; }
+
+@media (max-width:1200px) {
+  .home-topbar.project-topbar .project-topbar-title { display:none; }
+}
+
+.review-grid .viewer-toolbar { height:auto; min-height:48px; flex-shrink:0; }
+.review-grid .result-tabs button { white-space:nowrap; font-size:12px; }
+.review-grid .follow-toggle { white-space:nowrap; font-size:10px; }
+.review-outline .toc-tree, .review-outline .toc-tree ul { list-style:none; }
+
+.review-grid .pdf-panel { grid-template-rows:minmax(48px,max-content) minmax(0,1fr); }
+.review-grid .result-tabs button { padding-left:5px; padding-right:5px; }

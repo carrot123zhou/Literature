@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import secrets
 import threading
 import uuid
@@ -16,19 +17,20 @@ from typing import Any, Literal
 from fastapi import File, UploadFile
 from pydantic import BaseModel, ConfigDict, Field
 
-from .exporters import export_all
 from .mineru import detect_language, import_mineru
 from .mineru_capabilities import MAX_BATCH_FILES, validate_source
 from .mineru_workflow import MinerUClient, WorkflowError
 from .model_services import MODEL_ROLES, ROLE_STRUCTURE, ROLE_TRANSLATION, ModelServiceStore, save_service_key
 from .models import UsageRecord
 from .ocr import MinerUService, delete_mineru_token, get_mineru_token, save_mineru_token
-from .providers import PROVIDER_PRESETS, OpenAICompatibleProvider, ProviderConfig, ProviderError, delete_api_key, get_api_key, save_api_key
+from .parse_backends import describe_backends
+from .providers import PROVIDER_PRESETS, OpenAICompatibleProvider, ProviderConfig, ProviderError, delete_api_key, get_api_key, normalize_proxy_environment, save_api_key
+from .request_coordinator import BudgetExhausted, RequestCoordinator, prompt_cost_estimator
 from .runtime_revision import RUNTIME_REVISION
 from .storage import ProjectStore, StorageError
-from .structure import analyze_structure, analyze_structure_with_provider, apply_automatic, apply_patch, find_toc_page_candidates, plan_structure_analysis, revert_patch, run_structure_job, structure_model_payload
-from .tbl import TBLBridge
-from .translation import TranslationService, draft_glossary
+from .structure_signals import enrich_furniture_evidence
+from .structure import analyze_structure, apply_automatic, apply_patch, apply_patch_batch, find_toc_page_candidates, local_printed_toc, plan_structure_analysis, reconcile_toc, revert_patch, run_structure_job, structure_model_payload
+from .translation import TranslationService, align_structure_only, draft_glossary, estimate_translation, translation_payload, translation_stats, REVISION_PROTOCOL
 from .uploads import UploadStore
 
 
@@ -52,6 +54,10 @@ def session_token() -> str:
     path.write_text(value, encoding="utf-8")
     path.chmod(0o600)
     return value
+
+
+class LocalFilesInspect(BaseModel):
+    paths: list[str] = Field(min_length=1, max_length=MAX_BATCH_FILES)
 
 
 class ProjectCreate(BaseModel):
@@ -85,6 +91,44 @@ class MinerUJobCreate(BaseModel):
     page_limit: int = Field(default=200, ge=1, le=200)
 
 
+class ParseQueueMove(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    position: Literal["top", "up", "down", "end"]
+
+
+class ParseContinue(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    page_ranges: str = Field(default="", max_length=2000)
+    language: str = ""
+    model_version: str = ""
+    page_limit: int = Field(default=200, ge=1, le=200)
+    extra_formats: list[Literal["docx", "html", "latex"]] = Field(default_factory=list)
+
+
+class ParseStart(BaseModel):
+    """首次解析（无规范文档、无活动任务）的参数。"""
+    model_config = ConfigDict(extra="forbid")
+
+    page_ranges: str = Field(default="", max_length=2000)
+    language: str = "ch"
+    model_version: str = "vlm"
+    is_ocr: bool = True
+    enable_table: bool = True
+    enable_formula: bool = True
+    page_limit: int = Field(default=200, ge=1, le=200)
+    extra_formats: list[Literal["docx", "html", "latex"]] = Field(default_factory=list)
+
+
+class ArchiveSettingsInput(BaseModel):
+    """解析历史保留期设置；retention_days=null 表示永久保留（条数上限仍在）。"""
+    model_config = ConfigDict(extra="forbid")
+
+    retention_days: int | None = None
+    max_records: int = Field(default=1000, ge=1, le=100000)
+
+
 class IntakeItemOptions(BaseModel):
     upload_id: str = ""
     path: str = ""
@@ -105,6 +149,7 @@ class SecretInput(BaseModel):
 
 
 class StructureAnalyze(BaseModel):
+    toc_page_indexes: list[int] | None = None
     toc: list[dict[str, Any]]
     auto_apply: bool = False
 
@@ -116,6 +161,11 @@ class PatchInput(BaseModel):
     confidence: float = 1.0
     reason: str = ""
     automatic: bool = False
+    source: Literal["ai", "user"] = "user"
+    # 建议生成时的块状态；确认时后端据此拒绝陈旧采用。
+    before: Any = None
+    # 建议生成时的文档版本；供调用方审计与将来的版本级冲突检测。
+    expected_document_updated_at: str = ""
 
 
 class ProviderInput(BaseModel):
@@ -123,7 +173,7 @@ class ProviderInput(BaseModel):
     model: str = ""
     base_url: str = ""
     temperature: float = 0.2
-    max_output_tokens: int = 8192
+    max_output_tokens: int = 16384
     input_price_per_million: float | None = None
     output_price_per_million: float | None = None
 
@@ -151,15 +201,21 @@ class StructureJobInput(BaseModel):
     toc: list[dict[str, Any]] = Field(default_factory=list)
     extract_toc: bool = True
     proofread: bool = True
-    auto_apply: bool = True
-    toc_page_limit: int = Field(default=12, ge=1, le=40)
+    auto_apply: bool = False
+    toc_page_limit: int = Field(default=6, ge=1, le=6)
+    toc_page_indexes: list[int] | None = None
+    use_vision: bool = False
+    request_timeout_seconds: int = Field(default=600, ge=30, le=1800)
+    reuse_job_id: str = ""
 
 
 class StructurePlanInput(BaseModel):
     toc: list[dict[str, Any]] = Field(default_factory=list)
     extract_toc: bool = True
     proofread: bool = True
-    toc_page_limit: int = Field(default=12, ge=1, le=40)
+    toc_page_limit: int = Field(default=6, ge=1, le=6)
+    toc_page_indexes: list[int] | None = None
+    use_vision: bool = False
 
 
 class ModelServiceInput(BaseModel):
@@ -168,7 +224,7 @@ class ModelServiceInput(BaseModel):
     base_url: str = ""
     model: str = ""
     temperature: float = 0.2
-    max_output_tokens: int = 8192
+    max_output_tokens: int = 16384
     input_price_per_million: float | None = None
     output_price_per_million: float | None = None
 
@@ -181,12 +237,17 @@ class ModelRolesInput(BaseModel):
 class TranslationJobInput(BaseModel):
     provider: ProviderInput | None = None
     service_id: str = ""
+    scope: Literal["auto", "book", "untranslated", "stale", "failed", "blocks"] = "auto"
     block_ids: list[str] = Field(default_factory=list)
     locale: str = "zh-CN"
     glossary: dict[str, str] | None = None
     refine: bool = False
     force: bool = False
     instructions: str = Field(default="", max_length=8000)
+    # 翻译后是否自动再做一遍文学润色（两遍制，质量更高但更慢，默认关闭）。
+    polish: bool = False
+    # 同一作业内并发请求数。小块 + 并发是整本书提速的主要来源。
+    parallel_workers: int = Field(default=4, ge=1, le=8)
 
 
 class InstantInput(BaseModel):
@@ -198,9 +259,30 @@ class InstantInput(BaseModel):
     save: bool = False
 
 
-class TranslationEdit(BaseModel):
-    text: str
+class ReviewInput(BaseModel):
+    service_id: str = ""
     locale: str = "zh-CN"
+    instructions: str = ""
+
+
+class ReviewAdoptInput(BaseModel):
+    locale: str = "zh-CN"
+    # candidate_id 是客户端幂等/去重凭证，不是服务端保存的证据（候选不落库）。
+    candidate_id: str = ""
+    # 版本依据必填：缺失直接 422，服务层也会再验一次。
+    source_hash: str
+    base_revision: str
+    revised: dict[str, Any]
+
+
+class TranslationEdit(BaseModel):
+    text: str | None = None
+    locale: str = "zh-CN"
+    # 按字段编辑：表格逐 cell、列表逐 item、图题/脚注分开输入（F10）。
+    cells: dict[str, str] | None = None
+    items: list[str] | None = None
+    caption: list[str] | None = None
+    footnote: list[str] | None = None
 
 
 class SelectionSave(BaseModel):
@@ -211,6 +293,21 @@ class SelectionSave(BaseModel):
 
 class PatchBatchInput(BaseModel):
     patches: list[PatchInput]
+    source: Literal["ai", "user"] = "user"
+
+
+class StructureBaselineInput(BaseModel):
+    toc: list[dict[str, Any]] = Field(default_factory=list)
+    source: str = ""
+
+
+class SuggestionDecisionInput(BaseModel):
+    decision: Literal["applied", "dismissed"] = "applied"
+
+
+class SuggestionBatchDecisionInput(BaseModel):
+    suggestion_ids: list[str] = Field(default_factory=list)
+    decision: Literal["applied", "dismissed"] = "applied"
 
 
 class PatchRevertBatchInput(BaseModel):
@@ -221,20 +318,90 @@ class GlossaryInput(BaseModel):
     entries: dict[str, str]
 
 
-class ExportInput(BaseModel):
-    mode: Literal["source", "translation", "bilingual"] = "translation"
+class GlossaryRollbackInput(BaseModel):
+    version: int
+
+
+class TranslationEstimateInput(BaseModel):
+    service_id: str = ""
+    scope: Literal["auto", "book", "untranslated", "stale", "failed", "blocks"] = "book"
+    block_ids: list[str] = Field(default_factory=list)
     locale: str = "zh-CN"
-    formats: list[Literal["html", "md+json", "epub", "docx"]] = Field(default_factory=lambda: ["html", "md+json", "epub", "docx"])
+    refine: bool = False
+    force: bool = False
+    polish: bool = False
+    glossary: dict[str, str] = Field(default_factory=dict)
+    instructions: str = ""
 
 
-class TBLPrepareInput(BaseModel):
-    format: Literal["epub", "docx"] = "epub"
-    mode: Literal["source", "translation", "bilingual"] = "source"
+_TRANSLATE_ACTIVE_STATES = {"queued", "running"}
 
 
-class TBLConfigInput(BaseModel):
-    command: str = ""
-    url: str = "http://127.0.0.1:5001"
+def translate_stage(project: dict[str, Any], jobs: list[dict[str, Any]]) -> dict[str, Any]:
+    """翻译是独立工作流：用自己的 job 与译文摘要推导状态，不依赖校对。"""
+    stats = project.get("translation") or {}
+    total = int(stats.get("total") or 0)
+    done = int(stats.get("done") or 0)
+    failed = int(stats.get("failed") or 0)
+    stale = int(stats.get("stale") or 0)
+    # 纯层级变化已自动对齐，不应让卡片误判 partial；只有“原文内容已变”才算内容缺口。
+    stale_source = int(stats.get("stale_source") or 0)
+    active = [
+        job for job in jobs
+        if job.get("kind") in {"translate", "refine"} and job.get("status") in _TRANSLATE_ACTIVE_STATES
+    ]
+    if not project.get("has_document"):
+        state = "none"
+    elif active:
+        state = "running"
+    elif total == 0:
+        state = "none"
+    elif done >= total and stale_source == 0 and failed == 0:
+        state = "done"
+    elif done == 0 and failed > 0 and stale_source == 0:
+        state = "failed"
+    else:
+        state = "partial"
+    if active:
+        progress: float | None = active[0].get("progress")
+    elif total:
+        progress = round(done / total, 4)
+    else:
+        progress = None
+    return {
+        "state": state,
+        "done": done,
+        "total": total,
+        "failed": failed,
+        "stale": stale,
+        "stale_source": stale_source,
+        "percent": float(stats.get("percent") or 0.0),
+        "progress": progress,
+        "locale": stats.get("locale") or project.get("target_language") or "zh-CN",
+        "glossary_frozen": bool(stats.get("glossary_frozen")),
+    }
+
+
+def project_pipeline(store: ProjectStore, project: dict[str, Any], jobs: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    """聚合「提取 / 结构校对 / 翻译 / 导出」四条独立工作流状态，供文件资源卡片直接渲染。
+
+    提取状态仍由 `/ocr/jobs` 提供（前端已在轮询）；这里只补项目库里没有的
+    校对待确认数与翻译运行态，避免把项目错误归纳成单一 state。
+    """
+    project_id = str(project.get("project_id") or "")
+    if jobs is None:
+        jobs = store.list_jobs(project_id)
+    if project.get("has_document"):
+        try:
+            review = store.structure_review_summary(project_id)
+        except StorageError:
+            review = {"state": "todo", "pending": 0}
+    else:
+        review = {"state": "todo", "pending": 0}
+    return {
+        "review": review,
+        "translate": translate_stage(project, jobs),
+    }
 
 
 class JobManager:
@@ -243,9 +410,29 @@ class JobManager:
         self.ocr = ocr
         self.models = models or ModelServiceStore()
         self.executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="literature-job")
+        # 跨模块共用的请求协调层：服务级并发/退避与项目预算预留。已花金额由它维护，
+        # 首次用时从持久账本 seed（进程内唯一来源，避免各 service 缓存过期标量）。
+        self.coordinator = RequestCoordinator(
+            spent_loader=lambda pid: float(store.usage_summary(pid)["estimated_cost"] or 0),
+        )
         self.pause_events: dict[str, threading.Event] = {}
         self.ocr_running: set[str] = set()
         self.ocr_lock = threading.Lock()
+        self._start_locks: dict[str, threading.Lock] = {}
+        self._start_locks_guard = threading.Lock()
+
+    def _project_start_lock(self, project_id: str) -> threading.Lock:
+        """项目级“领取启动”锁：把“检查是否已有活动任务 + 创建/恢复作业”变成一个原子操作。
+
+        否则两个并发请求都可能先读到“没有活动翻译任务”，再各自创建作业，导致同一项目
+        重复调用模型、重复计费，并在同一译文层上读改写（R01）。
+        """
+        with self._start_locks_guard:
+            lock = self._start_locks.get(project_id)
+            if lock is None:
+                lock = threading.Lock()
+                self._start_locks[project_id] = lock
+            return lock
 
     def provider_from(self, service_id: str, provider_input: ProviderInput | None = None) -> OpenAICompatibleProvider:
         """优先按模型服务库解析（密钥只从 Keychain 取）；否则兼容旧的随请求 ProviderInput。"""
@@ -266,8 +453,24 @@ class JobManager:
         return resolved
 
     def start_structure(self, project_id: str, request: "StructureJobInput") -> str:
+        # 与翻译启动同理：检查活动任务与创建/提交必须在同一临界区内完成，否则并发/双击
+        # 会为同一项目创建多个结构 AI 作业，重复调用模型并重复计费（R01 同类）。
+        with self._project_start_lock(project_id):
+            return self._claim_structure_job(project_id, request)
+
+    def _claim_structure_job(self, project_id: str, request: "StructureJobInput") -> str:
         if not request.extract_toc and not request.proofread:
             raise ProviderError("至少需要勾选“提取目录”或“校对标题”中的一项。")
+        if request.reuse_job_id:
+            previous = self.store.get_job(project_id, request.reuse_job_id)
+            if previous["kind"] != "structure_ai" or previous["status"] != "failed":
+                raise StorageError("只能复用当前项目中失败的结构校对任务。")
+        active_structure = [
+            job for job in self.store.list_jobs(project_id)
+            if job.get("kind") == "structure_ai" and job.get("status") in {"queued", "running"}
+        ]
+        if active_structure:
+            raise StorageError("已有结构校对任务正在运行；请等待完成后再启动新的校对。")
         service_id = self.service_id_for(ROLE_STRUCTURE, request.service_id)
         provider = self.provider_from(service_id)
         service = self.models.get(service_id)
@@ -283,18 +486,61 @@ class JobManager:
             "service_name": service.get("name", ""),
         }
         job_id = self.store.create_job(project_id, "structure_ai", scope, config_value)
+        # 结构请求同样进入公共协调层（服务并发/退避 + 项目预算，按每次 attempt 预留）。
+        structure_budget = float(self.store.load_manifest(project_id).get("budget_usd") or 0)
+        self.coordinator.attempt_hooks_for(
+            service_id, provider, project_id=project_id, budget=structure_budget,
+            cost_of=prompt_cost_estimator(provider.config) if hasattr(provider, "config") else None,
+        )
+        # 让结构响应在写 usage 后逐请求对账（不是作业结束用项目总额 delta）。
+        try:
+            provider._coordinator = self.coordinator
+            provider._budget_project = project_id
+        except Exception:
+            pass
 
         def run() -> None:
             try:
                 run_structure_job(self.store, project_id, job_id, config_value, provider)
             except Exception:
                 logger.exception("Structure job %s failed", job_id)
+            finally:
+                try:
+                    provider.close()
+                except Exception:
+                    logger.exception("Provider close failed for structure job %s", job_id)
+                self.refresh_translation_summary(project_id)
 
-        self.executor.submit(run)
+        try:
+            self.executor.submit(run)
+        except Exception as error:
+            # 线程池不可用（例如已关闭）：任务不能卡在 queued（既无 worker 执行，又会被 resume 以“正在运行”拒绝）。
+            self.store.update_job(project_id, job_id, status="failed", error=f"无法提交作业线程：{error}")
+            raise StorageError(f"无法提交作业线程：{error}") from error
         return job_id
 
     def start_translation(self, project_id: str, request: TranslationJobInput, *, existing_job_id: str | None = None) -> str:
-        scope = {"block_ids": request.block_ids, "locale": request.locale}
+        # “检查活动任务”和“创建/恢复任务”必须在同一临界区内完成，否则并发启动会各建一个作业。
+        with self._project_start_lock(project_id):
+            return self._claim_translation_job(project_id, request, existing_job_id=existing_job_id)
+
+    def _claim_translation_job(
+        self, project_id: str, request: TranslationJobInput, *, existing_job_id: str | None = None,
+    ) -> str:
+        # 同一项目同时只允许一个翻译/润色作业：否则两个线程会在同一译文层上读改写，
+        # 既会重复产生模型费用，也可能互相覆盖 entries。
+        if existing_job_id:
+            previous = self.store.get_job(project_id, existing_job_id)
+            if previous.get("status") in {"queued", "running"}:
+                raise StorageError("该翻译任务正在运行中，无需重复恢复。")
+        active = [
+            job for job in self.store.list_jobs(project_id)
+            if job.get("kind") in {"translate", "refine"} and job.get("status") in {"queued", "running"}
+            and job.get("job_id") != existing_job_id
+        ]
+        if active:
+            raise StorageError("已有翻译任务正在运行；请等待完成，或先暂停后再启动新的范围。")
+        scope = {"scope": request.scope, "block_ids": request.block_ids, "locale": request.locale}
         config_value = request.model_dump()
         job_id = existing_job_id or self.store.create_job(project_id, "refine" if request.refine else "translate", scope, config_value)
         if existing_job_id:
@@ -303,64 +549,117 @@ class JobManager:
         self.pause_events[job_id] = pause
 
         def run() -> None:
+            provider = None
             try:
                 provider = self.provider_from(request.service_id, request.provider)
-                service = TranslationService(self.store, provider)
+                # 用实际 resolved 的 service_id 做限流键，避免空串把多个默认服务混在一起。
+                resolved_service = request.service_id or (self.models.roles().get(ROLE_TRANSLATION, "") if self.models else "")
+                service = TranslationService(
+                    self.store, provider, coordinator=self.coordinator, service_id=resolved_service or "default",
+                )
                 service.run(
                     project_id, block_ids=request.block_ids, locale=request.locale, glossary=request.glossary,
                     refine=request.refine, force=request.force, instructions=request.instructions,
-                    job_id=job_id, should_pause=pause.is_set,
+                    scope=request.scope, job_id=job_id, should_pause=pause.is_set,
+                    polish=request.polish, parallel_workers=request.parallel_workers,
                 )
+                self._persist_translation_summary(project_id, request.locale)
             except Exception as error:
                 self.store.update_job(project_id, job_id, status="failed", error=str(error))
+                try:
+                    self._persist_translation_summary(project_id, request.locale)
+                except Exception:
+                    logger.exception("Translation summary refresh failed for %s", project_id)
+            finally:
+                # 作业结束后显式释放 HTTP 连接池，并清掉暂停句柄，避免长期驻留任务对象。
+                if provider is not None:
+                    try:
+                        provider.close()
+                    except Exception:
+                        logger.exception("Provider close failed for %s", project_id)
+                self.pause_events.pop(job_id, None)
 
-        self.executor.submit(run)
+        try:
+            self.executor.submit(run)
+        except Exception as error:
+            # 线程池不可用（例如已关闭）：任务不能卡在 queued（既无 worker 执行，又会被 resume 以“正在运行”拒绝）。
+            self.pause_events.pop(job_id, None)
+            self.store.update_job(project_id, job_id, status="failed", error=f"无法提交作业线程：{error}")
+            raise StorageError(f"无法提交作业线程：{error}") from error
         return job_id
+
+    def _persist_translation_summary(self, project_id: str, locale: str) -> None:
+        document = self.store.load_document(project_id)
+        layer = self.store.load_translation(project_id, locale)
+        self.store.save_translation_summary(project_id, locale, translation_stats(document, layer))
+
+    def refresh_translation_summary(self, project_id: str) -> None:
+        """结构变更后刷新项目列表的译文摘要，让卡片能立即看到 stale 待复核数。
+
+        纯层级/类型对齐（structure stale）在这里直接写回依据版本，不需要用户额外跑一个
+        翻译作业；只有“原文内容已变”（source stale）才需要人工复核。没有译文层时不凭空创建。
+        """
+        try:
+            manifest = self.store.load_manifest(project_id)
+            locale = str(manifest.get("target_language") or "zh-CN")
+            if not self.store.translation_path(project_id, locale).is_file():
+                return
+            lock = self.store.translation_lock(project_id, locale)
+            with lock:
+                document = self.store.load_document(project_id)
+                layer = self.store.load_translation(project_id, locale)
+                if align_structure_only(document, layer):
+                    self.store.save_translation(layer)
+                self.store.save_translation_summary(project_id, locale, translation_stats(document, layer))
+        except Exception:
+            logger.exception("Translation summary refresh failed for %s", project_id)
 
     def pause(self, job_id: str) -> None:
         event = self.pause_events.get(job_id)
         if event:
             event.set()
 
-    def start_ocr(self, job_id: str) -> bool:
-        with self.ocr_lock:
-            if job_id in self.ocr_running:
-                return False
-            self.ocr_running.add(job_id)
+    def start_ocr(self, job_id: str) -> str:
+        """把 job 入队并唤醒调度器（原子；委托给 MinerUService.start_job）。"""
+        return self.ocr.start_job(job_id)
 
-        def run() -> None:
-            try:
-                self.ocr.run(job_id)
-            except Exception:
-                # MinerUWorkflow and MinerUService persist the actionable error
-                # for the UI; keep a traceback in the local API log as well.
-                logger.exception("MinerU job %s failed", job_id)
-            finally:
-                with self.ocr_lock:
-                    self.ocr_running.discard(job_id)
+    def recover_interrupted_jobs(self) -> int:
+        """把上次进程遗留、无法自动续跑的项目作业标为失败。
 
+        结构、翻译与即时翻译作业运行在本地线程里，应用退出后必然已经中断；
+        若不清理，界面恢复逻辑会把仍标记为 queued/running 的僵尸任务当作
+        进行中任务无限重连。MinerU 作业使用独立存储并由 resume_ocr_jobs
+        依据远端状态续跑，不在这里处理。
+        """
+        recovered = 0
+        for project in self.store.list_projects():
+            project_id = project.get("project_id")
+            if not project_id:
+                continue
+            for job in self.store.list_jobs(project_id):
+                if job.get("status") not in {"queued", "running"}:
+                    continue
+                self.store.update_job(
+                    project_id, job["job_id"], status="failed",
+                    error="应用上次退出时该任务被中断，请重新运行。",
+                    message="任务被中断，请重新运行。",
+                )
+                recovered += 1
+        # MinerU 解析作业单独存储：上次退出时的活动任务落为可恢复的 interrupted，
+        # 保留切片进度并继续留在队列中（由 resume_ocr_jobs 按序唤醒）。
         try:
-            self.executor.submit(run)
+            recovered += self.ocr.recover_interrupted()
         except Exception:
-            with self.ocr_lock:
-                self.ocr_running.discard(job_id)
-            raise
-        return True
+            logger.exception("Failed to recover interrupted MinerU jobs")
+        return recovered
 
     def resume_ocr_jobs(self) -> int:
         if not get_mineru_token():
             return 0
-        resumable = {
-            "queued", "preparing", "uploading", "processing",
-            "downloading", "merging", "waiting",
-        }
-        started = 0
-        for job in self.ocr.list():
-            if job["state"] in resumable and self.start_ocr(job["job_id"]):
-                started += 1
-        return started
+        return self.ocr.resume_all()
 
     def shutdown(self) -> None:
+        self.ocr.stop_scheduler()
         self.executor.shutdown(wait=False, cancel_futures=False)
 
 
@@ -382,12 +681,19 @@ def create_app(store: ProjectStore | None = None):
     ocr = MinerUService(store)
     models = ModelServiceStore(application_support())
     manager = JobManager(store, ocr, models)
+    # 追加解析合并后刷新翻译摘要，保证新页计入总数、老条目保留。
+    ocr.on_document_changed = manager.refresh_translation_summary
     uploads = UploadStore(application_support() / "uploads")
-    tbl = TBLBridge(store)
     token = session_token()
     @asynccontextmanager
     async def lifespan(_app: Any):
+        manager.recover_interrupted_jobs()
         manager.resume_ocr_jobs()
+        try:
+            ocr.auto_archive()
+        except Exception:
+            logger.exception("Startup auto archive failed")
+        ocr.start_scheduler()
         try:
             yield
         finally:
@@ -434,12 +740,43 @@ def create_app(store: ProjectStore | None = None):
             "status": "ok",
             "version": "0.1.0",
             "runtime_revision": RUNTIME_REVISION,
-            "capabilities": ["intake_items_v1", "structure_review_v2", "model_services_v1", "structure_job_v1"],
+            "capabilities": ["intake_items_v1", "structure_review_v2", "model_services_v1", "structure_job_v1", "structure_vision_v1", "desktop_resources_v1", "translation_module_v1", "translation_engine_v2", "resource_pipeline_v1", "translation_safety_v1", "parse_lifecycle_v1", "task_history_v1", "parse_backends_v1"],
         }
+
+    @app.get("/parse/backends")
+    def parse_backends():
+        # 只读能力清单：remote 已实现可用；local 仅预留且明确 unavailable，不提供伪入口。
+        return {"backends": describe_backends()}
+
+    @app.get("/desktop/resources")
+    def desktop_resources():
+        return {"library": str(store.root), "runtime": str(application_support().resolve())}
+
+    @app.post("/intake/files/inspect")
+    def inspect_local_files(request: LocalFilesInspect):
+        # Read metadata only. Import creates one durable source copy after confirmation.
+        files, errors = [], []
+        for raw in dict.fromkeys(request.paths):
+            try:
+                source = validate_source(raw)
+                page_count = None
+                if source.suffix.casefold() == ".pdf":
+                    import fitz
+                    with fitz.open(source) as pdf:
+                        page_count = len(pdf)
+                files.append({"path": str(source), "name": source.name, "size": source.stat().st_size, "page_count": page_count})
+            except (ValueError, OSError, RuntimeError) as error:
+                errors.append({"path": raw, "message": str(error)})
+        return {"files": files, "errors": errors}
 
     @app.get("/projects")
     def projects():
-        return store.list_projects()
+        values = store.list_projects()
+        for value in values:
+            value["pipeline"] = project_pipeline(store, value)
+            value["review"] = value["pipeline"]["review"]
+            value["parse_coverage"] = ocr.project_coverage(value["project_id"])
+        return values
 
     @app.post("/projects")
     def create_project(request: ProjectCreate):
@@ -448,9 +785,25 @@ def create_app(store: ProjectStore | None = None):
             raise StorageError("请选择源文件。")
         return store.create_project(source, title=request.title, source_language=request.source_language, target_language=request.target_language)
 
+    @app.get("/projects/{project_id}/status")
+    def project_status(project_id: str):
+        """轻量状态：只投影作业状态字段（不读/不解码 result/activity 审计）与用量，供前端高频轮询。"""
+        jobs = store.list_job_summaries(project_id)
+        return {"project_id": project_id, "jobs": jobs, "usage": store.usage_summary(project_id)}
+
     @app.get("/projects/{project_id}")
     def project(project_id: str):
-        return {**store.describe_project(project_id), "jobs": store.list_jobs(project_id), "usage": store.usage_summary(project_id)}
+        value = store.describe_project(project_id)
+        jobs = store.list_jobs(project_id)
+        pipeline = project_pipeline(store, value, jobs)
+        return {
+            **value,
+            "jobs": jobs,
+            "usage": store.usage_summary(project_id),
+            "review": pipeline["review"],
+            "pipeline": pipeline,
+            "parse_coverage": ocr.project_coverage(project_id),
+        }
 
     @app.patch("/projects/{project_id}")
     def update_project(project_id: str, request: ProjectUpdate):
@@ -493,7 +846,7 @@ def create_app(store: ProjectStore | None = None):
 
     @app.delete("/projects/{project_id}")
     def delete_project(project_id: str):
-        active_ocr_states = {"queued", "preparing", "uploading", "processing", "downloading", "merging", "waiting"}
+        active_ocr_states = {"queued", "preparing", "uploading", "processing", "downloading", "merging", "waiting", "interrupted"}
         active_ocr = [job for job in ocr.list(project_id) if job["state"] in active_ocr_states]
         active_jobs = [job for job in store.list_jobs(project_id) if job["status"] in {"queued", "running"}]
         if active_ocr or active_jobs:
@@ -586,7 +939,13 @@ def create_app(store: ProjectStore | None = None):
 
     @app.post("/projects/{project_id}/ocr/jobs")
     def create_ocr_job(project_id: str, request: MinerUJobCreate):
-        return ocr.create(project_id, **request.model_dump())
+        return ocr.create(project_id, enforce_single=True, **request.model_dump())
+
+    @app.post("/projects/{project_id}/ocr/start")
+    def start_project_parse(project_id: str, request: ParseStart):
+        # Token 校验、活动作业/文档/源文件校验、创建与调度都在服务层的锁内完成；
+        # 无 Token 时不创建任何任务，创建成功但调度失败会报出具体错误与可恢复状态。
+        return ocr.start_parse(project_id, **request.model_dump())
 
     @app.post("/intake/uploads")
     def create_intake_uploads(files: list[UploadFile] = File(...)):
@@ -696,20 +1055,101 @@ def create_app(store: ProjectStore | None = None):
     def list_all_ocr_jobs():
         return ocr.list()
 
+    @app.get("/ocr/tasks")
+    def ocr_task_center(
+        scope: str = "active", status: str = "", query: str = "",
+        sort: str = "recent", page: int = 1, page_size: int = 0,
+    ):
+        return ocr.task_center(
+            scope=scope, status=status, query=query, sort=sort, page=page, page_size=page_size,
+        )
+
+    @app.get("/ocr/jobs/{job_id}")
+    def get_ocr_job(job_id: str):
+        if not ocr.job_exists(job_id):
+            raise HTTPException(status_code=404, detail="解析任务不存在。")
+        return ocr.get(job_id)
+
+    @app.post("/ocr/jobs/{job_id}/archive")
+    def archive_ocr_job(job_id: str):
+        if not ocr.job_exists(job_id):
+            raise HTTPException(status_code=404, detail="解析任务不存在。")
+        return ocr.archive_job(job_id, reason="manual", auto=False)
+
+    @app.post("/ocr/jobs/{job_id}/unarchive")
+    def unarchive_ocr_job(job_id: str):
+        if not ocr.job_exists(job_id):
+            raise HTTPException(status_code=404, detail="解析任务不存在。")
+        return ocr.unarchive_job(job_id)
+
+    @app.get("/ocr/archive-settings")
+    def get_archive_settings():
+        return ocr.archive_settings()
+
+    @app.put("/ocr/archive-settings")
+    def put_archive_settings(request: ArchiveSettingsInput):
+        try:
+            return ocr.set_archive_settings(
+                retention_days=request.retention_days, max_records=request.max_records,
+            )
+        except ValueError as error:
+            raise StorageError(str(error)) from error
+
+    @app.get("/ocr/queue")
+    def parse_queue_status():
+        return ocr.queue_snapshot()
+
     @app.post("/ocr/jobs/{job_id}/start")
     def start_ocr_job(job_id: str):
+        # 先检查存在性：不存在的任务统一返回 404，与是否配置 Token 无关。
+        if not ocr.job_exists(job_id):
+            raise HTTPException(status_code=404, detail="解析任务不存在。")
         if not get_mineru_token():
             raise StorageError("请先配置 MinerU Token。")
-        started = manager.start_ocr(job_id)
-        return {"job_id": job_id, "state": "starting" if started else "already_running"}
+        try:
+            result = ocr.start_job(job_id)
+        except (StorageError, WorkflowError) as error:
+            raise HTTPException(status_code=409, detail=str(error))
+        if result == "already_running":
+            raise HTTPException(status_code=409, detail="该解析任务正在执行，无需重复启动。")
+        return {"job_id": job_id, "state": "queued"}
+
+    @app.post("/ocr/jobs/{job_id}/queue")
+    def move_ocr_job(job_id: str, request: ParseQueueMove):
+        if not ocr.job_exists(job_id):
+            raise HTTPException(status_code=404, detail="解析任务不存在。")
+        try:
+            position = ocr.reorder_job(job_id, request.position)
+        except (StorageError, WorkflowError) as error:
+            raise HTTPException(status_code=409, detail=str(error))
+        return {"job_id": job_id, "position": position, "queue": ocr.queue_snapshot()}
 
     @app.post("/ocr/jobs/{job_id}/retry")
     def retry_ocr_job(job_id: str):
+        if not ocr.job_exists(job_id):
+            raise HTTPException(status_code=404, detail="解析任务不存在。")
         if not get_mineru_token():
             raise StorageError("请先配置 MinerU Token。")
-        ocr.retry(job_id)
-        manager.start_ocr(job_id)
-        return ocr.get(job_id)
+        try:
+            return ocr.retry_job(job_id)
+        except (StorageError, WorkflowError) as error:
+            raise HTTPException(status_code=409, detail=str(error))
+
+    @app.post("/projects/{project_id}/parse/migrate")
+    def migrate_parse_coverage(project_id: str):
+        return ocr.migrate_project(project_id)
+
+    @app.post("/projects/{project_id}/ocr/continue")
+    def continue_ocr_job(project_id: str, request: ParseContinue):
+        if not get_mineru_token():
+            raise StorageError("请先配置 MinerU Token。")
+        job, skipped = ocr.continue_parse(
+            project_id, page_ranges=request.page_ranges, language=request.language,
+            model_version=request.model_version, page_limit=request.page_limit,
+            extra_formats=request.extra_formats or None,
+        )
+        ocr.start_job(job["job_id"])
+        return {"job": ocr.get(job["job_id"]), "skipped_pages": skipped}
 
     @app.get("/projects/{project_id}/ocr/jobs")
     def list_ocr_jobs(project_id: str):
@@ -717,13 +1157,35 @@ def create_app(store: ProjectStore | None = None):
 
     @app.post("/projects/{project_id}/structure/analyze")
     def structure_analyze(project_id: str, request: StructureAnalyze):
-        suggestions = analyze_structure(store.load_document(project_id), request.toc)
+        document = enrich_furniture_evidence(store.load_document(project_id), store.project_path(project_id))
+        local = local_printed_toc(document, pages=request.toc_page_indexes or None) if not request.toc else {"entries": [], "pages": []}
+        baseline = request.toc or local["entries"]
+        reconciliation = reconcile_toc(document, baseline, excluded_pages=set(request.toc_page_indexes or local["pages"]) or None)
+        suggestions = reconciliation["suggestions"]
+        for value in suggestions:
+            value["document_updated_at"] = document.updated_at
+        job_id = store.create_job(project_id, "structure_local", {}, request.model_dump())
+        store.save_structure_suggestions(project_id, job_id, suggestions, document.updated_at)
         applied = [asdict(value) for value in apply_automatic(store, project_id, suggestions)] if request.auto_apply else []
-        return {"suggestions": suggestions, "applied": applied}
+        applied_ids = {item["block_id"] for item in applied}
+        for value in suggestions:
+            value["automatic"] = value["block_id"] in applied_ids
+        if applied_ids:
+            store.decide_structure_suggestions(project_id, [item["suggestion_id"] for item in suggestions if item["block_id"] in applied_ids], "applied")
+        result = {"suggestions": suggestions, "applied": applied, "proposed_toc": local["entries"], "reconciliation": reconciliation["summary"], "job_id": job_id}
+        store.update_job(project_id, job_id, status="completed", progress=1, result=result)
+        manager.refresh_translation_summary(project_id)
+        return result
 
     @app.get("/projects/{project_id}/structure/toc-page-candidates")
     def structure_toc_candidates(project_id: str):
         return find_toc_page_candidates(store.load_document(project_id))
+
+    @app.get("/projects/{project_id}/structure/local-toc")
+    def structure_local_toc(project_id: str, pages: str = ""):
+        # 不调用模型的印刷目录抽取：无目录页参数时自动定位并抽取。
+        requested = [int(value) for value in re.findall(r"\d+", pages)] if pages.strip() else None
+        return local_printed_toc(store.load_document(project_id), pages=requested)
 
     @app.post("/projects/{project_id}/structure/audit-payload")
     def structure_audit_payload(project_id: str, request: StructureAnalyze):
@@ -734,10 +1196,57 @@ def create_app(store: ProjectStore | None = None):
     def structure_plan(project_id: str, request: StructurePlanInput):
         # v2 审计：与异步作业完全一致的输入，包含将要发送的目录页文本。
         return plan_structure_analysis(
-            store.load_document(project_id), request.toc,
+            enrich_furniture_evidence(store.load_document(project_id), store.project_path(project_id)), request.toc,
             extract_toc=request.extract_toc, proofread=request.proofread,
             toc_page_limit=request.toc_page_limit,
+            toc_page_indexes=request.toc_page_indexes, use_vision=request.use_vision,
+            source_path=store.source_path(project_id),
         )
+
+    @app.get("/projects/{project_id}/structure/baseline")
+    def structure_baseline_get(project_id: str):
+        return store.load_structure_baseline(project_id)
+
+    @app.put("/projects/{project_id}/structure/baseline")
+    def structure_baseline_put(project_id: str, request: StructureBaselineInput):
+        return store.save_structure_baseline(project_id, request.toc, request.source)
+
+    @app.get("/projects/{project_id}/structure/suggestions")
+    def structure_suggestions_list(project_id: str, decision: str = "pending"):
+        return store.list_structure_suggestions(project_id, decision or None)
+
+    @app.post("/projects/{project_id}/structure/suggestions/decide-batch")
+    def structure_suggestions_decide_batch(project_id: str, request: SuggestionBatchDecisionInput):
+        if request.decision == "dismissed":
+            store.decide_structure_suggestions(project_id, request.suggestion_ids, "dismissed")
+            return {"suggestions": [store.get_structure_suggestion(project_id, sid) for sid in request.suggestion_ids], "patches": []}
+        values = [store.get_structure_suggestion(project_id, sid) for sid in request.suggestion_ids]
+        # 先校验全部再一次性写入：任一项陈旧或非法则整批不提交，也不标记为已采用。
+        patches = apply_patch_batch(store, project_id, [{
+            "block_id": value["block_id"], "operation": value["operation"], "after": value["after"],
+            "before": value["before"], "confidence": value["confidence"], "reason": value["reason"], "automatic": False,
+        } for value in values], source="ai")
+        store.decide_structure_suggestions(project_id, request.suggestion_ids, "applied")
+        manager.refresh_translation_summary(project_id)
+        return {
+            "suggestions": [store.get_structure_suggestion(project_id, sid) for sid in request.suggestion_ids],
+            "patches": [asdict(patch) for patch in patches],
+        }
+
+    @app.post("/projects/{project_id}/structure/suggestions/{suggestion_id}/decision")
+    def structure_suggestion_decide(project_id: str, suggestion_id: str, request: SuggestionDecisionInput):
+        value = store.get_structure_suggestion(project_id, suggestion_id)
+        if value["decision"] != "pending":
+            raise StorageError("该建议已处理。")
+        patch = None
+        if request.decision == "applied":
+            patch = asdict(apply_patch(store, project_id, {
+                "block_id": value["block_id"], "operation": value["operation"], "after": value["after"],
+                "before": value["before"], "confidence": value["confidence"], "reason": value["reason"], "automatic": False,
+            }, source="ai"))
+        store.decide_structure_suggestion(project_id, suggestion_id, request.decision)
+        manager.refresh_translation_summary(project_id)
+        return {"suggestion": store.get_structure_suggestion(project_id, suggestion_id), "patch": patch}
 
     @app.post("/projects/{project_id}/structure/jobs")
     def structure_job_create(project_id: str, request: StructureJobInput):
@@ -756,45 +1265,52 @@ def create_app(store: ProjectStore | None = None):
         store.update_job(project_id, job_id, status="running")
         try:
             provider = manager.provider_from(request.service_id, request.provider)
-            suggestions, response = analyze_structure_with_provider(
-                store.load_document(project_id), request.toc, provider,
-            )
-            applied = [asdict(value) for value in apply_automatic(store, project_id, suggestions)] if request.auto_apply else []
-            store.record_usage(UsageRecord(
-                usage_id=uuid.uuid4().hex, project_id=project_id, job_id=job_id,
-                provider=response.provider, model=response.model, scope="structure_ai",
-                input_tokens=response.input_tokens, output_tokens=response.output_tokens,
-                cached_tokens=response.cached_tokens, reasoning_tokens=response.reasoning_tokens,
-                estimated_cost=response.estimated_cost, request_id=response.request_id,
-            ))
-            store.update_job(project_id, job_id, status="completed", progress=1)
-            return {"suggestions": suggestions, "applied": applied, "job_id": job_id, "audit": scope}
+            result = run_structure_job(store, project_id, job_id,
+                {**request.model_dump(), "extract_toc": False, "proofread": True}, provider)
+            return {**result, "job_id": job_id}
         except Exception as error:
             store.update_job(project_id, job_id, status="failed", error=str(error))
             raise
 
     @app.post("/projects/{project_id}/structure/patches")
     def structure_patch(project_id: str, request: PatchInput):
-        return asdict(apply_patch(store, project_id, request.model_dump(), source="user"))
+        patch = asdict(apply_patch(store, project_id, request.model_dump(), source=request.source))
+        manager.refresh_translation_summary(project_id)
+        return patch
 
     @app.post("/projects/{project_id}/structure/patches/batch")
     def structure_patch_batch(project_id: str, request: PatchBatchInput):
-        return [
-            asdict(apply_patch(store, project_id, patch.model_dump(), source="user"))
-            for patch in request.patches
-        ]
+        # 先校验全部条目，任一项非法则整批不写入，避免部分提交。
+        patches = [asdict(value) for value in apply_patch_batch(
+            store, project_id, [patch.model_dump() for patch in request.patches], source=request.source,
+        )]
+        manager.refresh_translation_summary(project_id)
+        return patches
 
     @app.get("/projects/{project_id}/structure/patches")
     def structure_patches(project_id: str):
         return store.list_patches(project_id)
 
+    @app.post("/projects/{project_id}/structure/confirm")
+    def structure_confirm(project_id: str, scope: str = "full"):
+        # 显式确认当前审查范围：绑定文档结构版本；文档改后确认自动失效。
+        return store.confirm_structure_review(project_id, scope=scope)
+
     @app.post("/projects/{project_id}/structure/patches/{patch_id}/revert")
     def structure_revert(project_id: str, patch_id: str):
-        return asdict(revert_patch(store, project_id, patch_id))
+        patch = asdict(revert_patch(store, project_id, patch_id))
+        manager.refresh_translation_summary(project_id)
+        return patch
 
     @app.post("/projects/{project_id}/structure/patches/revert-batch")
     def structure_revert_batch(project_id: str, request: PatchRevertBatchInput):
-        return [asdict(revert_patch(store, project_id, patch_id)) for patch_id in request.patch_ids]
+        wanted = set(request.patch_ids)
+        ordered = [item["patch_id"] for item in store.list_patches(project_id) if item["patch_id"] in wanted]
+        if len(ordered) != len(wanted):
+            raise StorageError("结构补丁不存在。")
+        patches = [asdict(revert_patch(store, project_id, patch_id)) for patch_id in ordered]
+        manager.refresh_translation_summary(project_id)
+        return patches
 
     @app.get("/projects/{project_id}/glossary/draft")
     def glossary_draft(project_id: str):
@@ -802,13 +1318,32 @@ def create_app(store: ProjectStore | None = None):
 
     @app.put("/projects/{project_id}/translations/{locale}/glossary")
     def glossary_freeze(project_id: str, locale: str, request: GlossaryInput):
-        layer = store.load_translation(project_id, locale)
-        layer.glossary_snapshot = {
-            str(source).strip(): str(target).strip()
-            for source, target in request.entries.items() if str(source).strip()
-        }
-        store.save_translation(layer)
-        return {"entries": layer.glossary_snapshot, "updated_at": layer.updated_at}
+        lock = store.translation_lock(project_id, locale)
+        with lock:
+            layer = store.load_translation(project_id, locale)
+            layer.glossary_snapshot = {
+                str(source).strip(): str(target).strip()
+                for source, target in request.entries.items() if str(source).strip()
+            }
+            store.save_translation(layer)
+            record = store.save_glossary_version(project_id, locale, layer.glossary_snapshot, source="freeze")
+        return {"entries": layer.glossary_snapshot, "updated_at": layer.updated_at, "version": record["version"]}
+
+    @app.get("/projects/{project_id}/translations/{locale}/glossary/versions")
+    def glossary_versions(project_id: str, locale: str):
+        return store.list_glossary_versions(project_id, locale)
+
+    @app.post("/projects/{project_id}/translations/{locale}/glossary/rollback")
+    def glossary_rollback(project_id: str, locale: str, request: GlossaryRollbackInput):
+        record = store.load_glossary_version(project_id, locale, request.version)
+        lock = store.translation_lock(project_id, locale)
+        with lock:
+            layer = store.load_translation(project_id, locale)
+            layer.glossary_snapshot = dict(record["entries"])
+            store.save_translation(layer)
+            # 回滚也记为新版本，保留完整的不可变历史链，而不是改写旧版本。
+            created = store.save_glossary_version(project_id, locale, layer.glossary_snapshot, source=f"rollback:{request.version}")
+        return {"entries": layer.glossary_snapshot, "updated_at": layer.updated_at, "version": created["version"]}
 
     @app.get("/providers")
     def provider_presets():
@@ -863,6 +1398,11 @@ def create_app(store: ProjectStore | None = None):
         save_service_key(service_id, request.value)
         return {"configured": True}
 
+    @app.post("/model-services/{service_id}/models")
+    def model_service_models(service_id: str):
+        models.get(service_id)  # 校验存在
+        return {"models": models.list_models(service_id)}
+
     @app.post("/model-services/{service_id}/check")
     def model_service_check(service_id: str):
         import time as _time
@@ -902,24 +1442,114 @@ def create_app(store: ProjectStore | None = None):
         return store.list_jobs(project_id)
 
     @app.get("/projects/{project_id}/translations/{locale}")
-    def translation_layer(project_id: str, locale: str):
-        return store.load_translation(project_id, locale).to_dict()
+    def translation_layer(project_id: str, locale: str, since: str = ""):
+        layer = store.load_translation(project_id, locale)
+        # revision 必须覆盖源文/结构版本：用 document.json 的 mtime+size 作为源指纹（廉价），
+        # 加上 locale、译文版本与协议版本；任何一项变化都使 since 失效。
+        document_path = store.project_path(project_id) / "document" / "document.json"
+        try:
+            stat = document_path.stat()
+            document_fingerprint = f"{stat.st_mtime_ns}:{stat.st_size}"
+        except OSError:
+            document_fingerprint = ""
+        revision = f"{locale}|{layer.updated_at}|{document_fingerprint}|{REVISION_PROTOCOL}"
+        if since and since == revision:
+            return {"unchanged": True, "revision": revision}
+        document = store.load_document(project_id)
+        payload = translation_payload(document, layer, revision=revision)
+        store.save_translation_summary(project_id, locale, payload["stats"])
+        return payload
+
+    @app.post("/projects/{project_id}/translation/estimate")
+    def translation_estimate(project_id: str, request: TranslationEstimateInput):
+        document = store.load_document(project_id)
+        layer = store.load_translation(project_id, request.locale)
+        config = ProviderConfig(provider="estimate", model="", base_url="")
+        try:
+            service_id = manager.service_id_for(ROLE_TRANSLATION, request.service_id)
+            config = manager.provider_from(service_id).config
+        except ProviderError:
+            pass
+        result = estimate_translation(
+            document, layer, scope=request.scope, block_ids=request.block_ids, refine=request.refine, config=config,
+            force=request.force, glossary=request.glossary, polish=request.polish,
+            instructions=request.instructions, locale=request.locale,
+        )
+        return result
+
+    @app.post("/projects/{project_id}/translations/{block_id}/review")
+    def translation_review(project_id: str, block_id: str, request: ReviewInput):
+        service_id = request.service_id or (manager.models.roles().get(ROLE_TRANSLATION, "") if manager.models else "") or "default"
+        provider = manager.provider_from(request.service_id, None)
+        manager.coordinator.attempt_hooks_for(
+            service_id, provider, project_id=project_id,
+            budget=float(store.load_manifest(project_id).get("budget_usd") or 0),
+            cost_of=prompt_cost_estimator(provider.config),
+        )
+        service = TranslationService(store, provider, coordinator=manager.coordinator, service_id=service_id)
+        try:
+            return service.review(project_id, block_id, locale=request.locale, instructions=request.instructions)
+        except BudgetExhausted:
+            raise HTTPException(status_code=409, detail="项目预算不足，已停止定向译审。")
+        finally:
+            try:
+                provider.close()
+            except Exception:
+                logger.exception("Provider close failed for review %s", block_id)
+
+    @app.post("/projects/{project_id}/translations/{block_id}/review/adopt")
+    def translation_review_adopt(project_id: str, block_id: str, request: ReviewAdoptInput):
+        # 采纳只需要写库（不调模型/不读密钥）；在写锁内校验源与译文基线。
+        service = TranslationService(store, None, coordinator=manager.coordinator)
+        try:
+            entry = service.adopt_review(
+                project_id, block_id, locale=request.locale, revised=request.revised,
+                source_hash=request.source_hash, base_revision=request.base_revision,
+                candidate_id=request.candidate_id,
+            )
+        except StorageError as error:
+            # 源/译文基线不符：409，保留最新人工内容供重新审查。
+            raise HTTPException(status_code=409, detail=str(error))
+        manager.refresh_translation_summary(project_id)
+        return {"entry": asdict(entry)}
 
     @app.post("/projects/{project_id}/translate/instant")
     def translate_instant(project_id: str, request: InstantInput):
-        service = TranslationService(store, manager.provider_from(request.service_id, request.provider))
-        return service.instant(project_id, request.text, locale=request.locale, block_id=request.block_id, save=request.save)
+        service_id = request.service_id or (manager.models.roles().get(ROLE_TRANSLATION, "") if manager.models else "") or "default"
+        provider = manager.provider_from(request.service_id, request.provider)
+        manager.coordinator.attempt_hooks_for(
+            service_id, provider, project_id=project_id,
+            budget=float(store.load_manifest(project_id).get("budget_usd") or 0),
+            cost_of=prompt_cost_estimator(provider.config),
+        )
+        service = TranslationService(store, provider, coordinator=manager.coordinator, service_id=service_id)
+        try:
+            return service.instant(project_id, request.text, locale=request.locale, block_id=request.block_id, save=request.save)
+        except BudgetExhausted:
+            raise HTTPException(status_code=409, detail="项目预算不足，已停止即时翻译。")
+        finally:
+            try:
+                provider.close()
+            except Exception:
+                logger.exception("Provider close failed for instant")
 
     @app.put("/projects/{project_id}/translations/{block_id}")
     def translation_edit(project_id: str, block_id: str, request: TranslationEdit):
         # Provider is irrelevant for a manual edit.
         from .providers import MockProvider
-        return asdict(TranslationService(store, MockProvider()).edit(project_id, block_id, request.text, locale=request.locale))
+        entry = TranslationService(store, MockProvider()).edit(
+            project_id, block_id, request.text, locale=request.locale,
+            cells=request.cells, items=request.items, caption=request.caption, footnote=request.footnote,
+        )
+        manager._persist_translation_summary(project_id, request.locale)
+        return asdict(entry)
 
     @app.post("/projects/{project_id}/translations/{block_id}/unlock")
     def translation_unlock(project_id: str, block_id: str, locale: str = "zh-CN"):
         from .providers import MockProvider
-        return asdict(TranslationService(store, MockProvider()).unlock(project_id, block_id, locale=locale))
+        entry = TranslationService(store, MockProvider()).unlock(project_id, block_id, locale=locale)
+        manager._persist_translation_summary(project_id, locale)
+        return asdict(entry)
 
     @app.post("/projects/{project_id}/translations/{block_id}/selections")
     def translation_selection_save(project_id: str, block_id: str, request: SelectionSave):
@@ -937,28 +1567,33 @@ def create_app(store: ProjectStore | None = None):
         return store.usage_records(project_id)
 
     @app.post("/projects/{project_id}/exports")
-    def exports(project_id: str, request: ExportInput):
-        return export_all(store, project_id, mode=request.mode, locale=request.locale, formats=list(request.formats))
+    def exports(project_id: str):
+        # 导出模块已整体移除；保留路径返回 410，让旧前端/旧书签得到明确提示而不是裸 404。
+        raise HTTPException(status_code=410, detail="Literature 已移除内置导出；原文/解析证据/译文仍保留在项目中。")
+
+    @app.get("/projects/{project_id}/export/readiness")
+    def export_readiness_endpoint(project_id: str, locale: str = "zh-CN"):
+        raise HTTPException(status_code=410, detail="Literature 已移除内置导出与完整性预检。")
 
     @app.post("/projects/{project_id}/tbl/prepare")
-    def tbl_prepare(project_id: str, request: TBLPrepareInput):
-        return tbl.prepare(project_id, format_name=request.format, mode=request.mode)
+    def tbl_prepare(project_id: str):
+        raise HTTPException(status_code=410, detail="Literature 已移除外部 TBL 接力。")
 
     @app.post("/tbl/start")
     def tbl_start():
-        return tbl.start()
+        raise HTTPException(status_code=410, detail="Literature 已移除外部 TBL 接力。")
 
     @app.get("/tbl/config")
     def tbl_config():
-        return tbl.config()
+        raise HTTPException(status_code=410, detail="Literature 已移除外部 TBL 接力。")
 
     @app.put("/tbl/config")
-    def tbl_configure(request: TBLConfigInput):
-        return tbl.configure(command=request.command, url=request.url)
+    def tbl_configure():
+        raise HTTPException(status_code=410, detail="Literature 已移除外部 TBL 接力。")
 
     @app.get("/tbl/status")
     def tbl_status():
-        return tbl.status()
+        raise HTTPException(status_code=410, detail="Literature 已移除外部 TBL 接力。")
 
     @app.get("/projects/{project_id}/events")
     async def events(project_id: str):
@@ -990,6 +1625,22 @@ def main() -> None:
         raise SystemExit("缺少 uvicorn，请先安装 Literature 依赖。") from error
     if app is None:
         raise SystemExit("Literature API 初始化失败。")
+    # 修正 NO_PROXY 中 httpx 无法解析的条目，避免模型与 MinerU 请求因代理环境直接失败。
+    normalize_proxy_environment()
+    # A frozen sidecar has its own bootloader process. Also watch the actual App
+    # so SIGKILL/crashes cannot leave a backend polling forever.
+    parent = os.environ.get("LITERATURE_PARENT_PID", "")
+    if parent:
+        def watch_parent():
+            import time
+            parent_pid = int(parent)
+            while True:
+                time.sleep(1)
+                try:
+                    os.kill(parent_pid, 0)
+                except ProcessLookupError:
+                    os._exit(0)
+        threading.Thread(target=watch_parent, daemon=True).start()
     # Pass the object directly so a frozen Python sidecar does not need to
     # rediscover the package through an import string at runtime.
     uvicorn.run(app, host="127.0.0.1", port=int(os.environ.get("LITERATURE_PORT", "41731")), reload=False)

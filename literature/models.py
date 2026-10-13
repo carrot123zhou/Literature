@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from typing import Any, Literal
 
 
-SCHEMA_VERSION = "1.1"
+SCHEMA_VERSION = "1.2"
 
 # bbox 单位契约。MinerU 的 content_list/content_list_v2 在 0-1000 归一化坐标系中
 # 给出 x/y，分别按页宽和页高缩放；document.json 原样保留该数值，不做换算。
@@ -54,6 +54,9 @@ class Block:
     footnote: list[str] = field(default_factory=list)
     format: dict[str, Any] = field(default_factory=dict)
     raw: dict[str, Any] = field(default_factory=dict)
+    # 结构版本：每次结构校对改到该块（改类型/层级/升标题）就 +1。译文条目记录
+    # 自己依据的版本，两者不一致即 stale，用于「先翻译、后校对」后的复核提示。
+    structure_revision: int = 0
 
 
 @dataclass(slots=True)
@@ -94,6 +97,9 @@ class Document:
     resources: dict[str, dict[str, Any]] = field(default_factory=dict)
     chapter_language_overrides: dict[str, str] = field(default_factory=dict)
     source_files: list[dict[str, Any]] = field(default_factory=list)
+    # 全文解析覆盖：{"source_page_count": int, "ranges": [[a,b],...], "state": "..."}。
+    # 只记录已经成功合并进本 document 的源页；旧文档缺失时视为“覆盖未知”。
+    coverage: dict[str, Any] = field(default_factory=dict)
     created_at: str = field(default_factory=utc_now)
     updated_at: str = field(default_factory=utc_now)
 
@@ -151,6 +157,7 @@ class Document:
             resources=value.get("resources", {}),
             chapter_language_overrides=value.get("chapter_language_overrides", {}),
             source_files=value.get("source_files", []),
+            coverage=value.get("coverage", {}) if isinstance(value.get("coverage"), dict) else {},
             created_at=value.get("created_at", utc_now()), updated_at=value.get("updated_at", utc_now()),
         )
 
@@ -187,9 +194,22 @@ class TranslationEntry:
     status: TranslationStatus = "pending"
     source_hash: str = ""
     model_run_id: str = ""
+    # 本次任务（job_id）成功处理过该块的证据。旧文件缺此字段时为空，
+    # 表示结果来自更早的任务，不能算作“本次任务已完成”。
+    run_token: str = ""
     locked: bool = False
     revisions: list[dict[str, Any]] = field(default_factory=list)
     selection_translations: list[dict[str, Any]] = field(default_factory=list)
+    # 并发冲突时保留人工内容，把模型刚生成的结果作为候选存这里，供用户对比采用。
+    candidates: list[dict[str, Any]] = field(default_factory=list)
+    # True 表示当前内容并非对当前源文的完整译文（例如失败尝试留下的未校验片段），
+    # 不得被后续补缺复用、不得计入当前完成；复用时必须先校验源 hash 与校验结果。
+    partial: bool = False
+    # 生成该译文时所依据的 block 结构版本；与 block 当前版本不一致即 stale。
+    structure_revision: int = 0
+    # 最近一次未能译完的原因（截断 / 协议不合法 / 模型错误）。成功或人工编辑后清空，
+    # 让用户在失败列表里能看到“为什么失败”，而不是只有空白的错误栏。
+    error: str = ""
     updated_at: str = field(default_factory=utc_now)
 
 

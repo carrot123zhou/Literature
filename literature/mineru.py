@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import html
+import itertools
 import json
 import re
 import shutil
@@ -93,12 +94,21 @@ class _TableParser(HTMLParser):
         self.row = -1
         self.column = 0
         self.current: dict[str, Any] | None = None
+        # 已被上一行 rowspan 占用的 (行, 列)；跨行单元格让后续行的列号从右往下顺延，
+        # 否则 rowspan 后面的单元格会错位到左边（与 HTML/Word 实际合并语义不符）。
+        self.occupied: set[tuple[int, int]] = set()
+
+    def _skip_occupied(self) -> None:
+        while (max(self.row, 0), self.column) in self.occupied:
+            self.column += 1
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         if tag == "tr":
             self.row += 1
             self.column = 0
+            self._skip_occupied()
         if tag in {"td", "th"}:
+            self._skip_occupied()
             values = dict(attrs)
             self.current = {
                 "row": max(self.row, 0), "column": self.column, "text": "",
@@ -114,7 +124,12 @@ class _TableParser(HTMLParser):
         if tag in {"td", "th"} and self.current is not None:
             self.current["text"] = clean_text(self.current["text"])
             self.cells.append(self.current)
-            self.column += max(1, int(self.current["colspan"]))
+            rowspan = max(1, int(self.current["rowspan"]))
+            colspan = max(1, int(self.current["colspan"]))
+            for row in range(self.row, self.row + rowspan):
+                for column in range(self.column, self.column + colspan):
+                    self.occupied.add((row, column))
+            self.column += colspan
             self.current = None
 
 
@@ -156,13 +171,14 @@ def _valid_bbox(value: Any) -> list[float]:
 def _normalized_block(
     item: dict[str, Any], *, project_id: str, order: int, page_index: int, source_file: str,
     source_directory: Path, assets_directory: Path, resources: dict[str, dict[str, Any]], legacy: bool = False,
+    block_id: str | None = None,
 ) -> Block | None:
     raw_kind = str(item.get("type", "paragraph"))
     if raw_kind in IGNORED_TYPES:
         return None
     content = item.get("content") if isinstance(item.get("content"), dict) else {}
     bbox = _valid_bbox(item.get("bbox"))
-    block_id = f"blk-{order:08d}"
+    block_id = block_id or f"blk-{order:08d}"
     kind = raw_kind
     level = 0
     text = ""
@@ -453,6 +469,8 @@ def normalize_imported_project(store: ProjectStore, project_id: str) -> Document
         bbox_space=BBOX_SPACE_MINERU_1000 if any(block.bbox for block in blocks) else BBOX_SPACE_NONE,
         blocks=blocks, resources=resources, source_files=source_files,
     )
+    from .structure_signals import enrich_furniture_evidence
+    document = enrich_furniture_evidence(document, project)
     document.toc = build_toc(document.blocks)
     store.save_document(document)
     (project / "document" / "source.md").write_text(render_source_markdown(document), encoding="utf-8")
@@ -461,6 +479,326 @@ def normalize_imported_project(store: ProjectStore, project_id: str) -> Document
         source_language_mode=source_language_mode, detected_source_language=detect_language(blocks),
         page_count=page_offset, block_count=len(blocks),
     )
+    return document
+
+
+def coverage_pages(document: Document) -> set[int] | None:
+    """返回 document 已覆盖的源页（0-based）集合；缺失 coverage 时返回 None（未知）。"""
+    coverage = document.coverage if isinstance(document.coverage, dict) else {}
+    ranges = coverage.get("ranges")
+    if not isinstance(ranges, list) or not ranges:
+        return None
+    pages: set[int] = set()
+    for item in ranges:
+        if isinstance(item, (list, tuple)) and len(item) == 2:
+            try:
+                start, end = int(item[0]), int(item[1])
+            except (TypeError, ValueError):
+                continue
+            if 1 <= start <= end:
+                pages.update(range(start - 1, end))
+    return pages
+
+
+def merge_ranges(pages: Iterable[int]) -> list[list[int]]:
+    """把源页号（1-based）合并为升序、不重叠的闭区间。"""
+    ordered = sorted({int(page) for page in pages})
+    ranges: list[list[int]] = []
+    for page in ordered:
+        if ranges and page == ranges[-1][1] + 1:
+            ranges[-1][1] = page
+        else:
+            ranges.append([page, page])
+    return ranges
+
+
+def coverage_payload(source_page_count: int, covered: Iterable[int] | None) -> dict[str, Any]:
+    """构造 manifest / document 共用的 parse_coverage。covered 为 0-based 源页集合。"""
+    total = max(0, int(source_page_count or 0))
+    if covered is None or total <= 0:
+        pages: set[int] = set(covered or [])
+        return {"source_page_count": total, "covered_pages": len(pages), "ranges": merge_ranges(page + 1 for page in pages), "state": "unknown"}
+    pages = {int(page) for page in covered if 0 <= int(page) < total}
+    if not pages:
+        state = "unparsed"
+    elif all(page in pages for page in range(total)):
+        state = "full"
+    else:
+        state = "partial"
+    return {
+        "source_page_count": total,
+        "covered_pages": len(pages),
+        "ranges": merge_ranges(page + 1 for page in pages),
+        "state": state,
+    }
+
+
+def _parse_slice(
+    directory: Path, project: Path, project_id: str, resources: dict[str, dict[str, Any]],
+    *, source_pages: list[int], block_ids: Any,
+) -> tuple[list[Block], list[Page], dict[str, Any]]:
+    """解析一个 MinerU 结果目录，把本地页号映射为真实源页（0-based）。
+
+    当提供了 ``source_pages``（继续/指定范围解析）时，结果页数与源页映射必须一致；
+    不匹配则抛错中止，绝不静默接纳（避免把结果错误归到别的源页）。
+    """
+    v2 = find_one(directory, ("*_content_list_v2.json", "content_list_v2.json"))
+    legacy = find_one(directory, ("*_content_list.json", "content_list.json"))
+    blocks: list[Block] = []
+    per_page_seq: dict[int, int] = {}
+    requested = [int(page) for page in source_pages]
+    if requested and any(page < 1 for page in requested):
+        raise MinerUImportError(f"切片源页号必须是 1-based 正整数：{source_pages}")
+
+    def source_index(local_page: int) -> int:
+        if requested:
+            if local_page < 0 or local_page >= len(requested):
+                raise MinerUImportError(
+                    f"MinerU 结果页号 {local_page} 超出本次请求的 {len(requested)} 页范围：{directory.name}"
+                )
+            return requested[local_page] - 1
+        return local_page
+
+    if v2:
+        value = json.loads(v2.read_text(encoding="utf-8"))
+        if not isinstance(value, list) or any(not isinstance(page, list) for page in value):
+            raise MinerUImportError(f"content_list_v2 顶层格式错误：{v2}")
+        page_count = len(value)
+        if requested and page_count != len(requested):
+            raise MinerUImportError(
+                f"MinerU 返回 {page_count} 页，但本次请求解析 {len(requested)} 页"
+                f"（{source_page_count_text(requested)}）；为避免页码错位已中止。"
+            )
+        for local_page, page in enumerate(value):
+            index = source_index(local_page)
+            for item in page:
+                if not isinstance(item, dict):
+                    continue
+                seq = per_page_seq.get(index, 0)
+                block = _normalized_block(
+                    item, project_id=project_id, order=0, page_index=index,
+                    source_file=str(v2.relative_to(project)), source_directory=directory,
+                    assets_directory=project / "assets", resources=resources,
+                    block_id=block_ids(index, seq),
+                )
+                if block:
+                    per_page_seq[index] = seq + 1
+                    blocks.append(block)
+        source = v2
+        representation = "content_list_v2"
+    elif legacy:
+        value = json.loads(legacy.read_text(encoding="utf-8"))
+        if not isinstance(value, list):
+            raise MinerUImportError(f"content_list 顶层格式错误：{legacy}")
+        max_page = -1
+        for item in value:
+            if not isinstance(item, dict):
+                continue
+            try:
+                local_page = int(item.get("page_idx", 0))
+            except (TypeError, ValueError) as error:
+                raise MinerUImportError(f"content_list 的 page_idx 非法：{item.get('page_idx')!r}") from error
+            if local_page < 0:
+                raise MinerUImportError(f"content_list 的 page_idx 为负数：{local_page}")
+            if requested and local_page >= len(requested):
+                raise MinerUImportError(
+                    f"content_list 的 page_idx {local_page} 超出本次请求的 {len(requested)} 页范围。"
+                )
+            max_page = max(max_page, local_page)
+            index = source_index(local_page)
+            seq = per_page_seq.get(index, 0)
+            block = _normalized_block(
+                item, project_id=project_id, order=0, page_index=index,
+                source_file=str(legacy.relative_to(project)), source_directory=directory,
+                assets_directory=project / "assets", resources=resources, legacy=True,
+                block_id=block_ids(index, seq),
+            )
+            if block:
+                per_page_seq[index] = seq + 1
+                blocks.append(block)
+        page_count = max_page + 1
+        source = legacy
+        representation = "content_list"
+    else:
+        if requested and len(requested) != 1:
+            raise MinerUImportError(
+                "Markdown 结果无法对应多个源页；为避免页码错位已中止。请使用 MinerU 的 JSON 输出。"
+            )
+        source = directory / "full.md"
+        index = source_index(0)
+        new_blocks, _next = _markdown_blocks(source, 0)
+        for seq, block in enumerate(new_blocks):
+            block.block_id = block_ids(index, seq)
+            block.page_index = index
+            blocks.append(block)
+        page_count = 1
+        representation = "markdown"
+    pages = _page_metadata(directory, project, 0, page_count)
+    for local_page, page in enumerate(pages):
+        page.source_page_index = source_index(local_page)
+        page.page_index = page.source_page_index
+    record = {
+        "path": str(source.relative_to(project)), "representation": representation,
+        "sha256": sha256_file(source), "page_count": page_count,
+        "source_pages": list(requested), "page_offset": source_index(0) if page_count else 0,
+    }
+    return blocks, pages, record
+
+
+def source_page_count_text(pages: list[int]) -> str:
+    ordered = sorted({int(page) for page in pages})
+    if not ordered:
+        return ""
+    return f"{ordered[0]}–{ordered[-1]}" if ordered[0] != ordered[-1] else str(ordered[0])
+
+
+def merge_imported_project(
+    store: ProjectStore, project_id: str, entries: Iterable[dict[str, Any]],
+    *, source_page_count: int = 0, append: bool = False,
+) -> Document:
+    """把本次新封存的切片规范化并合并进 document（首次导入 / 继续解析共用）。
+
+    - 只处理 ``entries`` 指定的新目录；旧 raw 哈希与旧 block 一律不改。
+    - 新 block 使用独立 ID 命名空间，旧 block_id / structure_revision / 人工校对保留。
+    - 已有覆盖页会被过滤，绝不覆盖；只有全部成功后才写 parse_coverage。
+    - **page_index 积分就是源 PDF 页索引（0-based）**：稀疏存在，不压缩。
+    - 与结构补丁共用 ``store.document_lock(project_id)``，不丢并发结构编辑。
+    """
+    entries = list(entries)
+    lock = store.document_lock(project_id)
+    with lock:
+        return _merge_imported_project_locked(
+            store, project_id, entries, source_page_count=source_page_count, append=append,
+        )
+
+
+def _merge_imported_project_locked(
+    store: ProjectStore, project_id: str, entries: list[dict[str, Any]],
+    *, source_page_count: int = 0, append: bool = False,
+) -> Document:
+    project = store.project_path(project_id)
+    manifest = store.load_manifest(project_id)
+    document_path = project / "document" / "document.json"
+    existing: Document | None = store.load_document(project_id) if (append and document_path.is_file()) else None
+    resources: dict[str, dict[str, Any]] = dict(existing.resources) if existing else {}
+    counter = itertools.count(1)
+
+    def fresh_id(_index: int, _seq: int) -> str:
+        return f"blk-{next(counter):08d}"
+
+    def appended_id(index: int, seq: int) -> str:
+        return f"blk-p{index:06d}-{seq:04d}"
+
+    block_ids = appended_id if existing is not None else fresh_id
+    new_blocks: list[Block] = []
+    new_pages: list[Page] = []
+    new_source_files: list[dict[str, Any]] = []
+    seen_directories: set[str] = set()
+    for entry in entries:
+        directory = Path(entry["directory"])
+        key = str(directory.resolve())
+        if key in seen_directories:
+            # 同一目录不得在一个事务里重复合并（否则会重复写 block）。
+            continue
+        seen_directories.add(key)
+        source_pages = [int(page) for page in (entry.get("source_pages") or [])]
+        blocks, pages, record = _parse_slice(
+            directory, project, project_id, resources,
+            source_pages=source_pages, block_ids=block_ids,
+        )
+        new_blocks.extend(blocks)
+        new_pages.extend(pages)
+        new_source_files.append(record)
+
+    existing_covered = coverage_pages(existing) if existing is not None else set()
+    coverage_known = existing is None or existing_covered is not None
+    if existing is None:
+        covered_filter: set[int] = set()
+    elif coverage_known:
+        covered_filter = set(existing_covered or set())
+    else:
+        # 旧资源缺少 coverage：用现有页作“防重复”证据，但绝不据此声明覆盖状态。
+        covered_filter = {page.source_page_index for page in existing.pages}
+    kept_blocks = [block for block in new_blocks if block.page_index not in covered_filter]
+    kept_pages = [page for page in new_pages if page.source_page_index not in covered_filter]
+    new_covered = {page.source_page_index for page in kept_pages}
+
+    if existing is None:
+        all_blocks = kept_blocks
+        all_pages = kept_pages
+        source_files = new_source_files
+    else:
+        # 统一到“源页索引”坐标系：旧文档可能是历史压缩索引，按页的 source_page_index 还原。
+        old_index_to_source = {page.page_index: page.source_page_index for page in existing.pages}
+        for page in existing.pages:
+            page.page_index = page.source_page_index
+        existing_blocks = list(existing.blocks)
+        for block in existing_blocks:
+            block.page_index = old_index_to_source.get(block.page_index, block.page_index)
+        all_blocks = existing_blocks + kept_blocks
+        all_pages = list(existing.pages) + kept_pages
+        source_files = list(existing.source_files) + new_source_files
+
+    # 阅读顺序：按源页排序；page_index 保持等于源页索引，供 PdfPane/裁片直接定位。
+    all_pages = [page for _orig, page in sorted(enumerate(all_pages), key=lambda item: (item[1].source_page_index, item[0]))]
+    for page in all_pages:
+        page.page_index = page.source_page_index
+    all_blocks = [block for _orig, block in sorted(enumerate(all_blocks), key=lambda item: (item[1].page_index, item[0]))]
+    for order, block in enumerate(all_blocks, 1):
+        block.order = order
+
+    total_source_pages = max(0, int(source_page_count or 0))
+    if total_source_pages <= 0 and existing is not None:
+        old_coverage = existing.coverage if isinstance(existing.coverage, dict) else {}
+        total_source_pages = max(0, int(old_coverage.get("source_page_count") or 0))
+    if total_source_pages <= 0:
+        manifest_total = int(manifest.get("source_page_count") or 0)
+        total_source_pages = max(0, manifest_total)
+    covered_union = set(existing_covered or set()) | new_covered
+    if not coverage_known:
+        payload = {"source_page_count": total_source_pages, "covered_pages": 0, "ranges": [], "state": "unknown"}
+    else:
+        payload = coverage_payload(total_source_pages, None if total_source_pages <= 0 else covered_union)
+
+    source_language_mode = manifest.get("source_language_mode", manifest.get("source_language", "auto"))
+    if existing is not None:
+        source_language = existing.source_language
+        source_language_mode = existing.source_language_mode
+    elif source_language_mode == "auto":
+        source_language = detect_language(all_blocks)
+    else:
+        source_language = source_language_mode
+
+    document = Document(
+        project_id=project_id, title=manifest["title"], source_language=source_language,
+        source_language_mode=source_language_mode,
+        target_language=manifest.get("target_language", "zh-CN"),
+        page_count=total_source_pages or len(all_pages), pages=all_pages,
+        bbox_space=BBOX_SPACE_MINERU_1000 if any(block.bbox for block in all_blocks) else BBOX_SPACE_NONE,
+        blocks=all_blocks, resources=resources, source_files=source_files, coverage=payload,
+    )
+    if existing is not None:
+        document.chapter_language_overrides = existing.chapter_language_overrides
+        document.created_at = existing.created_at
+    else:
+        from .structure_signals import enrich_furniture_evidence
+        document = enrich_furniture_evidence(document, project)
+        document.coverage = payload
+    document.toc = build_toc(document.blocks)
+    store.save_document(document)
+    # document 是事实来源；manifest 是其投影。先写 document 再写 manifest；source.md
+    # 只是派生展示，失败不回滚 coverage。崩溃在两者之间时以 document.coverage 为准自愈。
+    store.update_manifest(
+        project_id, state="ready", source_language=document.source_language,
+        source_language_mode=document.source_language_mode,
+        detected_source_language=detect_language(document.blocks),
+        page_count=len(document.pages), block_count=len(document.blocks),
+        source_page_count=total_source_pages or None, parse_coverage=document.coverage,
+    )
+    try:
+        (project / "document" / "source.md").write_text(render_source_markdown(document), encoding="utf-8")
+    except OSError:
+        pass
     return document
 
 

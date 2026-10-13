@@ -4,10 +4,8 @@ import base64
 import json
 import tempfile
 import unittest
-import zipfile
 from pathlib import Path
 
-from literature.exporters import export_all, validate_epub
 from literature.mineru import import_mineru
 from literature.models import UsageRecord
 from literature.providers import MockProvider, ProviderResponse, extract_json
@@ -71,17 +69,36 @@ class PipelineTests(unittest.TestCase):
         source_markdown = (self.store.project_path(self.project_id) / "document" / "source.md").read_text(encoding="utf-8")
         self.assertIn("# Introduction", source_markdown)
 
+    def test_table_rowspan_and_colspan_occupancy(self):
+        from literature.mineru import _table_cells
+
+        cells = _table_cells("t1", "<table><tr><td rowspan='2'>A</td><td>B</td></tr><tr><td>C</td></tr></table>")
+        positions = {cell.text: (cell.row, cell.column) for cell in cells}
+        self.assertEqual(positions["A"], (0, 0))
+        self.assertEqual(positions["B"], (0, 1))
+        # rowspan=2 占住了第 0 列，第二行的 C 必须落在第 1 列而不是 (1, 0)。
+        self.assertEqual(positions["C"], (1, 1))
+
+        spanned = _table_cells("t2", "<table><tr><td colspan='2'>X</td></tr><tr><td>Y</td><td>Z</td></tr></table>")
+        layout = {cell.text: (cell.row, cell.column, cell.colspan) for cell in spanned}
+        self.assertEqual(layout["X"], (0, 0, 2))
+        self.assertEqual(layout["Y"][:2], (1, 0))
+        self.assertEqual(layout["Z"][:2], (1, 1))
+
     def test_structure_autofix_is_reversible(self):
         document = self.import_document()
-        proposals = analyze_structure(document, [{"title": "Introduction", "level": 1}])
+        proposals = analyze_structure(document, [{"title": "Introduction", "level": 2}])
         automatic = [value for value in proposals if value["automatic"]]
         self.assertEqual(len(automatic), 1)
+        self.assertEqual(automatic[0]["operation"], "set_level")
+        # Text length alone cannot authorize automatic demotion.
+        self.assertTrue(any(value["operation"] == "set_type" and not value["automatic"] for value in proposals))
         patches = apply_automatic(self.store, self.project_id, proposals)
         changed = self.store.load_document(self.project_id).block(automatic[0]["block_id"])
-        self.assertEqual((changed.type, changed.level), ("paragraph", 0))
+        self.assertEqual((changed.type, changed.level), ("title", 2))
         revert_patch(self.store, self.project_id, patches[0].patch_id)
         restored = self.store.load_document(self.project_id).block(automatic[0]["block_id"])
-        self.assertEqual((restored.type, restored.level), ("title", 2))
+        self.assertEqual((restored.type, restored.level), ("title", 1))
 
     def test_structure_ai_payload_excludes_body_text(self):
         document = self.import_document()
@@ -115,7 +132,7 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(candidates[0]["page_number"], 1)
         self.assertGreaterEqual(candidates[0]["confidence"], 0.7)
 
-    def test_translation_lock_usage_and_exports(self):
+    def test_translation_lock_and_usage(self):
         document = self.import_document()
         service = TranslationService(self.store, MockProvider())
         job = service.run(self.project_id, glossary=draft_glossary(document))
@@ -140,20 +157,6 @@ class PipelineTests(unittest.TestCase):
         selection = service.save_selection(self.project_id, paragraph.block_id, "history of science", "科学史")
         self.assertEqual(selection.selection_translations[-1]["translated_text"], "科学史")
         self.assertGreater(self.store.usage_summary(self.project_id)["input_tokens"], 0)
-
-        # Export is deliberately independent of the original PDF: the canonical
-        # document graph, translation layer, and assets are the only inputs.
-        (self.store.project_path(self.project_id) / "source" / "origin.pdf").unlink()
-        outputs = export_all(self.store, self.project_id, mode="bilingual")
-        self.assertTrue(Path(outputs["html"]).is_file())
-        self.assertTrue((Path(outputs["md+json"]) / "translation.json").is_file())
-        self.assertTrue(Path(outputs["docx"]).is_file())
-        validate_epub(Path(outputs["epub"]))
-        with zipfile.ZipFile(outputs["epub"]) as book:
-            self.assertIn("EPUB/nav.xhtml", book.namelist())
-            self.assertTrue(any(name.startswith("EPUB/text/assets/") for name in book.namelist()))
-        markdown = (Path(outputs["md+json"]) / "full.md").read_text(encoding="utf-8")
-        self.assertIn("人工译文", markdown)
 
     def test_tampered_raw_is_detected(self):
         self.import_document()

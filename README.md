@@ -1,79 +1,54 @@
 # Literature
 
-Literature 是一个本地优先的结构化文献处理工作台：以 MinerU 结果为不可变来源，保留页面、bbox、标题、表格、图片、脚注和阅读顺序；在稳定 block ID 上叠加目录校对、全书/章节翻译、即时翻译、版本与导出。
+Literature 是本地优先的结构化文献客户端：MinerU 解析文档，Literature 保留不可变证据、规范文档与稳定 block/cell ID，并提供目录校对、阅读翻译与人工修订。
 
-## 唯一数据主线
+当前交付是 **Tauri macOS 客户端**。React/PDF.js 工作区和自包含 Python/FastAPI 后端都装在 `.app` 内，运行不需要浏览器、Vite、Node、Python 或源码仓库。当前本机构建为 Apple Silicon，最低 macOS 15。
+
+## 使用
+
+打开 `launcher/Literature.app`。首页通过系统文件选择器或拖入文件加入队列，确认逐文件设置后导入资源库并交给 MinerU。支持 PDF、Office、图片与 HTML；大型 PDF 自动分段。文件资源页可搜索、重命名、可恢复移出和在 Finder 中显示。
+
+设置中的「本地资源与存储」可打开资源库、运行数据和日志，也可选择另一资源库（重新启动生效，原库不自动移动）。项目内原件可另存到外部位置。
+
+## 数据与资源
 
 ```text
-原始 PDF / Office / 图片 / HTML
-  → MinerU 原始输出（只读封存，仅作为溯源证据）
-  → 规范化 + 目录结构校准
-  → document.json + source.md + assets（唯一长期主数据）
-  → 编辑 / 提取 / 原生结构化翻译层
-  → EPUB / DOCX / HTML / MD+JSON 派生导出，或交给外部 TBL
+原件 → MinerU raw（只读封存、SHA-256）
+     → document/document.json（长期主数据）+ source.md + assets/
+     → translations/<locale>/translation.json（稳定 ID 挂接）
 ```
 
-EPUB、DOCX 和 HTML 成品绝不由源文件直接转换。`source.md` 是 `document.json` 的可读投影；编辑、翻译、检索准备和全部导出均以规范文档图谱及其资源为输入。
+本机现有 `library/` 继续使用，不搬迁或清除文献。新机器默认使用 `~/Library/Application Support/Literature/library/`。资源库位置记录在应用数据目录的 `library-location.json`。应用数据与模型服务配置继续使用 `~/Library/Application Support/Literature/`，日志位于 `~/Library/Logs/Literature/`；密钥只进 Keychain。应用包和源码之外的资源不受构建缓存清理影响。
 
-## 当前实现
+目录与清理规则见 [资源管理](docs/RESOURCE_MANAGEMENT.md)。当前验收事实见 [开发日志](docs/DEVELOPMENT_LOG.md)，数据约束见 [架构](docs/ARCHITECTURE.md)。
 
-- Web 多文件拖拽/系统文件选择、multipart 上传，以及真实后端任务创建与状态轮询
-- 对齐 MinerU 精准解析的 PDF、Word、PPT、Excel、图片和 HTML 输入类型
-- 完整呈现本地文件接口可用的模型、语言包、OCR、表格、公式、页码范围和额外输出设置
-- 独立项目库与 SQLite 任务/修订/用量账本
-- MinerU `content_list_v2.json`、`content_list.json` 与 Markdown 导入
-- 原始 OCR 封存、哈希验证、规范化文档图谱与稳定 block/cell ID
-- 可逆结构补丁、0.97 高置信自动修正边界
-- 可审计的 AI 目录校对输入（目录、标题候选、bbox 与相邻类型；不含正文）
-- OpenAI、DeepSeek、智谱 GLM、Qwen/百炼和自定义兼容端点
-- 全书、章节、block、即时选段共用翻译引擎；人工译文自动锁定
-- 术语表冻结、任务暂停/恢复/失败分块重试、逐次 token 明细与预算暂停
-- HTML、Markdown+JSON、EPUB 3、DOCX 导出，以及 TBL 外部接力清单
-- FastAPI 本地服务与 React/PDF.js 三工作区 WebUI；Tauri 桌面版源码暂时保留但暂停推进
-- 大型 PDF 自动按最多 200 页分段；默认展示文档总状态，可展开查看各分段页码、状态和错误
-
-开发状态与可接续事项见 [开发日志](docs/DEVELOPMENT_LOG.md)，数据不变量见 [架构说明](docs/ARCHITECTURE.md)，发布流程见 [macOS 打包](docs/PACKAGING.md)。
-
-## 开发启动
+## 开发与构建
 
 ```bash
 python3.12 -m venv .venv
-.venv/bin/pip install -e '.[dev]'
+.venv/bin/pip install -e '.[dev,packaging]'
+pnpm --dir frontend install --frozen-lockfile
+pnpm --dir frontend desktop:dev
 ```
 
-当前优先开发 WebUI。后端与前端两个终端必须使用相同的开发会话令牌：
+开发客户端自动启动 `.venv` 后端；发布客户端只启动内置后端。API 使用动态 loopback 端口和每次启动的随机令牌，单实例运行，退出时回收子进程。
+
+```bash
+./scripts/build_desktop.sh
+```
+
+该脚本生成后端、构建前端与 Tauri、做本地 adhoc 签名，最后安装到 `launcher/Literature.app`。可选运行 `./scripts/setup_macos_launcher.sh` 更新桌面替身。详细流程与发布限制见 [macOS 打包](docs/PACKAGING.md)。
+
+浏览器仅用于调试，可分别启动 API 与前端并使用同一开发令牌：
 
 ```bash
 LITERATURE_SESSION_TOKEN=literature-dev .venv/bin/python -m literature.api
 VITE_LITERATURE_TOKEN=literature-dev pnpm --dir frontend dev
 ```
 
-默认 API 为 `http://127.0.0.1:41731`。独立仓库位于 `~/CdoexProject/Literature/`，文档项目数据保存在仓库内的 `library/` 并由 Git 忽略；API key 保存在 macOS Keychain，不写入项目文件。
+## 边界
 
-```text
-~/CdoexProject/Literature/
-  literature/、frontend/、docs/、tests/   # 程序源码与开发文档（Git 跟踪）
-  launcher/Literature.app                # 可重新生成的本地启动器（Git 忽略）
-  library/                                # 原文、MinerU raw、规范文档、译文与导出（Git 忽略）
-```
-
-上传暂存、任务恢复状态和启动器状态仍使用 `~/Library/Application Support/Literature/`，运行日志仍使用 `~/Library/Logs/Literature/`。因此默认运行不再访问 macOS“文稿”目录。
-
-macOS 不要求应用放在 `/Applications`。以下命令会在仓库的 `launcher/` 下生成一键 WebUI 启动器，并在桌面创建名为“Literature”的 Finder 替身：
-
-```bash
-./scripts/setup_macos_launcher.sh
-```
-
-桌面替身指向 `~/CdoexProject/Literature/launcher/Literature.app`。应用包会根据自己的位置找到仓库，不依赖用户名或固定绝对路径；点击后启动本地 API 与 WebUI，并在默认浏览器打开 Literature。运行日志位于 `~/Library/Logs/Literature/`。
-
-仓库迁移后应在新位置重新创建 `.venv`，不能继续使用绑定旧目录的 Python 解释器。启动器会拒绝 `pyvenv.cfg` 仍指向 `~/Documents/` 的虚拟环境，并回退到非 Documents 的可用 Python，避免无关的“文稿”权限请求。
-
-## 设计边界
-
-- MinerU 是首版唯一 OCR 服务商；Literature 不实现 OCR 推理。
-- `ocr/raw/mineru/` 永不被规范化或翻译流程修改。
-- `document/document.json` 是长期结构主数据，Markdown 是派生视图。
-- 所有导出器只读取规范文档图谱、译文层和 `assets/`；源文件只供 MinerU 输入与人工对照。
-- TBL 仍以独立进程工作，只接收 Literature 导出的 EPUB/DOCX，不回写 block 图谱。
-- 首版不生成 PDF，不翻译图片内部文字。
+- MinerU 是唯一文档解析主服务，不重复实现 OCR 模型。默认走远端 API（`mineru_remote`）；本地 MinerU 仅预留后端接入点，本版本未安装、未实现，不会显示为可点击功能。
+- raw 永不被规范化或翻译改写；译文按稳定 ID 挂接。
+- 2026-10-13 起已整体移除内置多格式导出与外部 TBL 接力；已存在的 `exports/` 文件、原件、raw、document 与 translations 全部保留，不做自动清理。
+- 旧 Litera 项目保持独立。

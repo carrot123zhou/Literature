@@ -26,11 +26,45 @@ class StructureMockProvider:
         if "toc_pages" in user:
             content = json.dumps({"toc": [{"title": "Chapter One", "level": 1}, {"title": "Chapter Two", "level": 1}]})
         else:
-            content = json.dumps({"suggestions": []})
+            payload = json.loads(user)
+            candidates = payload.get("candidates", payload.get("title_candidates", []))
+            rows = [{"block_id": row["block_id"], "role": "h1", "parent_id": None, "confidence": .9} for row in candidates]
+            content = json.dumps({"outline": rows, "profile": {"toc_scope": "chapters only"}} if payload.get("stage") else {"decisions": rows})
         return ProviderResponse(content=content, provider="mock", model="mock", input_tokens=10, output_tokens=5, request_id="req")
 
 
 class ModelServiceApiTests(unittest.TestCase):
+    def test_structure_job_rejects_invalid_timeout_and_completed_reuse(self):
+        service = self.create_service()
+        path = f"/projects/{self.project_id}/structure/jobs"
+        for seconds in (29, 1801):
+            response = self.client.post(path, headers=self.headers, json={
+                "service_id": service["service_id"], "request_timeout_seconds": seconds})
+            self.assertEqual(response.status_code, 422, response.text)
+        from literature.storage import ProjectStore
+        store = ProjectStore(self.root / "library")
+        previous = store.create_job(self.project_id, "structure_ai", {}, {})
+        store.update_job(self.project_id, previous, status="completed")
+        response = self.client.post(path, headers=self.headers, json={
+            "service_id": service["service_id"], "reuse_job_id": previous})
+        self.assertEqual(response.status_code, 400, response.text)
+        self.assertEqual(len(store.list_jobs(self.project_id)), 1)
+
+    def test_legacy_ai_endpoint_uses_the_same_hierarchy_pipeline(self):
+        service = self.create_service()
+        provider = StructureMockProvider()
+        with patch("literature.model_services.ModelServiceStore.config_for", return_value=provider):
+            response = self.client.post(f"/projects/{self.project_id}/structure/analyze-ai", headers=self.headers,
+                json={"service_id": service["service_id"], "toc": [{"title": "Chapter One", "level": 1}], "auto_apply": True})
+        self.assertEqual(response.status_code, 200, response.text)
+        result = response.json()
+        self.assertEqual(result["audit"]["prompt_version"], "hierarchy-v2")
+        self.assertEqual(result["hierarchy_review"]["checked"], 1)
+        self.assertEqual(len(provider.calls), 2)
+        self.assertFalse(result["applied"])
+        stored = self.client.get(f"/projects/{self.project_id}/structure/jobs/{result['job_id']}", headers=self.headers).json()
+        self.assertEqual(stored["result"]["hierarchy_review"]["checked"], 1)
+
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary.name)
@@ -112,6 +146,18 @@ class ModelServiceApiTests(unittest.TestCase):
         # 删除后引用它的角色被清空，避免悬空绑定。
         self.assertEqual(listing["roles"]["translation"], "")
 
+    def test_model_service_lists_remote_models(self) -> None:
+        service = self.create_service()
+        with patch("literature.model_services.ModelServiceStore.api_key", return_value="sk-test"), \
+                patch("literature.providers.list_remote_models", return_value=["gpt-4o", "gpt-4o-mini"]) as mocked:
+            response = self.client.post(f"/model-services/{service['service_id']}/models", headers=self.headers)
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["models"], ["gpt-4o", "gpt-4o-mini"])
+        mocked.assert_called_once_with(service["base_url"], "sk-test", timeout=30.0)
+        # 不存在的服务报错而不是静默返回空列表。
+        missing = self.client.post("/model-services/not-a-service/models", headers=self.headers)
+        self.assertEqual(missing.status_code, 502, missing.text)
+
     def test_structure_plan_includes_toc_page_text_only_when_requested(self) -> None:
         plan = self.client.post(f"/projects/{self.project_id}/structure/plan", headers=self.headers, json={
             "toc": [], "extract_toc": True, "proofread": True,
@@ -147,7 +193,8 @@ class ModelServiceApiTests(unittest.TestCase):
         self.assertTrue(job["result"]["audit"]["toc_page_text_included"])
         self.assertFalse(job["result"]["audit"]["body_text_included"])
         self.assertEqual(job["scope"]["extract_toc"], True)
-        self.assertGreaterEqual(len(provider.calls), 2)
+        # Matching the printed TOC does not establish the whole hierarchy.
+        self.assertEqual(len(provider.calls), 3)  # TOC, outline plan, role review
 
 
 if __name__ == "__main__":

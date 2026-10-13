@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import shutil
+import json
+import hashlib
 import subprocess
 import sys
+import os
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
 WORK = ROOT / "build" / "sidecar"
 DIST = ROOT / "dist" / "sidecar"
 BINARIES = ROOT / "src-tauri" / "binaries"
@@ -23,10 +27,16 @@ def target_triple() -> str:
 
 
 def main() -> None:
+    from literature.runtime_revision import source_revision
+    WORK.mkdir(parents=True, exist_ok=True)
+    revision = WORK / "runtime-revision.txt"
+    revision.write_text(source_revision(), encoding="utf-8")
+    os.environ["PYINSTALLER_CONFIG_DIR"] = str(WORK / "cache")
     subprocess.run([
         sys.executable, "-m", "PyInstaller", "--noconfirm", "--clean", "--onefile",
         "--name", "literature-sidecar", "--distpath", str(DIST), "--workpath", str(WORK),
-        "--specpath", str(WORK), "--collect-all", "fitz", "--collect-all", "docx",
+        "--specpath", str(WORK), "--collect-all", "pymupdf",
+        "--add-data", f"{revision}:literature",
         "--hidden-import", "uvicorn.logging", "--hidden-import", "uvicorn.loops.auto",
         "--hidden-import", "uvicorn.protocols.http.auto", "--hidden-import", "uvicorn.protocols.websockets.auto",
         str(ROOT / "literature" / "sidecar.py"),
@@ -36,6 +46,8 @@ def main() -> None:
     destination = BINARIES / f"literature-sidecar-{target_triple()}"
     shutil.copy2(source, destination)
     destination.chmod(0o755)
+    manifest = {"target": target_triple(), "runtime_revision": revision.read_text(), "sha256": hashlib.sha256(destination.read_bytes()).hexdigest(), "size": destination.stat().st_size}
+    (BINARIES / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
     print(destination)
 
 

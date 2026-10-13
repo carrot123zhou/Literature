@@ -4,7 +4,6 @@ import argparse
 import json
 from pathlib import Path
 
-from .exporters import export_all
 from .mineru import import_mineru
 from .storage import ProjectStore
 
@@ -26,11 +25,6 @@ def main() -> None:
     show = commands.add_parser("show")
     show.add_argument("project_id")
 
-    export = commands.add_parser("export")
-    export.add_argument("project_id")
-    export.add_argument("--mode", choices=["source", "translation", "bilingual"], default="translation")
-    export.add_argument("--formats", nargs="+", default=["html", "md+json", "epub", "docx"])
-
     args = parser.parse_args()
     store = ProjectStore(args.library)
     if args.command == "create":
@@ -39,8 +33,8 @@ def main() -> None:
         result = import_mineru(store, args.project_id, args.paths).to_dict()
     elif args.command == "show":
         result = store.load_document(args.project_id).to_dict()
-    else:
-        result = export_all(store, args.project_id, mode=args.mode, formats=args.formats)
+    else:  # pragma: no cover - argparse 已限制取值
+        raise SystemExit(f"未知命令：{args.command}")
     print(json.dumps(result, ensure_ascii=False, indent=2))
 
 

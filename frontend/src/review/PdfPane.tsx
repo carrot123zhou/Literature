@@ -4,7 +4,7 @@ import PdfPageCanvas from "./PdfPageCanvas";
 import type { PdfState } from "./usePdfDocument";
 import { estimatedPageHeight } from "./geometry";
 
-export type FocusRequest = { blockId: string; nonce: number };
+export type FocusRequest = { blockId: string; nonce: number; pageIndex?: number };
 
 type Props = {
   pdf: PdfState;
@@ -29,6 +29,8 @@ export default function PdfPane({ pdf, pages, blocks, space, selected, onSelect,
   const currentRef = useRef(0);
   const activeRef = useRef("");
   const [renderWidth, setRenderWidth] = useState(0);
+  const [zoom, setZoom] = useState(1);
+  const [showBoxes, setShowBoxes] = useState(true);
   const [currentPage, setCurrentPage] = useState(0);
   const [pinnedPage, setPinnedPage] = useState<number | null>(null);
   const [defaultRatio, setDefaultRatio] = useState(1.414);
@@ -62,12 +64,12 @@ export default function PdfPane({ pdf, pages, blocks, space, selected, onSelect,
   useEffect(() => {
     const element = containerRef.current;
     if (!element) return;
-    const measure = () => setRenderWidth(Math.max(0, Math.floor(element.clientWidth - 48)));
+    const measure = () => setRenderWidth(Math.max(0, Math.floor((element.clientWidth - 48) * zoom)));
     measure();
     const observer = new ResizeObserver(measure);
     observer.observe(element);
     return () => observer.disconnect();
-  }, []);
+  }, [zoom]);
 
   const pageHeight = useCallback((index: number) => {
     const ratio = ratios[index] ?? defaultRatio;
@@ -100,17 +102,18 @@ export default function PdfPane({ pdf, pages, blocks, space, selected, onSelect,
   useEffect(() => {
     if (!focus || !pdf.document) return;
     const block = blocks.find(item => item.block_id === focus.blockId);
-    if (!block) return;
-    setPinnedPage(block.page_index);
+    const targetPage = block?.page_index ?? focus.pageIndex;
+    if (targetPage === undefined) return;
+    setPinnedPage(targetPage);
     const timer = window.setTimeout(() => {
       const container = containerRef.current;
       if (!container) return;
-      const target = container.querySelector<HTMLElement>(`.bbox[data-block-id="${block.block_id}"]`)
-        ?? container.querySelector<HTMLElement>(`.pdf-page[data-page-index="${block.page_index}"]`);
+      const target = container.querySelector<HTMLElement>(`.bbox[data-block-id="${block?.block_id}"]`)
+        ?? container.querySelector<HTMLElement>(`.pdf-page[data-page-index="${targetPage}"]`);
       target?.scrollIntoView({ block: "center", behavior: "smooth" });
     }, 80);
     return () => window.clearTimeout(timer);
-  }, [focus, pdf.document, blocks]);
+  }, [focus, pdf.document, blocks, renderWidth]);
 
   // 滚动停止后才判定当前阅读块，避免滚动过程中反复触发上层重渲染。
   useEffect(() => {
@@ -144,10 +147,20 @@ export default function PdfPane({ pdf, pages, blocks, space, selected, onSelect,
   }
 
   return (
-    <section className="pdf-panel mineru-preview-pane">
+    <section className="pdf-panel mineru-preview-pane" data-current-page={currentPage + 1} data-page-count={pages.length}>
       <div className="viewer-toolbar">
         <strong>源文件预览</strong>
-        <div>{action}<span>{pages.length ? `${currentPage + 1} / ${pages.length}` : "加载中"}</span></div>
+        <div className="review-viewer-controls">{action}
+          <label>页 <input aria-label="跳转源文件页" type="number" min={1} max={pages.length} key={currentPage} defaultValue={currentPage + 1} onKeyDown={event => {
+            if (event.key !== "Enter") return;
+            const index = Number(event.currentTarget.value) - 1;
+            if (index < 0 || index >= pages.length) return;
+            setPinnedPage(index);
+            window.setTimeout(() => containerRef.current?.querySelector<HTMLElement>(`.pdf-page[data-page-index="${index}"]`)?.scrollIntoView({ block: "start", behavior: "smooth" }), 80);
+          }}/><span>/ {pages.length}</span></label>
+          <select aria-label="原页缩放" value={zoom} onChange={event => setZoom(Number(event.target.value))}><option value={1}>适应宽度</option><option value={1.25}>125%</option><option value={1.5}>150%</option><option value={2}>200%</option></select>
+          <button className={showBoxes ? "is-active" : ""} aria-pressed={showBoxes} title="显示或隐藏结构框" onClick={() => setShowBoxes(value => !value)}>结构框</button>
+        </div>
       </div>
       <div className="pdf-scroll" ref={containerRef} onScroll={locate}>
         <div className="pdf-stack">
@@ -161,11 +174,12 @@ export default function PdfPane({ pdf, pages, blocks, space, selected, onSelect,
               pageRatio={ratios[index] ?? defaultRatio}
               blocks={byPage.get(page.page_index) ?? []}
               selected={selected}
+              showBoxes={showBoxes}
               space={space}
               onSelect={onSelect}
             />
           ) : (
-            <div className="pdf-page pdf-page-placeholder" key={page.page_index} style={{ width: renderWidth || undefined, height: renderWidth > 0 ? estimatedPageHeight(undefined, renderWidth, ratios[index] ?? defaultRatio) : undefined }}>{page.page_index + 1}</div>
+            <div className="pdf-page pdf-page-placeholder" key={page.page_index} data-page-index={page.page_index} style={{ width: renderWidth || undefined, height: renderWidth > 0 ? estimatedPageHeight(undefined, renderWidth, ratios[index] ?? defaultRatio) : undefined }}>{page.page_index + 1}</div>
           )))}
         </div>
       </div>

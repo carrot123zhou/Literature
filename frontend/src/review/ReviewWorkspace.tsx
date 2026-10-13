@@ -1,12 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import "./review.css";
 import { api } from "../api";
 import SplitPane from "../SplitPane";
-import type { Block, DocumentGraph, Job, ModelService, PageMeta, StructurePatch, StructureSuggestion, StructureTocEntry } from "../types";
+import type { DocumentGraph, Job, ModelService, PageMeta, StructureBaseline, StructurePatch, StructureSuggestion, StructureTocEntry } from "../types";
 import OutlinePane, { type StructureAnalysis, type StructureOptions, type TocCandidate } from "./OutlinePane";
 import PdfPane, { type FocusRequest } from "./PdfPane";
 import ResultPane, { type PatchProposal, type ResultTab } from "./ResultPane";
 import SourcePreview from "./SourcePreview";
-import { documentProjection, parseTocDraft, tocDraft } from "./projection";
+import { documentProjection, formatTocDraft, parseTocDraft } from "./projection";
 import { usePdfDocument } from "./usePdfDocument";
 
 type Props = {
@@ -16,14 +17,12 @@ type Props = {
   sourceName: string;
   patches: StructurePatch[];
   suggestions: StructureSuggestion[];
+  jobs: Job[];
   onSuggestions: (value: StructureSuggestion[]) => void;
-  scope: Set<string>;
-  onToggleScope: (blockId: string) => void;
   selected: string;
   onSelect: (blockId: string) => void;
   refresh: () => Promise<void>;
   setMessage: (value: string) => void;
-  onOpenRead: () => void;
   /** 结构校对角色绑定的模型服务。 */
   modelService?: ModelService;
   onConfigureModel: () => void;
@@ -35,6 +34,22 @@ function isTyping(target: EventTarget | null): boolean {
   return element.isContentEditable || ["INPUT", "TEXTAREA", "SELECT"].includes(element.tagName);
 }
 
+/** MinerU 文本结构类型中可以在结构校对里修改的集合。 */
+const EDITABLE_TYPES = ["title", "paragraph", "list", "footnote"];
+
+/** 建议是否仍适用当前块；按块而不是整份文档判断，避免采用兄弟建议后其它建议一起失效。 */
+function suggestionFresh(document: DocumentGraph, value: StructureSuggestion): boolean {
+  const block = document.blocks.find(item => item.block_id === value.block_id);
+  if (!block) return false;
+  if (value.operation === "set_level") return block.type === "title" && block.level === Number(value.before);
+  const expected = value.before && typeof value.before === "object" ? value.before as { type?: string; level?: number; source_text?: string; items?: string[] } : { type: String(value.before) };
+  if (block.type !== (expected.type ?? block.type)) return false;
+  if (block.type === "title" && Number(expected.level ?? block.level) !== block.level) return false;
+  if ("source_text" in expected && expected.source_text !== block.source_text) return false;
+  if ("items" in expected && JSON.stringify(expected.items) !== JSON.stringify(block.items)) return false;
+  return true;
+}
+
 /**
  * 对照阅读 + 结构调整工作区。
  *
@@ -42,10 +57,12 @@ function isTyping(target: EventTarget | null): boolean {
  * block_id 互相定位；结构调整只写可逆补丁，不改变阅读顺序。
  */
 export default function ReviewWorkspace(props: Props) {
-  const { projectId, document, sourceType, sourceName, patches, suggestions, onSuggestions, scope, onToggleScope, selected, onSelect, refresh, setMessage, onOpenRead, modelService, onConfigureModel } = props;
+  const { projectId, document, sourceType, sourceName, patches, suggestions, onSuggestions, selected, onSelect, refresh, setMessage, modelService, onConfigureModel } = props;
   const bboxAvailable = document.bbox_space === "mineru-1000" && document.blocks.some(block => block.bbox.length === 4);
+  const isPdf = sourceType.toLowerCase() === "pdf";
 
-  const [tocText, setTocText] = useState(() => tocDraft(document.toc));
+  const [tocText, setTocText] = useState(() => { try { return localStorage.getItem(`literature.review.baseline.${projectId}`) || ""; } catch { return ""; } });
+  const [pageText, setPageText] = useState("");
   const [tocCandidates, setTocCandidates] = useState<TocCandidate[]>([]);
   const [auditPayload, setAuditPayload] = useState<unknown>(null);
   const [tab, setTab] = useState<ResultTab>("blocks");
@@ -54,21 +71,82 @@ export default function ReviewWorkspace(props: Props) {
   const [focus, setFocus] = useState<FocusRequest | null>(null);
   const [follow, setFollow] = useState(true);
   const [busy, setBusy] = useState(false);
-  const [options, setOptions] = useState<StructureOptions>({ extractToc: true, proofread: true, autoApply: true });
+  const [options, setOptions] = useState<StructureOptions>({ extractToc: !tocText.trim(), proofread: true, autoApply: false, useVision: false, requestTimeoutSeconds: 600 });
   const [structureJob, setStructureJob] = useState<Job | null>(null);
   const [structureRunning, setStructureRunning] = useState(false);
   const [proposedToc, setProposedToc] = useState<StructureTocEntry[] | null>(null);
   const nonce = useRef(0);
+  // 防止双击/同帧重入造成重复 POST 结构分析作业。
+  const posting = useRef(false);
+  // 手动结构修改的提交锁：React busy 是异步状态，同帧连续事件会绕过它。
+  const submitting = useRef(false);
 
-  useEffect(() => { setTocText(tocDraft(document.toc)); }, [document.updated_at, document.toc]);
+  useEffect(() => { try { localStorage.setItem(`literature.review.baseline.${projectId}`, tocText); } catch { /* optional preference storage */ } }, [projectId, tocText]);
 
-  const pdf = usePdfDocument(projectId, bboxAvailable);
+  // 项目基准优先于本机偏好：换客户端或清空 WebView 偏好后仍可复用已确认目录。
+  useEffect(() => {
+    let cancelled = false;
+    api<StructureBaseline>(`/projects/${projectId}/structure/baseline`).then(value => {
+      if (cancelled || !value.toc?.length) return;
+      setTocText(formatTocDraft(value.toc));
+      setOptions(current => ({ ...current, extractToc: false }));
+    }).catch(() => { /* 旧后端或尚未保存基准时保留本机偏好 */ });
+    return () => { cancelled = true; };
+  }, [projectId]);
+
+  const persistBaseline = useCallback((entries: StructureTocEntry[], source: string) => {
+    void api(`/projects/${projectId}/structure/baseline`, { method: "PUT", body: JSON.stringify({ toc: entries, source }) })
+      .catch(() => { /* 基准保存失败不应阻断当前校准 */ });
+  }, [projectId]);
+  const mounted = useRef(true);
+  const trackedJob = useRef("");
+  const documentRef = useRef(document);
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
+  useEffect(() => { documentRef.current = document; }, [document]);
+
+  /** 从服务端读取仍待处理的建议；已采用/已忽略的结论存在项目数据库，重启后不复活。 */
+  const refreshSuggestions = useCallback(async (): Promise<StructureSuggestion[]> => {
+    try {
+      const value = await api<StructureSuggestion[]>(`/projects/${projectId}/structure/suggestions?decision=pending`);
+      const fresh = value.filter(item => suggestionFresh(documentRef.current, item)).map(item => ({ ...item, automatic: Boolean(item.automatic) }));
+      onSuggestions(fresh);
+      return fresh;
+    } catch { return []; }
+  }, [projectId, onSuggestions]);
+
+  /** 回填一次已完成作业的源目录基准；建议本身从服务端待处理列表读取。 */
+  const applyJobResult = useCallback((job: Job) => {
+    const result = (job.result ?? {}) as { proposed_toc?: StructureTocEntry[] };
+    setProposedToc(result.proposed_toc?.length ? result.proposed_toc : null);
+  }, []);
+
+  // 进入工作区时恢复项目内仍待处理的建议。
+  useEffect(() => { void refreshSuggestions(); }, [projectId]);
+  const selectedPages = () => {
+    if (!options.extractToc) return [];
+    // 留空表示交给后端自动识别目录页；不强制用户先选页。
+    if (!pageText.trim()) return [];
+    const indexes = new Set<number>();
+    for (const part of pageText.replaceAll("，", ",").split(",")) {
+      const match = part.trim().match(/^(\d+)(?:\s*-\s*(\d+))?$/);
+      if (!match) throw new Error("目录页格式应为 3-5, 7。");
+      const from = Number(match[1]), to = Number(match[2] || match[1]);
+      if (from < 1 || to < from || to > (pdf.pageCount || document.page_count)) throw new Error("目录页超出源文件范围。");
+      if (to - from >= 6) throw new Error("一次最多选择 6 页目录。");
+      for (let page = from; page <= to; page++) indexes.add(page - 1);
+    }
+    if (indexes.size > 6) throw new Error("一次最多选择 6 页目录。");
+    return [...indexes].sort((a, b) => a - b);
+  };
+
+  const pdf = usePdfDocument(projectId, isPdf);
   const markdown = useMemo(() => documentProjection(document), [document]);
-  const pages = useMemo<PageMeta[]>(() => (
-    document.pages?.length
-      ? document.pages
-      : Array.from({ length: document.page_count || 0 }, (_, index) => ({ page_index: index, width: 0, height: 0, rotation: 0, source_file: "", source_page_index: index }))
-  ), [document.pages, document.page_count]);
+  const pages = useMemo<PageMeta[]>(() => {
+    const metadata = new Map((document.pages ?? []).map(page => [page.page_index, page]));
+    return Array.from({ length: pdf.pageCount || document.page_count || 0 }, (_, index) => metadata.get(index) ?? {
+      page_index: index, width: 0, height: 0, rotation: 0, source_file: "", source_page_index: index,
+    });
+  }, [document.pages, document.page_count, pdf.pageCount]);
   const selectedBlock = useMemo(() => document.blocks.find(block => block.block_id === selected), [document.blocks, selected]);
   const jsonValue = auditPayload ?? selectedBlock?.raw ?? document;
 
@@ -80,43 +158,71 @@ export default function ReviewWorkspace(props: Props) {
   }, [onSelect]);
 
   const run = useCallback(async (action: () => Promise<void>) => {
+    if (submitting.current || structureRunning) return;
+    submitting.current = true;
     setBusy(true);
-    try { await action(); } catch (error) { setMessage(String(error instanceof Error ? error.message : error)); } finally { setBusy(false); }
-  }, [setMessage]);
+    try { await action(); } catch (error) { setMessage(String(error instanceof Error ? error.message : error)); } finally { submitting.current = false; setBusy(false); }
+  }, [setMessage, structureRunning]);
 
   const applyPatch = useCallback((proposal: PatchProposal) => void run(async () => {
     await api(`/projects/${projectId}/structure/patches`, { method: "POST", body: JSON.stringify(proposal) });
     await refresh();
     locate(proposal.block_id);
-    setMessage(`结构修订已记录：${proposal.block_id}`);
-  }), [projectId, refresh, locate, run, setMessage]);
+    onSuggestions(suggestions.filter(value => value.block_id !== proposal.block_id));
+    setMessage("结构已更新，可在修订历史中撤销。");
+  }), [projectId, refresh, locate, run, setMessage, suggestions, onSuggestions]);
 
   const applyBatch = (operation: "set_type" | "set_title", after: string | number) => void run(async () => {
-    const targets = [...picked];
+    const targets = [...picked].filter(id => document.blocks.some(block => block.block_id === id && EDITABLE_TYPES.includes(block.type)));
     if (!targets.length) return;
     await api(`/projects/${projectId}/structure/patches/batch`, {
       method: "POST",
       body: JSON.stringify({ patches: targets.map(block_id => ({ block_id, operation, after, reason: "批量结构调整", automatic: false })) }),
     });
     setPicked(new Set());
+    onSuggestions(suggestions.filter(value => !targets.includes(value.block_id)));
     await refresh();
     setMessage(`已批量调整 ${targets.length} 个块`);
   });
 
+  // 采用建议：带 suggestion_id 的走服务端决策（项目内原子应用并记录），本地分析结果退回补丁接口。
   const confirm = (suggestion: StructureSuggestion) => void run(async () => {
-    await api(`/projects/${projectId}/structure/patches`, { method: "POST", body: JSON.stringify({ ...suggestion, automatic: false }) });
-    onSuggestions(suggestions.filter(value => value !== suggestion));
-    await refresh();
+    if (suggestion.suggestion_id) {
+      await api(`/projects/${projectId}/structure/suggestions/${suggestion.suggestion_id}/decision`, { method: "POST", body: JSON.stringify({ decision: "applied" }) });
+      await refresh();
+      await refreshSuggestions();
+    } else {
+      await api(`/projects/${projectId}/structure/patches`, { method: "POST", body: JSON.stringify({ ...suggestion, automatic: false, source: "ai" }) });
+      onSuggestions(suggestions.filter(value => value !== suggestion));
+      await refresh();
+    }
   });
 
-  const confirmAll = () => void run(async () => {
-    const pending = suggestions.filter(value => !value.automatic);
+  const confirmAll = (values: StructureSuggestion[]) => void run(async () => {
+    const pending = values.filter(value => !value.automatic);
     if (!pending.length) return;
-    await api(`/projects/${projectId}/structure/patches/batch`, { method: "POST", body: JSON.stringify({ patches: pending.map(value => ({ ...value, automatic: false })) }) });
-    onSuggestions([]);
-    await refresh();
-    setMessage(`已确认 ${pending.length} 项结构修正`);
+    if (pending.every(value => value.suggestion_id)) {
+      await api(`/projects/${projectId}/structure/suggestions/decide-batch`, { method: "POST", body: JSON.stringify({ suggestion_ids: pending.map(value => value.suggestion_id), decision: "applied" }) });
+      await refresh();
+      await refreshSuggestions();
+    } else {
+      await api(`/projects/${projectId}/structure/patches/batch`, { method: "POST", body: JSON.stringify({ patches: pending.map(value => ({ ...value, automatic: false })), source: "ai" }) });
+      onSuggestions(suggestions.filter(value => !pending.includes(value)));
+      await refresh();
+    }
+    setMessage(`已采用 ${pending.length} 项结构建议`);
   });
+
+  const dismiss = (suggestion: StructureSuggestion) => {
+    if (suggestion.suggestion_id) {
+      void run(async () => {
+        await api(`/projects/${projectId}/structure/suggestions/${suggestion.suggestion_id}/decision`, { method: "POST", body: JSON.stringify({ decision: "dismissed" }) });
+        await refreshSuggestions();
+      });
+    } else {
+      onSuggestions(suggestions.filter(value => value !== suggestion));
+    }
+  };
 
   const revert = (patchId: string) => void run(async () => {
     await api(`/projects/${projectId}/structure/patches/${patchId}/revert`, { method: "POST" });
@@ -133,58 +239,121 @@ export default function ReviewWorkspace(props: Props) {
   });
 
   const analyze = () => void run(async () => {
-    const value = await api<{ suggestions: StructureSuggestion[]; applied: unknown[] }>(`/projects/${projectId}/structure/analyze`, { method: "POST", body: JSON.stringify({ toc: parseTocDraft(tocText), auto_apply: true }) });
-    onSuggestions(value.suggestions);
+    const draft = options.extractToc ? [] : parseTocDraft(tocText);
+    const value = await api<{ suggestions: StructureSuggestion[]; applied: unknown[]; proposed_toc: StructureTocEntry[] }>(`/projects/${projectId}/structure/analyze`, { method: "POST", body: JSON.stringify({ toc: draft, toc_page_indexes: options.extractToc ? selectedPages() : [], auto_apply: options.autoApply }) });
+    if (draft.length) persistBaseline(draft, "confirmed");
+    if (value.proposed_toc?.length) setProposedToc(value.proposed_toc);
+    onSuggestions(value.suggestions.filter(item => !item.automatic && suggestionFresh(document, item)));
     await refresh();
     setMessage(`自动应用 ${value.applied.length} 项，另有 ${value.suggestions.length - value.applied.length} 项待核对`);
   });
 
+  // 显式确认当前审查范围：绑定文档结构版本；文档改动后确认自动失效。
+  const confirmReview = () => void run(async () => {
+    await api(`/projects/${projectId}/structure/confirm`, { method: "POST" });
+    await refresh();
+    setMessage("已确认当前校对范围为已审查；文档之后改动会自动失效");
+  });
+
   // 异步结构分析：后台作业 + 轮询状态，界面展示进度与活动摘要。
   const runModel = () => {
-    if (structureRunning) return;
+    if (posting.current || structureRunning || busy) return;
+    let tocPages: number[];
+    const reuseJobId = structureJob?.status === "failed" ? structureJob.job_id : "";
+    try {
+      if (!Number.isInteger(options.requestTimeoutSeconds) || options.requestTimeoutSeconds < 30 || options.requestTimeoutSeconds > 1800) throw new Error("模型响应等待时间应为 30 至 1800 秒。");
+      tocPages = selectedPages();
+      if (!options.extractToc && !parseTocDraft(tocText).length) throw new Error("请填写已确认目录，每行按“# 标题”格式标记层级。");
+    } catch (error) { setMessage((error as Error).message); return; }
+    if (!options.extractToc) persistBaseline(parseTocDraft(tocText), "confirmed");
+    posting.current = true;
     setStructureRunning(true);
     setProposedToc(null);
+    setStructureJob(null);
     setMessage("结构分析任务已启动");
     api<Job>(`/projects/${projectId}/structure/jobs`, {
       method: "POST",
-      body: JSON.stringify({ service_id: "", toc: parseTocDraft(tocText), extract_toc: options.extractToc, proofread: options.proofread, auto_apply: options.autoApply }),
-    }).then(job => pollStructureJob(job.job_id)).catch(error => { setStructureRunning(false); setMessage(String(error instanceof Error ? error.message : error)); });
+      body: JSON.stringify({ service_id: modelService?.service_id || "", toc: parseTocDraft(tocText), extract_toc: options.extractToc, proofread: options.proofread, auto_apply: options.autoApply, toc_page_indexes: tocPages, use_vision: options.useVision, request_timeout_seconds: options.requestTimeoutSeconds, reuse_job_id: reuseJobId }),
+    }).then(job => {
+      if (!mounted.current) return;
+      trackedJob.current = job.job_id;
+      setStructureJob(job);
+      return pollStructureJob(job.job_id);
+    }).catch(error => { if (mounted.current) { setStructureRunning(false); setMessage(String(error instanceof Error ? error.message : error)); } })
+      .finally(() => { posting.current = false; });
   };
 
   const pollStructureJob = async (jobId: string) => {
-    for (let attempt = 0; attempt < 600; attempt += 1) {
-      const job = await api<Job>(`/projects/${projectId}/structure/jobs/${jobId}`);
+    while (mounted.current && trackedJob.current === jobId) {
+      let job: Job;
+      try {
+        job = await api<Job>(`/projects/${projectId}/structure/jobs/${jobId}`);
+      } catch (error) {
+        if (!mounted.current) return;
+        setStructureJob(current => current ? { ...current, message: `暂时无法读取任务状态，正在重连：${error instanceof Error ? error.message : String(error)}` } : current);
+        await new Promise(resolve => window.setTimeout(resolve, 3000));
+        continue;
+      }
+      if (!mounted.current) return;
       setStructureJob(job);
       if (job.status === "completed" || job.status === "failed") {
         setStructureRunning(false);
         if (job.status === "failed") { setMessage(`结构分析失败：${job.error}`); return; }
-        const result = (job.result ?? {}) as { suggestions?: StructureSuggestion[]; applied?: unknown[]; proposed_toc?: StructureTocEntry[] };
-        const all = result.suggestions ?? [];
-        const pending = all.filter(value => !value.automatic).length;
-        onSuggestions(all);
-        setProposedToc(result.proposed_toc?.length ? result.proposed_toc : null);
+        applyJobResult(job);
         await refresh();
-        setMessage(`结构分析完成：自动应用 ${result.applied?.length ?? 0} 项，待确认 ${pending} 项`);
+        const pending = await refreshSuggestions();
+        setMessage(`结构分析完成：自动应用 ${(job.result as { applied?: unknown[] } | undefined)?.applied?.length ?? 0} 项，待确认 ${pending.length} 项`);
         return;
       }
       await new Promise(resolve => window.setTimeout(resolve, 900));
     }
-    setStructureRunning(false);
-    setMessage("结构分析超时，请稍后重试");
   };
 
-  const adoptProposed = () => {
-    if (!proposedToc?.length) return;
-    setTocText(proposedToc.map(entry => `${"#".repeat(Math.max(1, Math.min(6, entry.level)))} ${entry.title}`).join("\n"));
-    setProposedToc(null);
-    setMessage("已采用模型提取的目录，可继续本地或模型校对");
+  // Re-entering the workspace reconnects to a running backend task rather than starting another.
+  useEffect(() => {
+    if (trackedJob.current) return;
+    const running = props.jobs.find(value => value.kind === "structure_ai" && ["queued", "running"].includes(value.status));
+    if (running) {
+      trackedJob.current = running.job_id;
+      setStructureJob(running);
+      setStructureRunning(true);
+      void pollStructureJob(running.job_id);
+      return;
+    }
+    // 已完成的任务：按当前块状态与已保存的采用/忽略决定恢复仍待处理的建议。
+    const latest = props.jobs.find(value => value.kind === "structure_ai");
+    if (!latest) return;
+    trackedJob.current = latest.job_id;
+    setStructureJob(latest);
+    // 轻量轮询只给摘要（无 result/audit）；进入已完成作业时按 job_id 拉完整详情再应用。
+    void api<Job>(`/projects/${projectId}/structure/jobs/${latest.job_id}`).then(full => {
+      if (trackedJob.current !== full.job_id) return;
+      setStructureJob(full);
+      if (full.status === "completed") { applyJobResult(full); void refreshSuggestions(); }
+    }).catch(() => { /* 详情读取失败时保留摘要，不阻塞工作区 */ });
+  }, [props.jobs, projectId, applyJobResult, refreshSuggestions]);
+
+  const previewActualAudit = () => {
+    if (!structureJob?.result) return;
+    setAuditPayload((structureJob.result as { audit?: unknown }).audit ?? structureJob.result);
+    setTab("json");
+    setMessage("已展开实际请求记录；图片记录页码、块 ID 和摘要，不重复保存图片数据。");
   };
+
+  const adoptProposed = (entries: StructureTocEntry[]) => void run(async () => {
+    if (!entries.length) return;
+    await api(`/projects/${projectId}/structure/baseline`, { method: "PUT", body: JSON.stringify({ toc: entries, source: "confirmed" }) });
+    setTocText(formatTocDraft(entries));
+    setProposedToc(null);
+    setOptions(current => ({ ...current, extractToc: false }));
+    setMessage("已保存源目录基准到项目，下次校准可直接复用。");
+  });
 
   const previewAudit = () => void run(async () => {
-    const value = await api<unknown>(`/projects/${projectId}/structure/plan`, { method: "POST", body: JSON.stringify({ toc: parseTocDraft(tocText), extract_toc: options.extractToc, proofread: options.proofread }) });
+    const value = await api<unknown>(`/projects/${projectId}/structure/plan`, { method: "POST", body: JSON.stringify({ toc: parseTocDraft(tocText), extract_toc: options.extractToc, proofread: options.proofread, toc_page_indexes: selectedPages(), use_vision: options.useVision }) });
     setAuditPayload(value);
     setTab("json");
-    setMessage(options.extractToc ? "JSON 正在显示发送给模型的完整数据：包含选中目录页文本（可在其中核对）" : "JSON 正在显示发送给模型的完整数据：不含正文与目录页文本");
+    setMessage("模型输入已展开，visual_evidence 包含将发送的目录页与标题裁片。");
   });
 
   const findTocPages = () => void run(async () => {
@@ -193,14 +362,29 @@ export default function ReviewWorkspace(props: Props) {
     setMessage(value.length ? `找到 ${value.length} 个目录页候选` : "没有找到高置信目录页，请手工定位");
   });
 
+  // 零成本：直接从规范文档里解析印刷目录，回填为已确认基准，不调用模型。
+  const readLocalToc = () => void run(async () => {
+    const value = await api<{ pages: number[]; entries: StructureTocEntry[] }>(`/projects/${projectId}/structure/local-toc?pages=${selectedPages().join(",")}`);
+    if (!value.entries.length) {
+      setMessage("正文里没有找到可解析的印刷目录，可手工填写基准，或从源目录页提取。");
+      return;
+    }
+    setProposedToc(value.entries);
+    const pages = value.pages.map(page => page + 1).join("、");
+    setMessage(`本地读取目录 ${value.entries.length} 条（第 ${pages} 页），未调用模型。请核对下方目录草稿的层级后确认。`);
+  });
+
   const togglePick = useCallback((blockId: string, range: boolean) => {
+    if (!document.blocks.some(block => block.block_id === blockId && EDITABLE_TYPES.includes(block.type))) return;
     setPicked(previous => {
       const next = new Set(previous);
       if (range && selected) {
         const from = document.blocks.findIndex(block => block.block_id === selected);
         const to = document.blocks.findIndex(block => block.block_id === blockId);
         if (from >= 0 && to >= 0) {
-          for (let index = Math.min(from, to); index <= Math.max(from, to); index += 1) next.add(document.blocks[index].block_id);
+          for (let index = Math.min(from, to); index <= Math.max(from, to); index += 1) {
+            if (EDITABLE_TYPES.includes(document.blocks[index].type)) next.add(document.blocks[index].block_id);
+          }
           return next;
         }
       }
@@ -222,23 +406,24 @@ export default function ReviewWorkspace(props: Props) {
         if (previous) { event.preventDefault(); locate(previous.block_id); }
       } else if (/^[1-6]$/.test(event.key)) {
         const block = document.blocks[index];
-        if (!block) return;
+        if (!block || !EDITABLE_TYPES.includes(block.type) || busy || structureRunning) return;
         event.preventDefault();
         applyPatch({ block_id: block.block_id, operation: block.type === "title" ? "set_level" : "set_title", after: Number(event.key), reason: `键盘设为 H${event.key}` });
       } else if (event.key === "0" || event.key === "Backspace") {
         const block = document.blocks[index];
-        if (!block || block.type !== "title") return;
+        if (!block || !EDITABLE_TYPES.includes(block.type) || block.type === "paragraph" || busy || structureRunning) return;
         event.preventDefault();
         applyPatch({ block_id: block.block_id, operation: "set_type", after: "paragraph", reason: "键盘降为正文" });
       }
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [document.blocks, selected, locate, applyPatch]);
+  }, [document.blocks, selected, locate, applyPatch, busy, structureRunning]);
 
   const jumpToPage = useCallback((page: number) => {
     const block = document.blocks.find(item => item.page_index === page - 1);
     if (block) locate(block.block_id);
+    else { nonce.current += 1; setFocus({ blockId: "", pageIndex: page - 1, nonce: nonce.current }); }
   }, [document.blocks, locate]);
 
   const analysis = useMemo<StructureAnalysis>(() => ({ job: structureJob, running: structureRunning, options, proposedToc }), [structureJob, structureRunning, options, proposedToc]);
@@ -248,7 +433,7 @@ export default function ReviewWorkspace(props: Props) {
     <SplitPane
       className="workspace review-grid"
       storageKey="literature.split.review"
-      initial={[0.22, 0.41, 0.37]}
+      initial={[0.2, 0.4, 0.4]}
       minPx={[260, 320, 300]}
       handleLabels={["调整结构与任务栏宽度", "调整文档预览与解析结果宽度"]}
     >
@@ -257,22 +442,24 @@ export default function ReviewWorkspace(props: Props) {
         tocText={tocText}
         onTocText={setTocText}
         tocCandidates={tocCandidates}
+        pageText={pageText}
+        onPageText={setPageText}
         onFindTocPages={findTocPages}
+        onReadLocalToc={readLocalToc}
         onJumpPage={jumpToPage}
         onAnalyze={analyze}
         onPreviewAudit={previewAudit}
+        onPreviewActualAudit={previewActualAudit}
         suggestions={suggestions}
         patches={patches}
         selected={selected}
         activeBlock={activeBlock}
-        checked={scope}
         onSelect={locate}
-        onToggleCheck={onToggleScope}
         onConfirm={confirm}
+        onDismiss={dismiss}
         onConfirmAll={confirmAll}
         onRevert={revert}
         onRevertAll={revertAll}
-        onPatch={applyPatch}
         busy={busy}
         modelService={modelService}
         onConfigureModel={onConfigureModel}
@@ -280,8 +467,9 @@ export default function ReviewWorkspace(props: Props) {
         onOptions={onOptions}
         onRunModel={runModel}
         onAdoptProposed={adoptProposed}
+        onConfirmReview={confirmReview}
       />
-      {bboxAvailable
+      {isPdf
         ? <PdfPane
             pdf={pdf}
             pages={pages}
@@ -291,11 +479,11 @@ export default function ReviewWorkspace(props: Props) {
             onSelect={locate}
             onActiveBlock={setActiveBlock}
             focus={focus}
-            action={<button className="link-button" onClick={onOpenRead}>去翻译</button>}
           />
         : <SourcePreview projectId={projectId} sourceType={sourceType} sourceName={sourceName} bboxAvailable={bboxAvailable} onJumpPage={jumpToPage}/>}
       <ResultPane
         blocks={document.blocks}
+        busy={busy || structureRunning}
         space={document.bbox_space}
         selected={selected}
         activeBlock={activeBlock}

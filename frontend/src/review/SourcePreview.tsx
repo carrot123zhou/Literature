@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { api, apiHeaders, apiUrl } from "../api";
+import { isDesktop, saveCopy } from "../desktop";
 
 export type RawFile = { path: string; size: number; sha256: string };
 
@@ -72,12 +73,26 @@ export default function SourcePreview({ projectId, sourceType, sourceName, bboxA
     }
   };
 
+  const saveSource = async () => {
+    try {
+      if (isDesktop) {
+        const project = await api<{ path: string; source_file: string }>(`/projects/${projectId}`);
+        await saveCopy(`${project.path}/${project.source_file || `source/origin.${kind}`}`);
+      } else {
+        const response = await fetch(apiUrl(`/projects/${projectId}/source`), { headers: apiHeaders() });
+        if (!response.ok) throw new Error("无法读取原件");
+        const url = URL.createObjectURL(await response.blob());
+        const link = document.createElement("a"); link.href = url; link.download = sourceName; link.click();
+        window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+      }
+    } catch (error) { setPreviewError(String(error)); }
+  };
   return (
     <section className="pdf-panel mineru-preview-pane">
       <div className="viewer-toolbar">
         <strong>源文件预览</strong>
         <div>
-          <a className="download-link" href={apiUrl(`/projects/${projectId}/source`)} onClick={event => { event.preventDefault(); void fetch(apiUrl(`/projects/${projectId}/source`), { headers: apiHeaders() }).then(r => r.blob()).then(blob => { const link = document.createElement("a"); link.href = URL.createObjectURL(blob); link.download = sourceName; link.click(); }); }}>下载原件</a>
+          <button onClick={saveSource}>另存原件</button>
           <span>{kind.toUpperCase()}</span>
         </div>
       </div>
@@ -92,7 +107,7 @@ export default function SourcePreview({ projectId, sourceType, sourceName, bboxA
         {!inline && <div className="source-preview-placeholder">
           <strong>{sourceName}</strong>
           <span>{kind.toUpperCase()}</span>
-          <p>浏览器内没有可靠的 {kind.toUpperCase()} 渲染器，因此本模块不做像素级原件对照。请使用右侧「结构块 / Markdown」核对解析结果，或在「MinerU 原始输出」中查看逐格式结果。</p>
+          <p>当前工作台没有内置的 {kind.toUpperCase()} 渲染器，因此本模块不做像素级原件对照。请使用右侧「结构块 / Markdown」核对解析结果，或在「MinerU 原始输出」中查看逐格式结果。</p>
         </div>}
 
         <details className="raw-files">

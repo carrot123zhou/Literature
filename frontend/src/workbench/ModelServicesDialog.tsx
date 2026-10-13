@@ -31,6 +31,8 @@ export default function ModelServicesDialog({ api, role, close, onMessage }: { a
   const [keyInput, setKeyInput] = useState("");
   const [busy, setBusy] = useState(false);
   const [checking, setChecking] = useState(false);
+  const [listing, setListing] = useState(false);
+  const [modelOptions, setModelOptions] = useState<string[]>([]);
   const [checkResult, setCheckResult] = useState("");
 
   useEffect(() => {
@@ -42,10 +44,11 @@ export default function ModelServicesDialog({ api, role, close, onMessage }: { a
   const isNew = !draft.service_id;
   const selected = useMemo(() => api.services.find(item => item.service_id === draft.service_id), [api.services, draft.service_id]);
 
-  const selectService = (service: ModelService) => { setDraft(draftFrom(service)); setKeyInput(""); setCheckResult(""); };
+  const selectService = (service: ModelService) => { setDraft(draftFrom(service)); setKeyInput(""); setCheckResult(""); setModelOptions([]); };
 
   const changePreset = (preset: string) => {
     const presetValue = PRESETS[preset];
+    setModelOptions([]);
     setDraft(current => ({
       ...current, preset,
       name: current.name || presetValue.label,
@@ -84,6 +87,18 @@ export default function ModelServicesDialog({ api, role, close, onMessage }: { a
     finally { setBusy(false); }
   };
 
+  const fetchModels = async () => {
+    if (isNew) { setCheckResult("请先保存服务，再拉取模型列表。"); return; }
+    setListing(true);
+    setCheckResult("");
+    try {
+      const list = await api.listModels(draft.service_id);
+      setModelOptions(list);
+      setCheckResult(`已获取 ${list.length} 个模型，点击模型 ID 输入框即可选择。`);
+    } catch (error) { setCheckResult(String(error)); }
+    finally { setListing(false); }
+  };
+
   const check = async () => {
     if (isNew) { setCheckResult("请先保存服务，再测试连接。"); return; }
     setChecking(true);
@@ -113,7 +128,7 @@ export default function ModelServicesDialog({ api, role, close, onMessage }: { a
 
       <div className="model-services-body">
         <aside className="model-service-list">
-          <div className="model-service-list-head"><strong>服务列表</strong><button onClick={() => { setDraft(emptyDraft()); setKeyInput(""); setCheckResult(""); }}>+ 新增</button></div>
+          <div className="model-service-list-head"><strong>服务列表</strong><button onClick={() => { setDraft(emptyDraft()); setKeyInput(""); setCheckResult(""); setModelOptions([]); }}>+ 新增</button></div>
           {api.services.length === 0 && <p className="empty-note">还没有模型服务。点击「+ 新增」开始配置。</p>}
           {api.services.map(service => <button key={service.service_id} className={`model-service-item${service.service_id === draft.service_id ? " selected" : ""}`} onClick={() => selectService(service)}>
             <span className={`model-dot${service.configured ? " configured" : ""}`}/>
@@ -126,7 +141,13 @@ export default function ModelServicesDialog({ api, role, close, onMessage }: { a
           <label>服务名称<input value={draft.name} onChange={event => setDraft({ ...draft, name: event.target.value })} placeholder="例如：我的中转站"/></label>
           <label>类型<select value={draft.preset} onChange={event => changePreset(event.target.value)}>{Object.entries(PRESETS).map(([key, value]) => <option key={key} value={key}>{value.label}</option>)}</select></label>
           <label>Base URL<input value={draft.base_url} onChange={event => setDraft({ ...draft, base_url: event.target.value })} placeholder="https://your-relay.example.com/v1"/></label>
-          <label>模型 ID<input value={draft.model} onChange={event => setDraft({ ...draft, model: event.target.value })} placeholder="gpt-4o-mini"/></label>
+          <label>模型 ID
+            <div className="model-input-row">
+              <input list="model-id-options" value={draft.model} onChange={event => setDraft({ ...draft, model: event.target.value })} placeholder="gpt-4o-mini"/>
+              <button type="button" onClick={fetchModels} disabled={listing || isNew}>{listing ? "拉取中…" : "拉取模型"}</button>
+            </div>
+            <datalist id="model-id-options">{modelOptions.map(id => <option key={id} value={id}/>)}</datalist>
+          </label>
           <div className="model-form-row">
             <label>温度<input type="number" min="0" max="2" step="0.1" value={draft.temperature ?? 0.2} onChange={event => setDraft({ ...draft, temperature: Number(event.target.value) })}/></label>
             <label>最大输出 token<input type="number" min="256" step="256" value={draft.max_output_tokens ?? 8192} onChange={event => setDraft({ ...draft, max_output_tokens: Number(event.target.value) })}/></label>

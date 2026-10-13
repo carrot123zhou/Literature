@@ -50,6 +50,6 @@ def validate_source(path: str | Path) -> Path:
     maximum = MAX_PDF_UPLOAD_BYTES if source.suffix.casefold() == ".pdf" else MAX_FILE_BYTES
     if size > maximum:
         if source.suffix.casefold() == ".pdf":
-            raise ValueError(f"{source.name} 超过 Literature 当前 2GB Web 上传限制。")
+            raise ValueError(f"{source.name} 超过 Literature 当前 2GB 文件导入限制。")
         raise ValueError(f"{source.name} 超过 MinerU 单文件 200MB 限制。")
     return source

@@ -31,9 +31,7 @@ class WorkflowRegressionTests(unittest.TestCase):
                     counts.append(part.page_count)
             self.assertEqual(counts, [200, 200, 1])
 
-    def test_language_mapping_and_friendly_names(self):
-        self.assertEqual(workflow.epub_language_for_mineru("japan"), "ja")
-        self.assertEqual(workflow.epub_language_for_mineru("latin"), "und")
+    def test_friendly_names(self):
         self.assertEqual(workflow.friendly_project_name("Book (Author) (z-library.sk).pdf"), "Book (Author)")
 
     def test_job_roundtrip_does_not_persist_token(self):

@@ -17,7 +17,6 @@ def span(text: str) -> dict[str, str]:
 
 class StructureReviewTests(unittest.TestCase):
     """对照阅读与结构调整模块依赖的数据契约。"""
-
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary.name)
@@ -91,7 +90,9 @@ class StructureReviewTests(unittest.TestCase):
         })
         promoted = self.store.load_document(self.project_id).block(paragraph.block_id)
         self.assertEqual((promoted.type, promoted.level), ("title", 3))
-        self.assertEqual(patch.before, {"type": "paragraph", "level": 0})
+        self.assertEqual(patch.before["type"], "paragraph")
+        self.assertEqual(patch.before["level"], 0)
+        self.assertEqual(patch.before["source_text"], "A body paragraph used for the review contract.")
 
         revert_patch(self.store, self.project_id, patch.patch_id)
         restored = self.store.load_document(self.project_id).block(paragraph.block_id)

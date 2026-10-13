@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { api } from "../api";
+import LocalResources from "./LocalResources";
 import type { DocumentGraph, UsageRecord } from "../types";
 
 type Props = {
@@ -17,13 +18,10 @@ type Props = {
   onOpenModels: () => void;
 };
 
-/** 全局设置抽屉：语言、预算、附加要求、用量、MinerU 与 TBL；模型配置在模型服务库。 */
+/** 全局设置抽屉：语言、预算、附加要求、用量与 MinerU；模型配置在模型服务库。 */
 export default function Settings({ projectId, document, selected, instructions, setInstructions, usageRecords, close, onUpdated, onMessage, onOpenModels }: Props) {
   const [mineru, setMineru] = useState("");
-  const [tblCommand, setTblCommand] = useState("");
-  const [tblUrl, setTblUrl] = useState("http://127.0.0.1:5001");
 
-  useEffect(() => { api<any>("/tbl/config").then(value => { setTblCommand(value.command || ""); setTblUrl(value.url || "http://127.0.0.1:5001"); }).catch(() => {}); }, []);
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => { if (event.key === "Escape") close(); };
     window.addEventListener("keydown", onKeyDown);
@@ -58,8 +56,8 @@ export default function Settings({ projectId, document, selected, instructions, 
         <label>全局源语言<select value={document.source_language_mode || document.source_language} onChange={e => updateLanguage(e.target.value)}><option value="auto">自动检测（当前 {document.source_language}）</option><option value="en">英语</option><option value="ja">日语</option><option value="fr">法语</option><option value="de">德语</option></select></label>
         {selectedTitle && <label>当前章节覆盖<select value={document.chapter_language_overrides[selected] || ""} onChange={e => updateLanguage(document.source_language_mode || document.source_language, e.target.value)}><option value="">继承全局</option><option value="en">英语</option><option value="ja">日语</option><option value="fr">法语</option><option value="de">德语</option></select></label>}
         <hr/>
-      </> : <p className="settings-hint">当前没有打开项目。MinerU Token 与 TBL 属于全局设置，会一直可用。</p>}
-      <h3>模型</h3>
+      </> : <p className="settings-hint">当前没有打开项目。MinerU Token 属于全局设置，会一直可用。</p>}
+      <LocalResources onMessage={onMessage}/><hr/><h3>模型</h3>
       <p className="settings-hint">结构校对与翻译各自在对应功能页绑定模型服务；密钥只保存在本机 Keychain。</p>
       <button onClick={onOpenModels}>打开模型服务设置</button>
       {document && projectId && <label>项目预算（USD，0 为不限）<input type="number" min="0" step="0.1" defaultValue={document.budget_usd || 0} onBlur={e => updateBudget(Number(e.target.value))}/></label>}
@@ -71,10 +69,6 @@ export default function Settings({ projectId, document, selected, instructions, 
       <hr/><h3>MinerU 精准解析</h3>
       <label>Token<input type="password" value={mineru} onChange={e => setMineru(e.target.value)}/></label>
       <button onClick={async () => { await api("/mineru/token", { method: "PUT", body: JSON.stringify({ value: mineru }) }); setMineru(""); onMessage("MinerU Token 已保存"); }}>保存 MinerU Token</button>
-      <hr/><h3>外部 TBL</h3>
-      <label>启动命令<input value={tblCommand} onChange={e => setTblCommand(e.target.value)} placeholder="/Applications/TBL.app/Contents/MacOS/TBL"/></label>
-      <label>本地 URL<input value={tblUrl} onChange={e => setTblUrl(e.target.value)}/></label>
-      <button onClick={async () => { await api("/tbl/config", { method: "PUT", body: JSON.stringify({ command: tblCommand, url: tblUrl }) }); onMessage("TBL 外部工具设置已保存"); }}>保存 TBL 设置</button>
     </section>
   </div>;
 }

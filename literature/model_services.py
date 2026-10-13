@@ -34,7 +34,7 @@ class ModelService:
     base_url: str = ""
     model: str = ""
     temperature: float = 0.2
-    max_output_tokens: int = 8192
+    max_output_tokens: int = 16384
     input_price_per_million: float | None = None
     output_price_per_million: float | None = None
 
@@ -108,7 +108,7 @@ class ModelServiceStore:
             base_url=base_url,
             model=model,
             temperature=max(0.0, min(2.0, float(payload.get("temperature", 0.2) or 0.2))),
-            max_output_tokens=max(256, min(128_000, int(payload.get("max_output_tokens", 8192) or 8192))),
+            max_output_tokens=max(256, min(128_000, int(payload.get("max_output_tokens", 16384) or 16384))),
             input_price_per_million=_clean_price(payload.get("input_price_per_million")),
             output_price_per_million=_clean_price(payload.get("output_price_per_million")),
         )
@@ -196,6 +196,12 @@ class ModelServiceStore:
         service = self.get(service_id)
         model = ModelService(**{key: service.get(key) for key in ModelService.__dataclass_fields__})
         return OpenAICompatibleProvider(model.config(), api_key=self.api_key(service_id), timeout=timeout)
+
+    def list_models(self, service_id: str, *, timeout: float = 30.0) -> list[str]:
+        """用该服务已保存的 base URL 与密钥拉取远端模型 ID 列表。"""
+        from .providers import list_remote_models
+        service = self.get(service_id)
+        return list_remote_models(str(service.get("base_url") or ""), self.api_key(service_id), timeout=timeout)
 
 
 def save_service_key(service_id: str, api_key: str) -> None:

@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import hashlib
+import sys
 from pathlib import Path
 
 
 def source_revision(package_dir: Path | None = None) -> str:
     """Return a stable fingerprint for all Python sources in the backend package."""
 
+    if package_dir is None and getattr(sys, "frozen", False):
+        return (Path(__file__).parent / "runtime-revision.txt").read_text(encoding="utf-8").strip()
     root = (package_dir or Path(__file__).parent).resolve()
     digest = hashlib.sha256()
     for path in sorted(root.rglob("*.py"), key=lambda item: item.relative_to(root).as_posix()):

@@ -24,7 +24,13 @@ export function tocDraft(nodes: TocNode[]): string {
 
 export function parseTocDraft(value: string): { level: number; title: string }[] {
   return value.split(/\n/)
-    .map(line => line.match(/^(#{1,6})\s+(.+)$/))
+    .map(line => line.trim().match(/^(#{1,6})\s+(.+)$/))
     .filter((match): match is RegExpMatchArray => Boolean(match))
-    .map(match => ({ level: match[1].length, title: match[2].trim() }));
+    .map(match => ({ level: match[1].length, title: match[2].trim() }))
+    .filter(entry => Boolean(entry.title));
+}
+
+/** 把目录条目转回可编辑的 Markdown 草稿，供项目基准回填。 */
+export function formatTocDraft(entries: { level: number; title: string }[]): string {
+  return entries.map(entry => `${"#".repeat(Math.max(1, Math.min(6, entry.level)))} ${entry.title}`).join("\n");
 }

@@ -24,6 +24,7 @@ export type ModelServicesApi = {
   remove: (serviceId: string) => Promise<void>;
   saveKey: (serviceId: string, value: string) => Promise<void>;
   check: (serviceId: string) => Promise<{ ok: boolean; model: string; latency_ms: number; sample: string }>;
+  listModels: (serviceId: string) => Promise<string[]>;
   setRoles: (roles: Partial<ModelRoles>) => Promise<void>;
 };
 
@@ -100,6 +101,11 @@ export function useModelServices(): ModelServicesApi {
 
   const check = useCallback(async (serviceId: string) => api<{ ok: boolean; model: string; latency_ms: number; sample: string }>(`/model-services/${serviceId}/check`, { method: "POST" }), []);
 
+  const listModels = useCallback(async (serviceId: string) => {
+    const value = await api<{ models: string[] }>(`/model-services/${serviceId}/models`, { method: "POST" });
+    return value.models;
+  }, []);
+
   const setRoles = useCallback(async (patch: Partial<ModelRoles>) => {
     const value = await api<ModelRoles>("/model-services/roles", { method: "PUT", body: JSON.stringify(patch) });
     setRoleState({ ...EMPTY_ROLES, ...value });
@@ -107,5 +113,5 @@ export function useModelServices(): ModelServicesApi {
 
   const serviceFor = useCallback((role: ModelRole) => services.find(item => item.service_id === roles[role]), [services, roles]);
 
-  return { services, roles, ready, serviceFor, refresh, create, update, remove, saveKey, check, setRoles };
+  return { services, roles, ready, serviceFor, refresh, create, update, remove, saveKey, check, listModels, setRoles };
 }

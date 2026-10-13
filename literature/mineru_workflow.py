@@ -4,7 +4,9 @@
 This module intentionally does not inspect document contents with an LLM.  It
 splits PDFs locally, submits deterministic MinerU jobs, persists enough state
 to resume after an application restart, downloads validated result archives,
-and finally hands ordered result folders to :mod:`mineru_epub`.
+and finally hands ordered result folders to the caller's merge callback
+(Literature normalizes them into the canonical document graph in
+:mod:`literature.mineru`; this module no longer ships a legacy EPUB fallback).
 """
 from __future__ import annotations
 
@@ -29,6 +31,10 @@ from typing import Any, Callable, Iterable, Protocol
 from .mineru_capabilities import (
     MAX_BATCH_FILES, SUPPORTED_EXTRA_FORMATS, SUPPORTED_LANGUAGES,
     SUPPORTED_MODELS, validate_source,
+)
+from .parse_backends import (
+    REMOTE_BACKEND_ID, ParseBackendCapabilities, ParseBackendUnavailable, ParseResult,
+    ensure_available, resolve_job_backend,
 )
 
 
@@ -123,30 +129,6 @@ def reserve_project_layout(output_root: str | Path, source: str | Path) -> Proje
     raise WorkflowError(f"无法为 {base} 分配唯一的项目目录。")
 
 
-def epub_language_for_mineru(language: str) -> str:
-    """Translate MinerU OCR-pack names into valid EPUB language tags."""
-    return {
-        "ch": "zh-CN",
-        "ch_server": "zh-Hant",
-        "chinese_cht": "zh-Hant",
-        "en": "en",
-        "japan": "ja",
-        "korean": "ko",
-        "ta": "ta",
-        "te": "te",
-        # MinerU calls its Kannada pack ``ka``; BCP 47 uses ``kn``.
-        "ka": "kn",
-        "el": "el",
-        "th": "th",
-        # Family packs do not identify one document language.
-        "latin": "und",
-        "arabic": "und",
-        "cyrillic": "und",
-        "east_slavic": "und",
-        "devanagari": "und",
-    }.get(language, "und")
-
-
 class WorkflowError(RuntimeError):
     """The local workflow cannot safely continue."""
 
@@ -170,7 +152,18 @@ class JobState(str, Enum):
     MERGING = "merging"
     COMPLETED = "completed"
     FAILED = "failed"
+    # 用户在安全边界停止本地等待；远端可能仍在处理，可恢复。
     WAITING = "waiting"
+    # 上次进程退出时任务仍在执行；远端工作可能仍在，可恢复轮询/下载。
+    INTERRUPTED = "interrupted"
+
+# 进程退出后无法继续推理的“活动”状态：启动时统一标记为 interrupted。
+ACTIVE_JOB_STATES = frozenset({
+    JobState.PREPARING, JobState.UPLOADING, JobState.PROCESSING,
+    JobState.DOWNLOADING, JobState.MERGING,
+})
+# 调度器可自动恢复的状态。
+RESUMABLE_JOB_STATES = frozenset({JobState.QUEUED, JobState.WAITING, JobState.INTERRUPTED})
 
 
 class SliceState(str, Enum):
@@ -198,9 +191,17 @@ class SliceJob:
     result_directory: str = ""
     error: str = ""
     attempts: int = 0
+    # 该切片真实覆盖的源文件页号（1-based，升序）。分页解析时由本地压缩子集
+    # 决定，不依赖 MinerU 返回的 page_idx，避免远端页码语义差异导致错位。
+    source_pages: list[int] = field(default_factory=list)
+    # 传给 MinerU 的文件级 page_ranges；本地压缩子集方案下为空。
+    page_ranges: str = ""
 
     @property
     def page_count(self) -> int:
+        # 分页解析（压缩子集）时按真实源页数计；普通切片用区间长度。
+        if self.source_pages:
+            return len(self.source_pages)
         if self.start_page < 1 or self.end_page < 1:
             return 0
         return self.end_page - self.start_page + 1
@@ -241,10 +242,25 @@ class WorkflowJob:
     page_limit: int = DEFAULT_PAGE_LIMIT
     max_slice_bytes: int = DEFAULT_MAX_SLICE_BYTES
     keep_original_pdf: bool = True
+    # 本次任务请求的源文件页号（1-based）；空表示整份文件。用于覆盖计算。
+    requested_pages: list[int] = field(default_factory=list)
+    # 用户可读的请求范围，例如 "101-300"；仅用于展示。
+    requested_ranges: str = ""
+    # 源文件总页数；0 表示未知（非 PDF 或未打开）。
+    source_page_count: int = 0
+    # True 表示这是对同一项目的“继续解析”，完成后只追加未覆盖页并合并。
+    append: bool = False
+    # 解析后端标识（remote/local）。旧任务缺此字段时按 remote 读取，保持历史行为。
+    backend_id: str = REMOTE_BACKEND_ID
+    # 后端级参数快照（不含密钥）：远端记录语言包等有效参数，便于审计与复现。
+    backend_config: dict[str, Any] = field(default_factory=dict)
     slices: list[SliceJob] = field(default_factory=list)
     error: str = ""
     created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     updated_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    # 首次进入 completed 的时间；一旦写入不得被后续 save_job / 清理 / 快照覆盖。
+    # 空字符串表示未知（旧任务）——展示时回退 updated_at 并标注兼容依据。
+    finished_at: str = ""
 
     @property
     def job_file(self) -> Path:
@@ -264,6 +280,9 @@ class WorkflowJob:
         clean = {key: item for key, item in value.items() if key != "schema_version"}
         clean["state"] = JobState(clean.get("state", JobState.QUEUED.value))
         clean["slices"] = [SliceJob.from_dict(item) for item in clean.get("slices", [])]
+        # 旧任务没有后端字段（或为空）：按历史默认 remote 解析，而不是报错。
+        clean["backend_id"] = str(clean.get("backend_id") or REMOTE_BACKEND_ID)
+        clean.setdefault("backend_config", {})
         return cls(**clean)
 
 
@@ -282,7 +301,7 @@ class HTTPResponse(Protocol):
 
 
 ProgressCallback = Callable[[WorkflowJob, str], None]
-MergeCallback = Callable[[WorkflowJob, list[str]], Any]
+MergeCallback = Callable[[WorkflowJob, "ParseResult"], Any]
 SleepCallback = Callable[[float], None]
 
 
@@ -441,6 +460,35 @@ def parse_page_ranges(value: str, page_count: int) -> list[int]:
     return sorted(selected)
 
 
+def format_page_ranges(pages: Iterable[int]) -> str:
+    """把升序源页号压缩成 ``1-100,105`` 形式的人类可读范围。"""
+    ordered = sorted({int(page) for page in pages})
+    if not ordered:
+        return ""
+    parts: list[str] = []
+    start = previous = ordered[0]
+    for page in ordered[1:]:
+        if page == previous + 1:
+            previous = page
+            continue
+        parts.append(f"{start}-{previous}" if start != previous else str(start))
+        start = previous = page
+    parts.append(f"{start}-{previous}" if start != previous else str(start))
+    return ",".join(parts)
+
+
+def merge_page_ranges(pages: Iterable[int]) -> list[tuple[int, int]]:
+    """返回升序、不重叠的闭区间列表。"""
+    ordered = sorted({int(page) for page in pages})
+    ranges: list[tuple[int, int]] = []
+    for page in ordered:
+        if ranges and page == ranges[-1][1] + 1:
+            ranges[-1] = (ranges[-1][0], page)
+        else:
+            ranges.append((page, page))
+    return ranges
+
+
 def _open_pdf_page_count(path: Path) -> int:
     try:
         import fitz
@@ -513,6 +561,86 @@ def split_pdf(
         if path != target:
             path.replace(target)
         renamed.append((start_page, end_page, target))
+    return renamed
+
+
+def _write_pdf_pages(source: Path, output: Path, pages: list[int]) -> None:
+    """把指定源页（1-based，按给定顺序）压缩成一个新的 PDF。
+
+    用于继续/指定范围解析：本地生成只含所选页的子集文件后交给 MinerU 完整解析，
+    这样源页映射由本地决定，不依赖远端 page_ranges 的页码语义。
+    """
+    try:
+        import fitz
+    except ImportError as error:
+        raise WorkflowError("自动分片需要 PyMuPDF；请从 Literature 启动器重新安装 MinerU 工具。") from error
+    if not pages:
+        raise WorkflowError("没有需要解析的页面。")
+    output.parent.mkdir(parents=True, exist_ok=True)
+    temporary = output.with_suffix(output.suffix + ".tmp")
+    temporary.unlink(missing_ok=True)
+    source_document = fitz.open(source)
+    target = fitz.open()
+    try:
+        for page in pages:
+            target.insert_pdf(source_document, from_page=page - 1, to_page=page - 1)
+        target.save(temporary, garbage=4, deflate=True)
+    except Exception:
+        temporary.unlink(missing_ok=True)
+        raise
+    finally:
+        target.close()
+        source_document.close()
+    temporary.replace(output)
+
+
+def split_selected_pages(
+    source: str | Path,
+    destination: str | Path,
+    pages: Iterable[int],
+    *,
+    page_limit: int = DEFAULT_PAGE_LIMIT,
+    max_bytes: int = DEFAULT_MAX_SLICE_BYTES,
+    writer: Callable[[Path, Path, list[int]], None] = _write_pdf_pages,
+) -> list[tuple[list[int], Path]]:
+    """按所选源页生成压缩子集，并在页数/字节超限时二次切分。
+
+    返回 ``[(source_pages, path), ...]``，source_pages 为 1-based 升序源页号。
+    任意非连续页码都受支持，同一源页只出现一次。
+    """
+    source_path = Path(source).expanduser().resolve()
+    destination_path = Path(destination).expanduser().resolve()
+    destination_path.mkdir(parents=True, exist_ok=True)
+    selected = sorted({int(page) for page in pages})
+    if not selected:
+        raise WorkflowError("没有需要解析的页面。")
+    if any(page < 1 for page in selected):
+        raise WorkflowError("页码必须从 1 开始。")
+    pending: list[list[int]] = [selected[index:index + page_limit] for index in range(0, len(selected), page_limit)]
+    completed: list[tuple[list[int], Path]] = []
+    ordinal = 0
+    while pending:
+        group = pending.pop(0)
+        ordinal += 1
+        draft = destination_path / f"sel-{ordinal:04d}.pdf"
+        writer(source_path, draft, group)
+        if draft.stat().st_size <= max_bytes:
+            completed.append((group, draft))
+            continue
+        draft.unlink(missing_ok=True)
+        if len(group) == 1:
+            raise WorkflowError(
+                f"第 {group[0]} 页单页文件已超过 MinerU 的 {max_bytes / 1_000_000:.0f}MB 限制。"
+            )
+        midpoint = len(group) // 2
+        pending[0:0] = [group[:midpoint], group[midpoint:]]
+    completed.sort(key=lambda item: item[0][0])
+    renamed: list[tuple[list[int], Path]] = []
+    for index, (group, path) in enumerate(completed, 1):
+        target = destination_path / f"{index:03d}_sel{len(group):04d}_p{group[0]:06d}.pdf"
+        if path != target:
+            path.replace(target)
+        renamed.append((group, target))
     return renamed
 
 
@@ -641,15 +769,20 @@ class MinerUClient:
     def create_batch(self, slices: list[SliceJob], job: WorkflowJob) -> BatchSubmission:
         if not slices or len(slices) > MAX_BATCH_FILES:
             raise WorkflowError(f"单批 MinerU 文件数必须为 1–{MAX_BATCH_FILES}。")
-        files = [
-            {
+        is_pdf = Path(job.source_pdf).suffix.casefold() == ".pdf"
+        files = []
+        for item in slices:
+            # 本地压缩子集切片携带 source_pages，不再靠远端 page_ranges；
+            # 旧任务/直接构造的切片仍沿用 job.page_ranges 保持兼容。
+            remote_ranges = item.page_ranges or ("" if item.source_pages else job.page_ranges)
+            entry: dict[str, Any] = {
                 "name": item.upload_name,
                 "data_id": item.data_id,
                 "is_ocr": job.is_ocr,
-                **({"page_ranges": job.page_ranges} if job.page_ranges and Path(job.source_pdf).suffix.casefold() == ".pdf" else {}),
             }
-            for item in slices
-        ]
+            if remote_ranges and is_pdf:
+                entry["page_ranges"] = remote_ranges
+            files.append(entry)
         response = self._request(
             "POST",
             f"{self.base_url}/api/v4/file-urls/batch",
@@ -962,6 +1095,86 @@ def safe_extract_result(archive: str | Path, destination: str | Path, *, max_ext
         raise
 
 
+class ParseBackend(Protocol):
+    """解析后端的实际调用边界（类型与 RemoteMinerUBackend 一致）。
+
+    与早期“Protocol 描述 Mapping→Mapping”不同，本协议对齐真实方法签名：
+    ``prepare/status/result`` 操作并返回 ``WorkflowJob``，``execute`` 返回是否继续，
+    ``result`` 返回统一的 :class:`ParseResult`（raw 目录 + source_pages），
+    由工作流协调层统一 seal/normalize/merge；本地实现无需继承远端上传/轮询细节。
+    """
+
+    def capabilities(self) -> ParseBackendCapabilities: ...
+
+    def prepare(self, job: WorkflowJob, *, progress: ProgressCallback | None = None) -> WorkflowJob: ...
+
+    def execute(self, job: WorkflowJob, *, token: str | None = None, progress: ProgressCallback | None = None) -> bool: ...
+
+    def status(self, job: WorkflowJob) -> WorkflowJob: ...
+
+    def result(self, job: WorkflowJob, *, progress: ProgressCallback | None = None) -> ParseResult: ...
+
+
+class RemoteMinerUBackend:
+    """远端 MinerU 解析适配器：把「准备 / 执行 / 状态 / 取结果」接在既有远端实现上。
+
+    这是 remote 后端实际调用的边界：``run_or_resume`` 只通过本适配器的方法推进作业，
+    因此“未知/local 后端不建 client/不读 Token”只需在进来前拒绝即可保证。
+    """
+
+    def __init__(self, workflow: "MinerUWorkflow", *, client_factory: Callable[[str], MinerUClient]) -> None:
+        self.workflow = workflow
+        self.client_factory = client_factory
+
+    def capabilities(self) -> ParseBackendCapabilities:
+        return resolve_job_backend(REMOTE_BACKEND_ID)
+
+    def prepare(self, job: WorkflowJob, *, progress: ProgressCallback | None = None) -> WorkflowJob:
+        # backend_config 是创建时冻结的后端参数快照：执行前校验关键参数，避免静默漂移。
+        config = job.backend_config or {}
+        for key in ("is_ocr", "enable_table", "enable_formula"):
+            if key in config and bool(config[key]) != bool(getattr(job, key)):
+                raise WorkflowError(f"后端参数快照与任务字段不一致：{key}={config[key]!r} != {getattr(job, key)!r}")
+        if config.get("language_pack") and job.language and str(config["language_pack"]) != job.language:
+            raise WorkflowError(f"后端语言包快照不一致：{config['language_pack']!r} != {job.language!r}")
+        # HTML 会把模型规范为 MinerU-HTML，不做 model_version 严格比对。
+        if job.model_version != "MinerU-HTML" and config.get("model_version") and str(config["model_version"]) != job.model_version:
+            raise WorkflowError(f"后端模型快照不一致：{config['model_version']!r} != {job.model_version!r}")
+        if "page_ranges" in config and str(config["page_ranges"]) != (job.page_ranges or ""):
+            raise WorkflowError(f"后端页码范围快照不一致：{config['page_ranges']!r} != {job.page_ranges!r}")
+        self.workflow._prepare(job, progress)
+        return job
+
+    def execute(self, job: WorkflowJob, *, token: str | None = None, progress: ProgressCallback | None = None) -> bool:
+        # Token 在“确认后端可用”之后才读取/传入 client；本地/未知后端不会走到这里。
+        client = self.client_factory((token if token is not None else get_mineru_token()).strip())
+        try:
+            if not self.workflow._upload(job, client, progress):
+                return False
+            if not self.workflow._poll(job, client, progress):
+                return False
+            if not self.workflow._download(job, client, progress):
+                return False
+            return True
+        finally:
+            client.close()
+
+    def status(self, job: WorkflowJob) -> WorkflowJob:
+        return job
+
+    def result(self, job: WorkflowJob, *, progress: ProgressCallback | None = None) -> ParseResult:
+        slices = sorted(job.slices, key=lambda item: item.start_page)
+        raw_directories = tuple(item.result_directory for item in slices if item.result_directory)
+        source_pages = {
+            item.result_directory: tuple(item.source_pages)
+            for item in slices if item.result_directory and item.source_pages
+        }
+        return ParseResult(
+            backend_id=job.backend_id, job_id=job.job_id, state=job.state.value,
+            raw_directories=raw_directories, source_pages=source_pages,
+        )
+
+
 class MinerUWorkflow:
     """Create, run, resume, retry, and clean persistent MinerU jobs."""
 
@@ -971,16 +1184,29 @@ class MinerUWorkflow:
         *,
         client_factory: Callable[[str], MinerUClient] = MinerUClient,
         merge_callback: MergeCallback | None = None,
+        backend_factory: Callable[["MinerUWorkflow", WorkflowJob], Any] | None = None,
         sleep: SleepCallback = time.sleep,
         poll_interval: float = 5.0,
     ) -> None:
         self.jobs_root = Path(jobs_root).expanduser().resolve()
         self.jobs_root.mkdir(parents=True, exist_ok=True)
         self.client_factory = client_factory
-        self.merge_callback = merge_callback or self._default_merge
+        self.merge_callback = merge_callback
+        # 解析后端工厂：默认按 backend_id 选择 remote 适配器；测试可注入 spy 验证调用边界。
+        self.backend_factory = backend_factory
         self.sleep = sleep
         self.poll_interval = poll_interval
         self._stop_event = threading.Event()
+
+    def _backend_for(self, job: WorkflowJob) -> "RemoteMinerUBackend":
+        """按任务持久化的 backend_id 选择适配器；不可用/未知后端在这里就被拒绝。"""
+        try:
+            capabilities = resolve_job_backend(job.backend_id)
+        except ParseBackendUnavailable as error:
+            raise WorkflowError(str(error)) from error
+        if capabilities.backend_id != REMOTE_BACKEND_ID:
+            raise WorkflowError(capabilities.unavailable_reason or f"解析后端不可用：{capabilities.backend_id}")
+        return RemoteMinerUBackend(self, client_factory=self.client_factory)
 
     def _notify(self, job: WorkflowJob, progress: ProgressCallback | None, message: str) -> None:
         job.updated_at = _utcnow()
@@ -1030,7 +1256,19 @@ class MinerUWorkflow:
         max_slice_bytes: int = DEFAULT_MAX_SLICE_BYTES,
         keep_original_pdf: bool = True,
         project_layout: ProjectLayout | None = None,
+        requested_pages: list[int] | None = None,
+        requested_ranges: str = "",
+        source_page_count: int = 0,
+        append: bool = False,
+        backend_id: str = REMOTE_BACKEND_ID,
+        backend_config: dict[str, Any] | None = None,
     ) -> WorkflowJob:
+        # 解析方式在创建任务时固定并落盘；不可用的后端（如预留的本地 MinerU）
+        # 在入口就明确拒绝，而不是等运行到一半才失败。
+        try:
+            ensure_available(backend_id)
+        except Exception as error:
+            raise WorkflowError(str(error)) from error
         try:
             source = validate_source(source_pdf)
         except ValueError as error:
@@ -1080,6 +1318,12 @@ class MinerUWorkflow:
             page_limit=page_limit,
             max_slice_bytes=max_slice_bytes,
             keep_original_pdf=keep_original_pdf,
+            requested_pages=sorted({int(page) for page in (requested_pages or [])}),
+            requested_ranges=requested_ranges.strip(),
+            source_page_count=max(0, int(source_page_count or 0)),
+            append=bool(append),
+            backend_id=resolve_job_backend(backend_id).backend_id,
+            backend_config=dict(backend_config or {}),
         )
         self.save_job(job)
         return job
@@ -1151,6 +1395,9 @@ class MinerUWorkflow:
         source = self._verify_source(job)
         if source.suffix.casefold() != ".pdf":
             job.page_count = 0
+            job.source_page_count = 0
+            job.requested_pages = []
+            job.requested_ranges = ""
             job.slices = [SliceJob(
                 index=1, start_page=0, end_page=0,
                 data_id=f"{job.job_id}-001", upload_name=source.name,
@@ -1159,18 +1406,45 @@ class MinerUWorkflow:
             self._notify(job, progress, "原始文件将由 MinerU 转换并解析")
             return
         page_count = _open_pdf_page_count(source)
-        if job.page_ranges:
+        job.source_page_count = page_count
+        selected: list[int] = []
+        if job.requested_pages:
+            selected = sorted({int(page) for page in job.requested_pages})
+        elif job.page_ranges.strip():
             selected = parse_page_ranges(job.page_ranges, page_count)
-            if len(selected) > MAX_PAGES_PER_FILE:
-                raise WorkflowError(f"所选页码共 {len(selected)} 页，MinerU 单文件最多处理 {MAX_PAGES_PER_FILE} 页。")
+        if selected:
+            for page in selected:
+                if page < 1 or page > page_count:
+                    raise WorkflowError(f"页码 {page} 超出文档范围 1–{page_count}。")
+            split_dir = Path(job.workspace) / "split"
+            pieces = split_selected_pages(
+                source, split_dir, selected,
+                page_limit=job.page_limit, max_bytes=job.max_slice_bytes,
+            )
+            job.requested_pages = selected
+            job.requested_ranges = job.requested_ranges or format_page_ranges(selected)
+            # 本地压缩子集已经只含所选页，不再向 MinerU 传 page_ranges，避免重叠/语义歧义。
+            job.page_ranges = ""
             job.page_count = len(selected)
-            job.slices = [SliceJob(
-                index=1, start_page=1, end_page=len(selected),
-                data_id=f"{job.job_id}-001", upload_name=source.name,
-                local_pdf=str(source),
-            )]
-            self._notify(job, progress, f"将按页码范围 {job.page_ranges} 解析 {len(selected)} 页")
+            job.slices = [
+                SliceJob(
+                    index=index,
+                    start_page=group[0],
+                    end_page=group[-1],
+                    data_id=f"{job.job_id}-{index:03d}",
+                    upload_name=path.name,
+                    local_pdf=str(path),
+                    source_pages=list(group),
+                )
+                for index, (group, path) in enumerate(pieces, 1)
+            ]
+            self._notify(
+                job, progress,
+                f"将按 {format_page_ranges(selected)} 解析 {len(selected)} 页，已生成 {len(job.slices)} 个切片",
+            )
             return
+        job.requested_pages = []
+        job.requested_ranges = ""
         split_dir = Path(job.workspace) / "split"
         pieces = split_pdf(
             source, split_dir, page_limit=job.page_limit,
@@ -1185,6 +1459,7 @@ class MinerUWorkflow:
                 data_id=f"{job.job_id}-{index:03d}",
                 upload_name=path.name,
                 local_pdf=str(path),
+                source_pages=list(range(start, end + 1)),
             )
             for index, (start, end, path) in enumerate(pieces, 1)
         ]
@@ -1346,31 +1621,29 @@ class MinerUWorkflow:
                 raise
         return True
 
-    def _default_merge(self, job: WorkflowJob, inputs: list[str]) -> Any:
-        try:
-            import mineru_epub
-        except ImportError as error:
-            raise WorkflowError("无法加载 Litera MinerU 合并核心。") from error
-        return mineru_epub.convert_mineru(
-            inputs,
-            job.output_epub,
-            title=job.project_name or friendly_project_name(job.source_pdf),
-            language=epub_language_for_mineru(job.language),
-            merged_directory=job.merged_output or None,
-            auto_order=False,
-            dedupe_boundaries=False,
-            merge_origin_pdf=False,
-            source_pdf=job.source_pdf if job.keep_original_pdf and Path(job.source_pdf).suffix.casefold() == ".pdf" else None,
-        )
+    def _seal_and_merge(
+        self, job: WorkflowJob, parse_result: ParseResult, progress: ProgressCallback | None,
+    ) -> None:
+        """协调层：校验后端返回的 ParseResult 后交给共享 merge 回调（seal raw + normalize + merge）。
 
-    def _merge(self, job: WorkflowJob, progress: ProgressCallback | None) -> None:
-        missing = [item.index for item in job.slices if item.state != SliceState.DOWNLOADED or not item.result_directory]
+        不强制远端切片状态：本地-like 后端没有 SliceJob 也能产出 raw 目录 + source_pages。
+        """
+        directories = [str(item) for item in parse_result.raw_directories if item]
+        if not directories:
+            raise WorkflowError("解析后端未返回任何 raw 结果目录。")
+        missing = [item for item in directories if not Path(item).is_dir()]
         if missing:
-            raise WorkflowError(f"切片结果尚未完整下载：{missing}")
+            raise WorkflowError(f"解析结果目录不存在：{missing}")
+        if self.merge_callback is None:
+            raise WorkflowError("MinerU 工作流未提供合并回调，无法产出结果。")
         job.state = JobState.MERGING
         self._notify(job, progress, "正在按原始页码顺序合并并校验结果")
-        inputs = [item.result_directory for item in sorted(job.slices, key=lambda item: item.start_page)]
-        self.merge_callback(job, inputs)
+        self.merge_callback(job, parse_result)
+
+    def _merge(self, job: WorkflowJob, progress: ProgressCallback | None) -> None:
+        """兼容入口：按当前切片推导 ParseResult 后交给协调层。"""
+        backend = self._backend_for(job)
+        self._seal_and_merge(job, backend.result(job), progress)
 
     def _snapshot(self, job: WorkflowJob) -> None:
         target = Path(job.raw_output) / "job.json"
@@ -1399,19 +1672,27 @@ class MinerUWorkflow:
             return job
         if any(item.state == SliceState.FAILED for item in job.slices):
             raise WorkflowError("任务含失败切片，请先使用“重试失败”。")
-        client: MinerUClient | None = None
+        # 先按持久化的 backend_id 校验可用性并选适配器；local/未知任务在这里就被拒绝，
+        # 不会创建远端 client，也不会读取 MinerU Token。
         try:
-            client = self.client_factory((token if token is not None else get_mineru_token()).strip())
-            self._prepare(job, progress)
-            if not self._upload(job, client, progress):
+            ensure_available(job.backend_id)
+        except ParseBackendUnavailable as error:
+            raise WorkflowError(str(error)) from error
+        backend = self.backend_factory(self, job) if self.backend_factory else self._backend_for(job)
+        try:
+            backend.prepare(job, progress=progress)
+            if not backend.execute(job, token=token, progress=progress):
                 return job
-            if not self._poll(job, client, progress):
-                return job
-            if not self._download(job, client, progress):
-                return job
-            self._merge(job, progress)
+            backend.status(job)
+            parse_result = backend.result(job, progress=progress)
+            # 共享协调层：通过后端返回的可封存结果统一 seal/normalize/merge。
+            if not isinstance(parse_result, ParseResult):
+                raise WorkflowError("解析后端未返回统一 ParseResult。")
+            self._seal_and_merge(job, parse_result, progress)
             job.state = JobState.COMPLETED
             job.error = ""
+            if not job.finished_at:
+                job.finished_at = _utcnow()
             self._notify(job, progress, f"完成：{job.output_epub}")
             self._cleanup_temporaries(job)
             self.save_job(job)
@@ -1423,12 +1704,14 @@ class MinerUWorkflow:
                 job.error = str(error)
                 self._notify(job, progress, f"失败：{error}")
             raise
-        finally:
-            if client:
-                client.close()
 
     def retry_failed(self, job_or_path: WorkflowJob | str | Path) -> WorkflowJob:
         job = job_or_path if isinstance(job_or_path, WorkflowJob) else self.load_job(job_or_path)
+        # 重试同样是执行入口：不可用后端先拒，不建 client、不读 Token。
+        try:
+            ensure_available(job.backend_id)
+        except ParseBackendUnavailable as error:
+            raise WorkflowError(str(error)) from error
         failed = [item for item in job.slices if item.state == SliceState.FAILED]
         if not failed:
             if job.state == JobState.FAILED:
@@ -1452,7 +1735,10 @@ class MinerUWorkflow:
                 local = Path(item.local_pdf)
                 if not local.is_file():
                     source = self._verify_source(job)
-                    _write_pdf_range(source, local, item.start_page, item.end_page)
+                    if item.source_pages:
+                        _write_pdf_pages(source, local, item.source_pages)
+                    else:
+                        _write_pdf_range(source, local, item.start_page, item.end_page)
                     if local.stat().st_size > job.max_slice_bytes:
                         local.unlink(missing_ok=True)
                         raise WorkflowError(
@@ -1469,6 +1755,18 @@ class MinerUWorkflow:
 
     def stop_waiting(self) -> None:
         self._stop_event.set()
+
+    def mark_interrupted(self, job_or_path: WorkflowJob | str | Path) -> WorkflowJob:
+        """把上次进程退出时仍在执行的任务落为可恢复的 interrupted。
+
+        远端任务可能仍在处理；保留切片进度，启动/保存 Token 后由调度器按队列恢复。
+        """
+        job = job_or_path if isinstance(job_or_path, WorkflowJob) else self.load_job(job_or_path)
+        if job.state in ACTIVE_JOB_STATES:
+            job.state = JobState.INTERRUPTED
+            job.error = "应用上次退出时该解析任务被中断；可恢复继续（远端任务可能仍在处理）。"
+            self.save_job(job)
+        return job
 
     def cleanup(self, job_or_path: WorkflowJob | str | Path, *, remove_results: bool = False) -> WorkflowJob:
         job = job_or_path if isinstance(job_or_path, WorkflowJob) else self.load_job(job_or_path)

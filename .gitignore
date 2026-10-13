@@ -47,6 +47,7 @@ src-tauri/gen/
 runtime/
 .runtime/
 /library/
+_archive/
 *.log
 *.sqlite
 *.sqlite-shm
@@ -58,3 +59,11 @@ runtime/
 tmp/
 *.tmp
 *.bak
+
+# Build tooling cache
+.pnpm-store/
+launcher/.install.*/
+
+# Bundled local Node runtime and end-to-end test library
+.tools/
+.e2e/

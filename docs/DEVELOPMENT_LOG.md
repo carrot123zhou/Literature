@@ -2,6 +2,1226 @@
 
 > 本日志记录可验证事实、架构决策和仍需外部条件完成的验收。更新代码时应同步更新本文，避免把“已编码”“已测试”和“已用真实服务验证”混为一谈。
 
+## 2026-10-14（第十七轮）：客户端安装与本地 Git 提交（用户授权）
+
+用户明确授权“安装新版 app，提交 Git”。本轮仅安装已验收包并做本地提交，不新增功能、不重建、不 push。
+
+- 源包：`src-tauri/target/release/bundle/macos/Literature.app`，sidecar revision `613a128fc4c0146af0e2`、sha256 `6915c3a4112c42354ca5469ba837b745d03beeb97edccae11e3e6b342a3c90f0`、size 42873728。
+- 安装前：`launcher/Literature.app` 及内置 sidecar 未运行；已停止本轮遗留的 `/tmp/lit-sidecar` 开发 sidecar；旧客户端备份到 `launcher/.rollback-Literature-0e308e43.app`（不提交）。
+- 用仓库既有 `scripts/setup_macos_launcher.sh --app-only` 安装到 `launcher/Literature.app`。安装后：内置 sidecar sha256/size 与已验收包/`manifest.json` 一致，且与源包 sidecar 字节相同；`codesign --verify --deep --strict` 通过。**未启动客户端**（启动可能自动读取真实 MinerU Token）。
+- 本地提交包含本轮及作为该版本依赖的此前未提交实现（导出/TBL 移除、本地 MinerU 边界、任务来源/冻结契约、可靠恢复、请求协调/预算、revision/窗口化、结构确认/缓存、定向译审原子采纳）及对应测试/打包脚本/文档/必要源码资源。
+- 未提交（有意排除，文件保留）：`opendesign-projects/`、`docs/prototypes/`、`docs/verification/` 与大型截图、`launcher/`（含备份 app）、构建产物与缓存、真实资源库/运行数据；已扫描提交范围无真实 Token/API key。仅本地 commit，不改身份/远端/分支，不 amend。
+- 仍未验收（未变）：真实 MinerU、真实付费 provider、原生窗口逐项点击、公证与干净机器安装；结构裁片/目录磁盘缓存未实现。
+
+## 2026-10-14：Lead 独立收口验收（Orca Worker developer 实施结果）
+
+- 在临时 library/runtime 下独立执行 Python 全量测试：**336 passed / 0 failed**；禁用真实 Keychain 读取与非本地 httpx 外网请求。TypeScript `--noEmit` 通过。
+- 独立执行生产前端 + 临时项目库 + fake MinerU 的浏览器全流程：**103/103 PASS**，包括长书窗口化、编辑草稿往返、保存失败保留、候选展示/采纳与项目切换迟到响应。无脚本错误；唯一 `net::ERR_FAILED` 来自刻意 abort 的保存失败用例。审校响应使用 stub，采纳使用真实本地 API 的版本校验。
+- 独立重跑人工编辑竞态：人工写入在采纳临界区内被阻挡，随后最新人工内容保留，已采纳候选留在平面修订历史。另重跑源文写入竞态：源文写入被阻挡至采纳结束；源文随后变化时旧候选被拒绝，译文不被覆盖。
+- 独立核对自包含客户端：源码与 manifest revision 均为 `613a128fc4c0146af0e2`；包内 sidecar SHA-256 为 `6915c3a4112c42354ca5469ba837b745d03beeb97edccae11e3e6b342a3c90f0`，大小 **42873728**，均与 manifest 一致；`codesign --verify --deep --strict` 通过。
+- 本轮验收限于已实现的部分重构与优化。译文 revision 是 full/no-change 条件请求，条目级差量与结构裁片/目录磁盘缓存未实现。真实 MinerU/付费模型、原生交互、公证与干净机器安装未验收，未测量真实文献的速度/token/费用改善。未提交 Git、未安装/启动客户端、未替换 launcher、未修改真实文献库。
+
+## 2026-10-14（第十六轮）：采纳译审候选的原子性与服务端校验（Orca Worker 实施，已编码/自动测试/tsc/生产构建/隔离浏览器，已构建未安装）
+
+### A. 采纳原子化
+
+- `adopt_review` 把“源 hash 校验 + 译文 `updated_at` 基线校验 + 按源文所需字段的完整性校验 + `edit` 读改写落盘”放在**同一临界区**：锁序统一为 `document_lock → translation_lock`，`edit` 在临界区内重入翻译锁（RLock），不再验证后释放锁再写。保留 `edit` 的锁定与平面修订历史。
+- 回归 `test_adopt_review_is_atomic_against_concurrent_manual_edit`：在采纳调用 `edit` 前启动另一线程人工编辑；**先临时去掉临界区验证旧实现失败（final=旧候选覆盖内容）**，修复后 final=人工最新译文且旧候选可见于修订历史。
+
+### B. 服务端校验与必填
+
+- `source_hash`/`base_revision` 必填（`ReviewAdoptInput` 与服务层双重校验，缺版本依据 → 拒绝/422）；服务端按源文所需字段校验候选完整性，缺字段拒绝且不改库；`candidate_id` 明确为客户端幂等/去重凭证（候选不落库，不是服务端证据）；重复采纳同内容时幂等返回，否则 409 并保留最新人工内容。
+- 回归：`test_adopt_review_rejects_missing_basis_and_incomplete_candidate`（缺依据/表格缺 cell 均拒，库不变）。
+
+### C. 浏览器 stub 候选提供有效版本依据
+
+- `parse_ui_flow_check.cjs` 在审校候选验收前从真实 API 读取 `big-p0` 的 `source_hash`/`updated_at`，stub 候选带上它们，使采纳走服务端真实校验。文档明确候选身份是客户端凭证。
+
+### 验证 / 产物
+
+- 全量 `pytest` **336 passed / 0 failed**；`tsc --noEmit` 通过；Vite 生产构建；隔离真实浏览器 **103/103 PASS、0 脚本错误**。
+- 自包含 Tauri：sidecar revision `613a128fc4c0146af0e2`（与源码 `RUNTIME_REVISION` 一致）/ sha256 `6915c3a4…` / size 42873728；`Literature.app` 54.50 MiB；bundle 内 sidecar 哈希与 manifest 一致；adhoc 签名 `codesign --verify --deep --strict` 通过。**未安装/未启动客户端**。未调真实服务、未读真实 Keychain、未改真实库、未提交 Git。
+- 外部未验收：真实 MinerU、真实付费 provider、原生窗口点击、公证；结构裁片/目录磁盘缓存未实现。
+
+## 2026-10-13（第十五轮）：草稿父状态化、候选身份/基线校验、review 生命周期与真实浏览器验收（Orca Worker 实施，已编码/自动测试/tsc/生产构建/隔离浏览器，已构建未安装）
+
+### 1. 窗口化编辑草稿不丢
+
+- `ReadingBlockCard` 的 `editing`/`draft` 改为父级控制：`ReadingWorkspace` 按 `block_id` 持有 `editingIds`/`drafts`，range↔overlay 切换重挂载不再丢草稿；可多块同时编辑；保存失败保持编辑与草稿（成功才 `onEditingChange(false)` 清草稿）；焦点只在进入编辑那一刻拉取，滚动重挂载不拉回。`useVirtualWindow` 每次 render 与真实 DOM 同步 `scrollTop`/`clientHeight`（重入/外部滚动不再停在旧值）。
+- 浏览器验收（生产 `frontend/dist` + 隔离库 + 1000+ blocks）：`窗口化往返编辑草稿不丢`、`保存失败不丢草稿`（route.abort 拦截 PUT）、`结构结果栏 DOM 有界/滚到底渲染尾部块`。
+
+### 2. 候选身份/基线校验
+
+- `review` 返回 `job_id/project_id/locale/block_id/candidate_id/source_hash/base_revision`，并含 `source/current`；完整性按源文所需字段校验（缺字段 `complete=false`，不可采纳）。
+- 新增 `POST /projects/{id}/translations/{block_id}/review/adopt`：在译文写锁内校验源 hash 与译文 `updated_at` 基线，不符 409 并保留最新人工内容；采纳走既有 `edit`（锁定 + 修订历史）。前端候选按 `project:locale` 隔离、切项目/语言清候选并用代次丢弃迟到响应，面板展示原文/现译/建议。
+- 回归：`test_review_adopt_validates_source_and_translation_baseline`（源变/译文被人工改均拒绝、正确基线采纳且保留修订历史）。浏览器：`审校候选展示原文/现译/建议`、`采纳后候选面板关闭`、`切项目后迟到审校响应被丢弃`。
+
+### 3. review/instant 生命周期
+
+- `review`/`instant` 均有真实终态：请求前 `running`，成功 `completed`，预算不足 `budget_paused`，异常 `failed`；返回 `job_id`；API 在 `finally` 关闭 provider；候选拒绝/取消不等于请求未结束。预算不足尚未发送不记未知付费。
+- 回归：`test_review_budget_paused_sets_terminal_status`、`test_targeted_review_returns_candidate_without_auto_save`（断言 review 作业 completed）。
+
+### 4. 文档范围诚实
+
+- 本轮新增的真实浏览器交互为草稿往返/保存失败/审校候选与拒绝采纳/切项目迟到/结构窗口化；旧 95 用例不再被用来声称这些已验收。外部仍未验收：真实 MinerU、真实付费 provider、原生窗口点击、公证；结构裁片/目录**磁盘**缓存未实现。
+
+### 验证 / 产物
+
+- 全量 `pytest` **334 passed / 0 failed**；`tsc --noEmit` 通过；Vite 生产构建。隔离真实浏览器 **103/103 PASS、0 脚本错误**（故意 abort 的 net::ERR_FAILED 已排除并标注）。
+- 自包含 Tauri：sidecar revision `dd731bb60a4216298d4f`（与源码 `RUNTIME_REVISION` 一致）/ sha256 `8e2e2b7f…` / size 42869472；`Literature.app` 54.42 MiB；bundle 内 sidecar 哈希与 manifest 一致；adhoc 签名 `codesign --verify --deep --strict` 通过。**未安装/未启动客户端**。未调真实服务、未读真实 Keychain、未改真实库、未提交 Git。
+
+## 2026-10-13（第十四轮）：attempt 预算持有到对账、结构逐响应、revision 源指纹、定向译审与窗口化（Orca Worker 实施，已编码/自动测试/tsc/生产构建/隔离浏览器，已构建未安装）
+
+### 1–2. attempt 预算与结构逐响应（真实 provider 路径）
+
+- provider 每次 HTTP attempt 的预算预留在 `final=True` 时**不在 end 释放**，写入线程本地句柄；调用方写 usage 后 `_complete` 原子 `reconcile`（成功/ProviderError/超时/退避 attempt 一致且幂等），消除 release-before-commit 重复花钱窗口。无 hooks 的 provider 仍走外层预留 + `coordinator.limit` 服务额度。
+- 结构响应在 `record(response, scope)` 后逐请求 `reconcile`（不再作业结束用项目总 usage delta）；结构作业不再提交整项目 delta。
+- 回归：`test_attempt_reservation_prevents_overspend_under_concurrency`（真实 provider + `httpx.MockTransport`，budget=.0003 两路并发只花一笔、spent=.000202）、`test_per_attempt_budget_blocks_before_http`。
+
+### 3. revision 覆盖源文版本
+
+- 译文 payload/`?since=` 的 revision = `locale|layer.updated_at|document.json mtime+size|REVISION_PROTOCOL`；源文/结构/译文/术语变更均使其失效。空译文层用稳定 `updated_at=""` 避免每次调用变化。前端 revision 按 `project:locale` 隔离，过期响应不回写。
+- 回归：`test_translation_revision_invalidates_on_source_change`（改源后 `since` 不再 unchanged）。
+
+### 4. 待对账费用
+
+- `record_pending_cost` 带 `input_tokens/output_tokens/estimated_cost/request_id` 等可对账身份；超时/无响应/写账失败写 `usage_pending.jsonl`，有响应但缺 usage/单价只计 `unknown_cost_records`（NULL 行），不重复写 pending；前端徽标显示“未知/待对账”合计。
+
+### 5. 上下文边界
+
+- `_chunk_context` 不再跨章节/语言取前后文（遇标题或语言变化即停止）；串行 `previous_translation` 在新章/换语言时清空；run/estimate 共用。
+- 回归：`test_chunks_break_on_chapter_and_language_boundaries`。
+
+### A. 阅读/结构列表窗口化
+
+- 新增 `frontend/src/workbench/useVirtualWindow.ts`（可变高度、测量缓存、固定块悬浮不卸载、按估算偏移跳转），接入阅读页与结构结果栏；随目录跳转调用 `scrollToBlock`。
+- 隔离浏览器新增 1000+ blocks 大书验收（`parse_ui_harness` 种子 Big Book）：初始 DOM 有界、滚到底仍有限、尾部块可渲染；**95/95 PASS、0 脚本错误**。
+
+### B. 定向译审（候选 → 采纳/拒绝）
+
+- `TranslationService.review`：对照原文+现译产出修订候选（走同一公共预算层），不自动保存；`POST /projects/{id}/translations/{block_id}/review`；前端在阅读页展示候选，“采纳并保存”走既有编辑接口、“拒绝”不改译文。锁定人工内容不自动覆盖。
+- 回归：`test_targeted_review_returns_candidate_without_auto_save`。
+
+### 验证 / 产物
+
+- 全量 `pytest` **332 passed / 0 failed**；`tsc --noEmit` 通过；Vite 生产构建；隔离浏览器 **95/95 PASS、0 脚本错误**。
+- 自包含 Tauri：sidecar revision `9e9aafbafc49e7c55d77` / sha256 `1e61ed4f…` / size 42870144；`Literature.app` 54.50 MiB；bundle 内 sidecar 哈希与 manifest 一致；adhoc 签名 `codesign --verify --deep --strict` 通过。**未安装/未启动客户端**。未调真实 MinerU/provider、未读真实 Keychain、未改真实库、未提交 Git。
+- 仍未外部验收：真实服务端到端、原生窗口点击、公证；结构性裁片/目录磁盘缓存未实现（请求缓存已实现）。
+
+## 2026-10-13（第十三轮）：中间证据同源/同阶段、崩溃窗口、预估失效与公共预算收口（Orca Worker 实施，已编码/自动测试/tsc/build/隔离浏览器，未安装/未真实服务验收）
+
+### 中间子段证据（Lead 复现的源变混用）
+
+- `partial_segments` 改为每块记录 `{segments, source_hash, refine}`；`_run_chunk` 只种入“本块当前 source_hash 相同且阶段一致”的子段。源文变或阶段不符直接丢弃，重发全部子段，不把旧源结果拼成当前完整。
+- 回归：`test_partial_segments_are_discarded_when_source_changes`（前 15 字等长改为 CHANGED SOURCE：旧中间段全部丢弃，新源实际重发并出现在译文）。
+
+### 崩溃窗口：每个有效子响应立即落盘
+
+- `_run_chunk` 每个协议校验通过的批次（未被截断/缺段）立即调 `_record_validated_segments` 原子写 checkpoint（带 source_hash/refine，加锁合并）；`_persist_partial_segments` 只在预算暂停时补录；完成块会清除对应中间证据。
+- 回归：`test_crash_mid_stage_persists_paid_subsegments`（第 2 请求 KeyboardInterrupt 绕过收尾：第 1 请求已付费子段已在 checkpoint，恢复不重发）。
+
+### 预估 UI 失效与摘要 scope
+
+- `onInvalidateEstimate` 改为稳定 `useCallback`（空依赖），选项变化或挂载时才失效，不再每次 render 清空估算。`list_job_summaries` 保留小 `scope` 投影。
+
+### 未知/待对账费用持久化
+
+- `usage_summary` 新增 `pending_cost_records`（`usage_pending.jsonl` 行数），超时/无 usage/写账失败均写待对账证据；重启仍统计。
+- 协调层 `_spent_for` 账本不可读时返回 None，`reserve` 在 budget>0 时保守拒绝（不 seed 0 继续花）。
+- 回归：`test_pending_cost_persists_unknown_across_restart`、`test_budget_seed_failure_blocks_spending`。
+
+### 每 attempt 预算 + 结构/即时共用额度
+
+- provider 每次 HTTP attempt 先调 `attempt_hooks`（传入 prompt 字符数）；协调层 `attempt_hooks_for(..., project_id, budget, cost_of)` 在每次 attempt 原子 `reserve`，成功后由调用方 `commit` 实际费用（未知计 unknown）。翻译/即时/结构均接入（结构作业完成后把实际花费 delta `commit` 入协调层）。
+- 回归：`test_per_attempt_budget_blocks_before_http`（真实 provider + `httpx.MockTransport`：预算不足时 0 HTTP）、`test_429_retry_calls_attempt_hooks_and_records_cooldown`。
+
+### R08 章节/语言边界
+
+- `_chunks` 在标题（新章）或章语言覆盖变化处断开；`run`/`_process_blocks`/`estimate_translation` 用同一规则。回归：`test_chunks_break_on_chapter_and_language_boundaries`。
+
+### R11 revision 增量 / R12 结构请求缓存
+
+- 译文层下发 `revision`（`updated_at`）且 `GET /translations/{locale}?since=` 未变则返回 `unchanged` 小载荷；前端轮询带 revision。
+- 结构进程内请求缓存（key=`context_key:request_key`，context_key 含模型配置+文档版本；TTL 1h、上限 400），失败/不合法响应不入缓存；只在能确定上下文时启用。回归 `tests/test_structure_cache.py`。
+- backend_config 校验扩展到 model_version/language_pack/page_ranges（回归 `test_backend_config_model_language_page_ranges_validated`）。
+
+### 验证
+
+- 全量 `pytest` **329 passed / 0 failed**；`tsc --noEmit` 通过；Vite 生产构建与隔离浏览器 **92/92 PASS、0 脚本错误**。本轮**未重建 sidecar/Tauri**（按 Lead 要求等全部完成后再一次构建）；当前已构建产物 revision `9720d7cf2648f8008a46` 早于本轮改动。
+- 仍待：R11 结构/阅读 block 窗口化；R12 定向译审的 UI 采纳链与裁片/目录缓存。
+
+## 2026-10-13（第十二轮）：预算一致性、已付费子段、未知费用与解析结果消费（Orca Worker 实施，已编码/自动测试/tsc/build/隔离浏览器，未安装/未真实服务验收）
+
+### A. 预算事务单一一致性边界
+
+- `RequestCoordinator` 自己维护 `spent`（进程内唯一来源，首次从持久账本 seed），`reserve` 在锁内一次完成“取最新已花 + 在途 + 本次估算”判定；`reconcile` 在锁内释放预留并累计已花。不再由各 `TranslationService` 缓存自己的已花金额（那是 Lead 复现的 stale 标量竞态）。
+- `TranslationService` 只传协调器（不再传 spent 标量）；默认协调器绑定 `store.usage_summary` 作 seed。回归：`test_shared_coordinator_budget_is_atomic_under_stale_read`（顺序 + 8 线程并发不超卖）。
+
+### B. 已付费子段作为中间证据
+
+- `_ChunkOutcome` 新增 `budget_paused`；`_run_chunk` 捕获 `BudgetExhausted` 后返回已解析子段（不再丢弃）；`_process_blocks` 将未完成块的已付费子段写入 checkpoint（`partial_segments` + `partial_meta{run_token,refine,recorded_at}`），完整块照常提交。
+- 恢复时按 `run_token` 读回中间子段，只发缺失子段；不把半句写成 translated。回归：`test_budget_pause_keeps_paid_subsegments_and_resume_does_not_resend`（已付费段不重发、最终拼接无丢段）。
+
+### C. 公共请求契约
+
+- `OpenAICompatibleProvider` 新增 `attempt_hooks`，每次真实 HTTP attempt 前后进入公共层；`RequestCoordinator.attempt_hooks_for` 挂上服务级并发/退避（429/5xx 记冷却）。翻译在 `run()` 一次挂载（避免每调用赋值竞态），`_complete` 检测到 hooks 时不再重复持有外层额度。即时翻译经同一 `_complete`（预算+并发）。结构作业也挂 attempt hooks（服务级并发/退避）。
+- 回归：`tests/test_request_coordinator.py` 用 `httpx.MockTransport` 验证 429→重试→成功且冷却被记录、服务额度满时阻塞。**未做**：结构作业的预算预留（仍由目标计费路径为主）、内部重试的逐 attempt 预算预留（预算按逻辑请求预留）。
+
+### D. 未知费用持久化与可见
+
+- `usage_summary` 新增 `unknown_cost_records`（`estimated_cost IS NULL` 计数，持久）；`/status`/项目详情下发；前端用量徽标显示“N 个请求费用未知”。写账失败时保留待对账证据（计 unknown）并按已知费用对账，不 release 后当零。
+
+### E. 预估失效与摘要 scope
+
+- `ScopeDialog` 任一选项（scope/target/glossary/instructions/refine/force/polish/workers）变化即调 `onInvalidateEstimate`（递增代次 + 清空），无需再点预估；迟到响应被代次校验丢弃。
+- `list_job_summaries` 补回小 `scope_json` 投影并解码 `scope`，阅读面板不再把选章任务显示为全书。
+
+### F. 解析结果真实消费
+
+- `MergeCallback` 改为 `(WorkflowJob, ParseResult)`；`ocr._finish_import` 消费 `ParseResult`（raw 目录 + source_pages，旧任务回退切片推导）；`_seal_and_merge` 不再强制 `SliceState.DOWNLOADED`，校验目录存在即可。
+- 回归：`test_fake_local_parse_result_reaches_canonical_with_noncontiguous_pages`（fake local-like 无 SliceJob、无 Token，raw 规范文件 + 非连续源页 3/5 进入真实 seal/normalize/merge，0-based page_index=0/2/4）。`prepare` 校验 `backend_config` 布尔开关；**未做**：模型/语言/页范围的更严校验。
+
+### 验证
+
+- 全量 `pytest` **319 passed / 0 failed**；`tsc --noEmit` 通过；Vite 生产构建与隔离真实浏览器 **92/92 PASS、0 脚本错误**。自包含 Tauri 已重建（未安装）：sidecar manifest revision `9720d7cf2648f8008a46` / sha256 `b3be3324…` / size 42858208；`Literature.app` 54.49 MiB；bundle 内 sidecar 哈希与 manifest 一致，adhoc 签名验证通过。**未安装/未启动客户端、未调真实 MinerU/provider、未读真实 Keychain、未改真实库、未提交 Git。**
+- 仍待继续：结构预算预留与更严 backend_config 校验、R11 译文 ETag/block 窗口化、R12 结构目录/裁片缓存与带原文定向译审、R08 章节/语言边界。
+
+## 2026-10-13（第十一轮）：请求协调/预算、解析契约、轻量状态与结构确认（Orca Worker 实施，已编码/自动测试/tsc/build/隔离浏览器，未安装/未真实服务验收）
+
+### R09 请求公共层与预算
+
+- 新增 `literature/request_coordinator.py`：服务级有限并发（`service_id` 信号量）、429/5xx 退避冷却、项目预算在途预留 `reserve/release`、未知费用计数。
+- `TranslationService` 接入：每次真实 HTTP （含子批拆分/重试）在 `_complete` 先原子 `reserve(spent+reserved+本次估算)`，不足即 `BudgetExhausted`（作业进 `budget_paused`，不标记为漏译失败、不清旧译）；响应拿到后**立即写 usage 再释放预留**（避免 release 后等主线程晚写 usage 的重复花钱窗口）；无 usage/无单价/超时计入 unknown 而非 0。`JobManager` 持有共享 coordinator 并注入翻译作业。
+- 回归：`test_budget_guard_rejects_before_any_request`（余额不足 → 0 请求 + budget_paused）、`test_unknown_cost_is_marked_not_zero`、`test_inflight_budget_reservation_stops_before_overspending`。**未做**：结构/即时请求接入共享并发额度（仅翻译路径接入）、服务级限流的真实 429 验证。
+
+### R09 预估契约
+
+- `TranslationEstimateInput`/`estimate_translation` 新增 `force`（已有译文时 force 预估非零），预估复用真实请求组装（含 `_batch_units` 后的实际请求数、前后文/术语/system/润色）并返回 token/费用区间与 `has_pricing`。
+- 前端 `ScopeDialog` 的“预估”改为传递当前弹窗实际选项（target locale/useGlossary/instructions/refine/force/polish），`App.estimateScope` 按选项传参并加请求代次防止迟到响应覆盖；面板展示区间与未知价格状态。
+
+### 解析契约与本地口径（Task 4）
+
+- `parse_backends.py` 新增统一 `ParseResult`（raw 目录 + source_pages）；删除与实际签名不符的旧 `Mapping→Mapping` Protocol。
+- `mineru_workflow.py` 定义与实际一致的 `ParseBackend` 协议（`prepare/execute/status` 操作 `WorkflowJob`，`execute` 返回 bool，`result` 返回 `ParseResult`）；`RemoteMinerUBackend.result` 返回 `ParseResult`，共享协调层 `_seal_and_merge` 统一调用 merge 回调（seal/normalize/merge）。`prepare` 校验 `backend_config` 关键开关；`retry_failed` 与 `run_or_resume` 先 `ensure_available`（local/未知不得建 client/读 Token）。
+- 回归：spy 适配器调用链、fake local-like 适配器无需 Token 产出 `ParseResult` 进入同一 merge、`backend_config` 不一致报错。
+
+### R11 轻量状态与请求代次
+
+- `ProjectStore.list_job_summaries` 只投影状态列（不 `SELECT *`、不解码 result/activity）；`GET /projects/{id}/status` 用它。前端轮询改走 `/status`；`ReviewWorkspace` 进入已完成结构作业时按 job_id 拉 `GET /structure/jobs/{id}` 完整详情后再 `applyJobResult`，避免摘要缺 `result/proposed_toc`。
+- `App.refreshProject` 改为独立读取 `Promise.all` 并行，并加 `loadSeqRef` 代次 + `activeProjectRef` 双重校验，语言/项目切换的迟到响应不会覆盖新状态。
+- **未做**：译文 ETag/revision 增量拉取、结构/阅读 block 窗口化。
+
+### R12 可见质量与结构审查确认
+
+- 译文载荷 `quality_warnings` 现于 `ReadingBlockCard` 可见（带“带原文重译本段”入口，仅提示不自动改）；数字改为 token 化比较（12 不被 120 子串误判）。
+- **结构 done 改为显式审查确认**：`ProjectStore.confirm_structure_review` 记录 `{scope, document_updated_at, confirmed_at}`；`structure_review_summary` 新增 `partial` 状态，`done` 仅当存在对应当前文档版本的 full 确认，文档改动后自动失效。新增 `POST /projects/{id}/structure/confirm` 与前端“确认当前审查范围（全书）”按钮；资源卡片显示 partial。
+- **未做**：结构目录/裁片/精确请求缓存、带原文定向译审。
+
+### 验证
+
+- 全量 `pytest` **313 passed / 0 failed**；`tsc --noEmit` 通过；Vite 生产构建通过；隔离真实浏览器 **92/92 PASS、0 脚本错误**。自包含 Tauri 已重建（未安装）：sidecar manifest revision `1de73602c1ea369e57f2` / sha256 `3f0f41be…` / size 42853808；`Literature.app` 54.48 MiB；bundle 内 sidecar 哈希与 manifest 一致，adhoc 签名 `codesign --verify --deep --strict` 通过。**未安装/未启动客户端、未调真实 MinerU/provider、未读真实 Keychain、未改真实库、未提交 Git。** 结构/阅读 block 窗口化、ETag 增量、结构缓存/定向译审、结构/即时共用限流仍需继续。
+
+## 2026-10-13（第十轮）：R02 任务来源契约、冻结契约、remote 真实 adapter、预估与质量告警（Orca Worker 实施，已编码/自动测试/tsc/build/隔离浏览器，未安装/未真实服务验收）
+
+### R02 任务来源契约（修正第九轮的不完整修复）
+
+- Lead 复现：6 块已有旧译文 → force → 前 5 块写盘、第 6 块绕过收尾中断 → 同 job 恢复 **0 请求假 completed**。根因是“磁盘所有有效旧结果”被当成本次完成。
+- 修复（`literature/translation.py` + `models.py`）：`TranslationEntry` 新增任务级 `run_token`；本次完成 = 磁盘上带本次 `run_token` 且通过校验的块（∪ 本任务自己写入的 checkpoint 清单）。预写 checkpoint 的 `translate_completed` 不再包含旧译文（Lead 场景下为 `[]`）。
+- 分块真实提交时 `_apply_outcome` 给成功项打本次 `run_token`，崩溃窗口靠磁盘来源恢复。counts 改用“本轮来源”：force 暂停 1 块后 `translate.completed=1 / unhandled=5`（旧实现会算 6 完成）；已校验旧译文不再被计为 failed（归 unhandled）。
+- 回归（先在旧代码失败）：`test_force_resume_treats_only_this_task_results_as_done`（resume_calls=1，预写清单为 `[]`）、`test_force_paused_counts_reflect_this_round_only`、`test_refine_resume_does_not_skip_already_refined`、`test_polish_crash_resume_does_not_fake_complete`；scope 不缩水/锁定/源变由既有点检覆盖。
+
+### 冻结契约（实施，不只是记账）
+
+- `frozen` 快照现包含：完整术语快照（非仅摘要）、附加要求 `instructions`、`prompt_version`、非敏感模型参数（model/base_url/temperature/max_output_tokens，密钥不落快照）、`force/polish` 任务标志。
+- 恢复时 `run()` 实际应用冻结值：术语/附加要求/模型参数/执行标志都按快照，不被恢复请求改动；密钥仍运行时从当前服务读取。新增观测点：若代码 `PROMPT_VERSION` 与冻结值不同会记 warning。
+- 回归：`test_resume_uses_frozen_model_glossary_and_instructions`（model-after→实际 model-before、prompt 用 OLD 而非 NEW、附加要求被冻结）。服务被删除时 `provider_from` 在 `run()` 前抛出，明确阻止（不静默换模型）。
+
+### remote 真实 adapter（不再只是 Protocol 声明）
+
+- `literature/mineru_workflow.py` 新增 `RemoteMinerUBackend`（`capabilities/prepare/execute/status/result`）；`MinerUWorkflow` 新增 `backend_factory`，`run_or_resume` 先 `ensure_available(backend.job.backend_id)`，再经适配器推进；Token/client 只在 `execute` 内创建。
+- local/未知 `backend_id` 的持久化 job 在 `run_or_resume` 入口即被拒（不建远端 client、不读 Token），旧任务缺字段默认 remote。原有 `client_factory`/fake 流程兼容。
+- 回归：spy 适配器证明 `run_or_resume` 真实调用 `prepare→execute→status→result→merge`；local/unknown 恢复断言 `client`/Token 均未读取。
+
+### 其余 C（部分完成）
+
+- **R08**：单字段超过 1200 字符沿句子/空白边界预拆为 `key~i` 子段；新增 `_batch_units` 在**请求级**按字符（2400）/字段（12）预算把子段真正拆成多次 HTTP，再聚合完整子段证据拼回同一稳定字段（不再只加协议标签）。大表/多 cell 块同样首发预拆。回归：10000 字符单字段断言发出多个请求且每次 `<src>` 待翻内容 ≤ 3200 字符；缺/截断不拼半句；拼接无 `~` 残留。**未做**：按章节/语言边界组织请求。
+- **R09（部分）**：`estimate_translation` 复用真实请求组装（含 `_batch_units` 后的实际请求数），返回 token/费用区间与 `has_pricing`；新增 `_estimate_chunk_cost` + 在途费用预留，并发下 `spent + reserved >= budget` 即 `budget_paused`（回归：4 路并发小预算只发出 ≤ 1 块）。**未做**：服务级共用并发额度/限流、辗转重试/子请求预算入账。
+- **R11（部分）**：新增 `GET /projects/{id}/status` 轻量接口（作业去掉 `result`/`activity` 审计 + usage），前端高频轮询改用它；`/projects/{id}` 仍保留完整审计。**未做**：ETag/revision 增量译文、结构/阅读 block 窗口化。
+- **R12（部分）**：新增 `entry_quality_warnings`（数字/URL/引用缺失、译文原样/异常偏短）随 `translation_payload` 下发，仅作人工复核提示，不自动改译文。**未做**：结构 done 绑定文档版本/审查范围、结构增量候选/缓存、带原文定向译审。
+- 另：force 重译失败时保留“对应当前源文”的旧译文内容（不清空），但 `partial=True` 不计为本轮完成；`_task_accounting` 区分“本轮未处理（unhandled）”与“本轮明确失败（failed）”，旧译不再被误计 failed（Lead 3 块场景回归）。
+
+### 验证
+
+- 全量 `pytest` **309 passed / 0 failed**；`tsc --noEmit` 通过；Vite 生产构建通过；隔离真实浏览器 **92/92 PASS、0 脚本错误**。
+- **自包含 Tauri 产物已构建（未安装）**：重建 `scripts/build_sidecar.py`（manifest revision `cfe0e3d46a4d7a36dea4` / sha256 `7194c984…` / size 42845232），`tauri build` 产出 `src-tauri/target/release/bundle/macos/Literature.app`（54.47 MiB），bundle 内 sidecar sha256/size 与 manifest 一致；adhoc 重新签名后 `codesign --verify --deep --strict` 通过。**未替换 `launcher/Literature.app`、未启动/未安装**。
+- 未调真实 MinerU/provider、未读真实 Keychain、未改真实库、未提交 Git。
+- 第十轮条目中“R02 已关闭”的描述以本轮为准；后续进展（R09 在途预算/协调层、R11 轻量状态、R12 质量告警与结构确认）见第十一轮条目；R11 块窗口化/ETag、R12 结构缓存/定向译审仍未实施，不能宣称整体优化完成。
+
+## 2026-10-13（第九轮）：移除导出/TBL、MinerU 本地后端口径与重复费用/读写膨胀修复（Orca Worker 实施，已编码/自动测试/tsc/临时 Vite 构建，未安装/未真实服务验收）
+
+### 背景与范围
+
+用户授权“完成项目的部分重构和整体优化，去除导出与外部 TBL 模块，并为以后增加本地处理的 MinerU 模块留下口径”，并说明按“任务/恢复/重复读写优化、移除导出/TBL、预留本地 MinerU 接入契约”拆分实施，不推倒重写。本轮保留 Tauri macOS + 内置 sidecar、不可变 raw、canonical 文档图谱、稳定 block/cell ID、人工锁定与可撤销修订。
+
+### 1. 正确性与重复费用（评审 R01/R02/R07/R10 类）
+
+- **翻译/结构启动原子化**：`literature/api.py` 新增项目级 `_project_start_lock`；“检查活动任务 + 创建/恢复作业”抽为 `_claim_translation_job`，`start_structure` 抽为 `_claim_structure_job` 并新增“同项目仅一个活动结构 AI 作业”守卫。并发新建/resume/双 resume/双击只会领取一次。
+- **崩溃恢复不重复翻译（含 Lead 第二轮复现的 force 边界）**：`literature/translation.py` 在发出首个模型请求前写 checkpoint（冻结 `target_ids`、`pass`、源文摘要、非敏感模型配置、术语表摘要 `frozen`）。`TranslationEntry` 新增任务级 `run_token`：磁盘上带本次 `run_token` 的结果汇总 checkpoint 里本次写入的完成清单，**只把“本次任务真正处理过”的块当成本次完成**；旧译文即使 source_hash/status 有效也不算。修复 Lead 复现的“6 块均有旧译文 + force + 第 6 块绕过收尾中断”场景：旧实现预写 checkpoint 把 6 块旧译文全算完成，恢复 0 请求假 completed；现在只重发第 6 块（resume_calls=1）。覆盖旧译 force、旧 refined 再 refine、polish 中途崩溃、scope=untranslated 目标不缩水；`frozen` 只在首次写入。
+- **R08 超长单字段预拆**：`_unit_segments` 把超过 1200 字符的单字段沿句子/空白边界拆成 `key~i` 子段，`_assign_fields` 按序拼回同一稳定字段（不改 block/cell 身份）；失败重试时 `_split_units` 现在可继续缩批。新增回归：单字段被拆成多子段且拼接无 `~` 残留；若模型始终截断仍失败且不保存半句。
+- **平面版本历史**：`revisions`/`candidates` 由 `asdict(previous)` 改为 `_entry_snapshot`（内容 + 依据元数据，不嵌 `revisions`/`candidates`/`selection_translations`），消除 translation.json 递归膨胀；旧文件里已存在的嵌套历史仍可读、可审阅。
+- **项目路径索引**：`literature/storage.py` 新增可重建的 `project_id→path` 索引，`list_projects` 顺带刷新，`create_project`/`rename_project`/`delete_project` 增删；缓存未命中或目录失效时重建，仍以磁盘为准。
+
+### 2. 整体优化（评审 §4 阶段 3–5 部分项）
+
+- **全局熔断覆盖“有成功、后面持续失败”**：`_process_blocks` 连续 3 个分块失败即停止提交新分块（不再要求 `success_blocks==0`）；`_finalize_job` 只有“零成功分块”才整体 `failed`，已有成功分块保留并按 `partial_failed` 呈现。
+- **provider 生命周期**：翻译/结构作业 `finally` 显式 `provider.close()`，并清理 `pause_events` 句柄。
+- **前端轮询降频**：`frontend/src/App.tsx` 只在真正 queued/running 或有新任务签名时拉整层译文，暂停/闲置不再反复拉；轮询间隔闲置降到 5s、繁忙保持 1.5s。
+- **表格占用网格**：`literature/mineru.py` 的 HTML 表格解析维护 `(行,列)` 占用网格，rowspan 后的下一行单元格不再错位到第 0 列；仅影响新解析，旧 cell ID/译文不变。
+
+### 3. 移除导出与外部 TBL
+
+- 后端：删除 `literature/exporters.py`、`literature/tbl.py`、CLI `export` 命令、`_describe_project` 的 `export_count`、项目 `exports/` 目录创建、`python-docx` 依赖与 `scripts/build_sidecar.py` 的 `--collect-all docx`；移除 `exporters`/`tbl` 的 import 与 JobManager 中的 `TBLBridge`。`/projects/{id}/exports`、`/export/readiness`、`/tbl/prepare|start|config|status` 保留路径但返回 **410**，旧客户端/旧书签得到明确提示。`import_mineru` 的 `extra_formats`（MinerU 返回的原始证据）保留。
+- 前端：删除 `frontend/src/workbench/ExportPanel.tsx`；移除导出导航标签、`#/export` 视图、资源卡片导出阶段/筛选/菜单操作与工作流行、`ReadingWorkspace` 的“导出…”按钮、设置中的 TBL 段、`export_readiness_v1` 能力校验。旧 `#/export` 与 `#/p/<id>/export` 统一回退到“阅读与翻译”，不白屏。
+- **数据保留**：已存在的用户 `exports/` 文件、`source/origin.*`、`ocr/raw/mineru`、`document/document.json`、`translations/` 均保留；`ProjectStore.create_project` 不再新建 `exports/`，但不会删除旧目录，也不运行任何导出相关清理。旧项目里若已有 `exports/`，仅 `export_count` 不再下发。
+
+### 4. 本地 MinerU 扩展口径（只预留，不伪装可用）
+
+- 新增 `literature/parse_backends.py`：定义 `mineru_remote`（已实现、默认，切片/上传 URL/轮询/不可真正取消/可断点续跑）与 `mineru_local`（预留，`available=false`，上传 URL/轮询为否，带明确原因）。
+- `literature/mineru_workflow.py`：`WorkflowJob` 新增 `backend_id`/`backend_config`，创建任务时校验后端可用性并落盘参数快照；`from_dict` 对旧任务缺字段默认 `mineru_remote`。`literature/ocr.py` 创建任务时固定 remote 并记录后端参数快照，`describe` 下发 `backend_id`/`backend_config`。
+- API：新增 `GET /parse/backends` 只读能力清单；`/health` 新增 `parse_backends_v1`。
+- 明确未做：本版本**不安装本地 MinerU 模型/依赖**，local 不显示为可点击功能，未来作为独立进程/服务通过同一 `prepare/execute/status/result` 边界接入，再走同一 normalize/merge。文档与架构说明见 `docs/ARCHITECTURE.md`、`PROJECT_PLAN.md` §2.2/§6。
+
+### 5. 验证与未验收边界
+
+- 全量 `pytest` **298 passed**（原 283 项移除导出测试并新增 21 项：并发启动/新建+resume/双 resume/结构原子领取/exec.submit 失败可恢复、崩溃恢复不重发、force 旧译不假完成、旧 refined 再 refine、polish 崩溃、冻结清单、平面历史体积、项目索引缓存/重建、持续失败熔断、rowspan/colspan 占用网格、长字段预拆与拼接、解析后端可用性与旧任务默认、旧 exports 文件不被触动）；`tsc --noEmit` 通过；Vite 生产构建到 `/tmp/literature-opt-build` 与 `frontend/dist`（主 JS 804.28 kB / gzip 242.52 kB；Node 22.11.0 版本告警如实记录，未安装依赖掩盖）。
+- **隔离真实浏览器验收**：`tests/manual/parse_ui_browser_check.py`（假 MinerU、不读 Keychain、不发外部请求，真实点击生产构建前端）**92/92 PASS、0 脚本错误**，覆盖首页/资源/校对/阅读、开始/继续/恢复解析、旧 `#/p/<id>/export` 与 `#/export` 回退不白屏、主导航不再暴露导出、`/tbl/config` 与 `/projects/{id}/exports` 返回 410；仍断言真实 PDF canvas 已绘制内容。
+- **隔离 sidecar 构建**：用与 `scripts/build_sidecar.py` 相同的参数（去掉 `--collect-all docx`）构建到 `/tmp/lit-sidecar/dist` 成功（约 42.8 MiB，小于旧包，符合移除 python-docx）；启动后 `/health` 能力包含 `parse_backends_v1`、不再包含 `export_readiness_v1`。**未安装/未替换已安装客户端**。
+- 测试使用临时库与 mock，未读真实 Keychain、未调用真实 MinerU/provider。
+- **未做**：未安装/未替换/未启动真实客户端（未 `tauri build`、未安装 `.app`），未做原生窗口点击与公证验收，未做真实 MinerU/provider 质量/速度/费用验收，未提交 Git，未改真实文献库。隔离浏览器与临时 sidecar 构建不能替代真实服务与原生验收。
+- **兼容/迁移限制**：已移除的导出接口按 410 废止（不是 404，便于旧前端定位）；旧项目 `exports/` 目录与文件保留；表格占用网格修复只对**新解析**生效，旧 canonical cell 坐标不改、不迁移 cell ID；`backend_id` 缺省按 remote。
+
+### 6. 尚未实施（评审 §4 阶段 2/4/5）
+
+分级预算预留与在途/重试费用、预估复用实际请求组装、结构 AI 增量候选与缓存、结构 done 口径（版本/范围/实际审查 + 明确确认）、分块按语言/章节约束、本地质量检查告警、全块列表窗口化与状态/审计分离接口。
+
+## 2026-10-13：全项目运行逻辑与效率/token/质量评审（未修改业务代码）
+
+- 交付 `docs/PROJECT_REVIEW_2026-10-13.md`：按客户端、导入/资源、MinerU、规范化/存储、原页/人工结构、结构 AI、翻译、provider/账本、导出/TBL 介绍运行逻辑与实现路径，给出优先级、证据和优化验收顺序。依据当前工作区，保留已有修改，不将 2026-10-12 评审已修问题重复报为未修。
+- 本轮全量 Python **274 项通过**：临时 library/runtime，屏蔽真实 Keychain 命令与 httpx 非本地网络。TypeScript `--noEmit` 通过；Vite 构建到 `/private/tmp/literature-review-build-20261013` 通过（主 JS 810.83 kB/gzip 244.57 kB）。本机 Node 22.11.0 仍有 Vite 要求 20.19+/22.12+ 的版本告警，构建成功不等于兼容风险消失。
+- 临时样例复现：并发 `start_translation` 创建 2 job/提交 2 worker；6 分块 force 作业在第 6 请求模拟绕过正常收尾，已保存 5 条但无 checkpoint，同 job 恢复发送 6 请求、重复 5 块（崩溃边界模拟，不是实际 kill 验收）；一个短段人工编辑 1/5/10 次 translation.json 为 699/11012/446645 字节；10000 字符单字段独占一块且无法再次切分。
+- 导出复现：图片附注/表格标题/表格附注在 Markdown/HTML 缺失（EPUB 共用 HTML 正文）；partial 50/359 页当前可译块全译后 readiness 仍 `ready=true`；zh-CN 与 ja MD+JSON 导出目录相同，后者替换前者的 translation.json；DOCX colspan=2 未生成 gridSpan；rowspan=2 下次行 C 被规范化到 (1,0)，应为 (1,1)。raw/canonical 在真实库均未改动。
+- 大库开销测量（读取次数，不是耗时）：10/50 个合成项目单次 `GET /projects` 分别读取 project.json **305/6525 次**，响应均 200。定位到 project_path 扫描与逐项目阶段聚合叠加；同时确认多路定时轮询、暂停拉整层译文、全块渲染、预估未覆盖实际 prompt/polish/force、在途预算未预留等代码缺口。
+- **上述业务缺陷尚未修复**。本轮只新增评审并同步计划/日志；未提交 Git、未打包安装/启动客户端、未改真实文献库、未调用真实 MinerU/provider、未执行本轮原生/浏览器点击验收。历史已有验收不扩大到这些新边界。
+
+## 2026-10-13（第八轮）：解析任务历史、首页分区与自动归档（Orca Worker 实施，已编码/自动测试/tsc/build/隔离浏览器 87/87/冻结 API 11/11/已安装）
+
+### 背景与设计
+
+用户要求解释首页只显示最近 3 条的规则，并参照主流模式制定列表/历史/保留与自动清理方案。产品参考（不是行业统一标准）：Safari 下载列表把已完成从当前列表移出、GitHub Actions 运行历史按保留期归档；**90 天 / 1000 条是本产品自选值**。完整契约见 `docs/PARSING_TASK_HISTORY_DESIGN.md`。
+
+### 生产修复
+
+- `literature/mineru_workflow.py`：`WorkflowJob` 新增 `finished_at`，只在**首次**进入 `completed` 时写入，后续保存/清理/快照不覆盖；旧任务缺失时展示回退 `updated_at` 并标注 `finished_at_estimated`（绝不用 `created_at`）。
+- `literature/task_history.py`（新增）：`JobArchiveStore` 独立持久化 `{runtime}/ocr-jobs/archive.json`（归档记录 + `settings` + `last_auto_run_at`，原子写、串行锁，**不写 job.json**）；纯函数分区过滤/排序/分页与 `select_auto_archive`。
+- `literature/ocr.py`：`list`/`get` 附加归档元数据；`task_center`（scope=active/recent_completed/history）；`archive_job`/`unarchive_job`（仅 completed/failed，活动状态 400，幂等）；`auto_archive`（保留期+条数上限，最老优先）与完成后 `capacity_only` 检查；启动一次 + 调度器每日最多一次（持久化 `last_auto_run_at`，重启幂等）；重试自动清除归档标记。
+- `literature/api.py`：新增 `GET /ocr/tasks`、`GET /ocr/jobs/{id}`、`POST /ocr/jobs/{id}/archive`、`/unarchive`、`GET/PUT /ocr/archive-settings`；`/health` 新增能力 `task_history_v1`。**保留 `/ocr/jobs` 全量契约**（含已归档，资源页最新 job 不丢失）。
+- 前端：`types.ts`（finished_at/archived/TaskPage/ArchiveSettings）、`viewState.ts`+`HomeTopbar.tsx`（`#/history` 路由）、新增 `TaskHistory.tsx`（搜索/状态筛选/日期排序/每页 20/详情/归档找回/保留期设置）、`ImportWorkspace.tsx` 拆成「当前任务」（运行置前、queued 按真实 queue_position、失败不受 3 条限制、每页 10、精确计数与分页）与「最近完成」（24h 内最新 3 条、按 finished_at + created_at + job_id 稳定排序、无满格进度条、分段按需展开、「收起已完成」持久化隐藏当前 job_ids）、`App.tsx` 增加历史路由。
+
+### 并发与原子性收口（Lead 复核）
+
+- **归档/取消归档与 retry/start 原子互斥**：旧 `archive_job` 先 `get` 判状态再 `archive_one`，无 schedule/job 锁；并发 `retry` 可在判定之后先把任务变 `queued` 并清标记，归档随后给活动任务加标记。现 `archive_job`/`unarchive_job` 与 `retry_job`/`start_job` 共用锁序 `schedule_lock → job_lock` 并在锁内重查状态；`auto_archive` 也在 `schedule_lock` 内完成“快照→选择→写入”，避免与手动归档/取消/重试交错。`completed` 不能被 `start`/`retry` 变为活动状态，候选不会在写入前变成活动任务。
+- **归档元数据写失败不污染内存**：`JobArchiveStore` 的 `archive_many`/`unarchive`/`update_settings`/`mark_auto_run` 改为 copy-on-write（先原子落盘成功再发布 `self._data`），写失败时内存与磁盘均保持旧值，请求会真实报错且当前会话不会错误隐藏任务，后续重试成功。
+
+### 自动归档规则
+
+- 仅 `completed` 参与自动归档；**未解决 failed 与所有活动/可恢复任务绝不自动归档**。
+- 默认保留 90 天；常驻（未归档）成功记录上限 1000，超期或超量（最老优先）转已归档，原因 `retention`/`capacity`。设置可选 30/90/180/永久；永久取消时间限制但 1000 上限仍在。
+- 归档只改展示/保留期元数据：不改 `job.state`，不删 job/bridge/raw/canonical/translation/exports；`migrate_project` 继续按完整历史证据工作。
+
+### 回归
+
+- 全量 `pytest`：**279 passed**（上轮 274 + 本轮新增 5 项）：新增真实线程/事件并发回归（archived 与 retry 竞争后任务必须 queued 且无归档、queue 正确）、`retry → archive` 被拒、`auto_archive` 不标记任何活动任务、`completed` 不能被 start/retry 改变、**JobArchiveStore 写失败前后内存/磁盘不变且后续重试成功**。
+- `tsc --noEmit`、Vite 生产构建通过。
+- 隔离真实浏览器全流程：**87/87 PASS**、0 脚本错误（上轮 84 + 本轮 3）。新增：首页同时存在当前任务与最近完成两区、最近完成无满格进度条、窄屏首页无横向裁切。**首页任务区完整截图** `docs/verification/home-sections.png`（full page，含 10 条失败/分页「第 1 / 2 页 · 共 12 条」与 3 条最近完成、无进度条；已人工检视）、`home-sections-narrow.png`、`history-page.png`、`history-narrow.png`。旧有部分→全文、源页 5/7 定位+canvas 像素、失败重试、中断恢复、双击防重复、旧资源检查、队列调序、历史搜索/筛选/分页/归档找回/保留期/收起持久化均保持通过。
+- 冻结 sidecar 隔离 API：**11/11 PASS**（新增 `task_history_v1` 能力、默认保留期 90/1000、任务中心可用）。
+
+### 构建与安装
+
+- 新 sidecar：revision `0e308e432be3a38ee358`，sha256 `b0f85f4af1a4f1a38d883db360cfba63e52c419e63e92391fbd5c5a9f122444b`，size `47709968`。
+- Tauri 产物重建 `Literature.app`（59.11 MiB），adhoc `codesign --verify --deep --strict` 通过；包内 sidecar 哈希与 manifest 一致。
+- 安装前只读确认：无 `launcher/Literature.app` 进程、无进程打开真实库、runtime `queue.json` 为空。已备份上一版到 `launcher/.rollback-Literature-521e540c.app`，用 `scripts/setup_macos_launcher.sh --app-only` 安全安装；安装后签名与哈希校验通过。**未启动客户端、未修改真实库**。
+- 备注：真实库某项目 `jobs` 表存在 2 条较早遗留的 `running`（structure_ai/translate）行，但**没有对应进程**（`lsof` 未打开该库）；按设计下次启动会被 `recover_interrupted_jobs` 标为失败，本轮未触碰。
+
+### 尚未验收
+
+- 真实 MinerU / 真实 provider / 原生窗口逐项点击 / Developer ID 公证均未做；历史与归档仅在隔离 fake MinerU + 真实 Chromium 生产构建与冻结 sidecar 上验收。
+
+
+## 2026-10-13（第七轮）：未解析已有资源「开始解析」入口与总状态修正（Orca Worker 实施，已编码/自动测试/tsc/build/隔离浏览器 52/52/冻结 API 8/8/已安装）
+
+### 用户现象与只读根因
+
+用户截图反馈一个 338 页 PDF 资源显示“未解析”，但详情里只有“查看进度”，而右上总状态却是绿色“已完成”。只读检查（未改真实库）：
+
+- 真实项目 `fdbd7397a632432ab7496835fdde6e82`：`project.json` `state=created`、`source/origin.pdf` **338 页 / 11,536,253 字节**、`document/document.json` **不存在**、`ocr/raw/mineru/` 空；runtime `ocr-jobs` 中**没有**该 project_id 的 bridge；项目内 `jobs` 表 0 行。即：从未解析、也没有任何任务。
+- `ocr.project_coverage` 对“从未生成规范文档”和“旧已解析资源无 coverage 证据”都返回 `unknown`，无法区分。
+- `frontend/src/ProjectLibrary.tsx`：`canContinueParse`（要求 `has_document && partial`）与 `coverageUnknown`（要求 `has_document`）对无文档资源都为假，`Workstreams` 的兜底分支因此只渲染“查看进度”；而 `onProgress` 只是 `openHome`（切到首页），不是进度面板。
+- `badge()` 缺少“无规范文档”分支，最终无条件 `return { tone: "done", label: "已完成" }`，导致“提取=未解析 / 总状态=已完成”自相矛盾。
+
+只读复核 `project_coverage('fdbd7397…')` 在本轮修复后返回 `{state: 'unparsed', source_page_count: 338, covered_pages: 0, ranges: []}`（读取操作，未创建任务、未触达 MinerU）。
+
+### 生产修复
+
+- `literature/ocr.py`
+  - `project_coverage`：无 `document/document.json` 时，若 `source_page_count` 已知或源 PDF 页数可读，返回 `unparsed + source_page_count`；**有规范文档但无 coverage 证据仍返回 `unknown`**（旧资源保守口径不变）。
+  - 新增 `start_parse` / `_start_parse_locked`：语义独立于“继续解析”，是一个完整的单次服务端首次解析操作。在 `schedule_lock → project_lock` 锁序内依次完成 **Token 校验、无规范文档检查、活动作业检查、源文件存在且 SHA-256 与创建时一致校验、`create(enforce_single=True)` 与调度**（`schedule_lock` 为可重入锁，内层 `start_job` 再取不会死锁）。**无 Token 时不创建任何作业**；**创建成功但调度失败时任务保留为可恢复的 queued 状态并报出带 job_id 的具体错误**。`page_ranges` 经 `parse_page_ranges` 转为**本地压缩子集** `requested_pages`；非 PDF 不支持指定页码。绝不据现有页推断覆盖，也不会把 `unknown` 合并进旧文档。
+  - `_continue_parse_locked`：无 `document/document.json` 时明确拒绝，提示改用“开始解析”。
+- `literature/api.py`：新增 `ParseStart` 与 `POST /projects/{project_id}/ocr/start`，直接委托服务层；**不改变既有 `POST /projects/{project_id}/ocr/jobs` 的仅创建契约**。Token 校验、创建与调度均在服务层锁内。
+- `frontend/src/ProjectLibrary.tsx`：
+  - `badge()`：无规范文档时显示“未解析”，不再误报“已完成”。
+  - `coverageText()`：无文档按是否有活动任务区分“尚未开始解析 / 解析中，完成后生成规范文档”；旧资源未知文案保留。
+  - 新增 `needsFirstParse`；无文档且无活动任务时用“开始解析”主按钮替代兜底“查看进度”。
+  - 新增 `StartParseDialog`：显示源文件与**总页数**、可选页码范围、模型/语言包/OCR/表格/公式参数；`startExtract` 调 `POST /projects/{id}/ocr/start`，提交期间禁用防双击。
+  - 既有 `queued/waiting/interrupted/failed` 的入队/恢复/重试分支未改，开始解析仅在没有活动任务时出现。
+
+### 回归
+
+- 全量 `pytest`：**256 passed**（上一轮 243 + 本轮 13）。新增 `StartParseTests`（11 项）：338 页 created+无 job 报告 `unparsed/338`；legacy 有文档无 coverage 仍 `unknown`；开始解析创建全量首个作业、入队且不产生文档；**338 页源经 `_prepare` 自动切成 200+138 两片且累计页 1–338 无重叠无遗漏**；**并发两个 `start_parse` 只建一个作业**；**Token 缺失零创建且不留下队列条目**；**调度失败保留可恢复的 queued 任务并报带 job_id 的具体错误**；页码范围 `3-5,8 → [3,4,5,8]`；已有文档 / 源文件缺失 / 源文件被改（hash 不符）均拒绝且不留下任务；`continue_parse` 对无文档资源拒绝。新增 API 2 项：无 Token 时 `POST /ocr/start` 返回 400 且 `/ocr/jobs`、队列为空；有 Token 时创建 1 个 job、立即二次提交冲突且仍只有 1 个。
+- `tsc --noEmit`、Vite 生产构建通过。
+- 隔离真实浏览器全流程：**52/52 PASS**、0 脚本错误。新增：“未解析资源提供开始解析入口 / 不再提供查看进度 / 不显示已完成 / 总状态为未解析 / 弹窗显示共 260 页与页码范围 / **开始解析 260 页自动切成 200+60 两片** / fake 完成并生成规范文档 260/260 / 只创建一个任务 / 刷新后显示全部解析 260 页”。旧有部分→全文、源页 5/7 定位与 canvas 像素、失败重试（fake 改为“切片源页集合精确匹配”触发一次性失败）、中断恢复、双击防重复、旧资源检查、队列调序均保持通过。
+- 冻结 sidecar 隔离 API：**8/8 PASS**（新增“未解析资源报告 unparsed + 页数”）。
+
+### 构建与安装
+
+- 新 sidecar：revision `d632fe3c3f105812d64a`，sha256 `e5f88b9410ae1df828fde3518006b4b8bb52479feeb2bcde10bb7e9680d39c60`，size `47694096`。
+- Tauri 产物重建 `Literature.app`（59.10 MiB），adhoc `codesign --verify --deep --strict` 通过；包内 sidecar 哈希 `e5f88b94…` 与 manifest 一致。
+- 安装前只读确认：无 `launcher/Literature.app` 进程；真实 runtime `ocr-jobs/queue.json` 为空、10 个 job 全部为 `completed`/`failed`（无 queued/waiting/interrupted/active）；真实库各项目 `jobs` 表无 `queued/running`。已备份上一版安装包到 `launcher/.rollback-Literature-058f5a85.app`（sha256 `9a417378…`，更早的正式版仍在 `.rollback-Literature-5010db9b.app`），用 `scripts/setup_macos_launcher.sh --app-only` 安全安装；安装后签名校验通过、内置 sidecar 哈希与 manifest 一致。**未启动客户端、未修改真实库**。
+
+### 尚未验收
+
+- 真实 MinerU 解析（用户真实 338 页资源需在安装版点击“开始解析”后自行发起并计费）、真实 provider、原生窗口逐项点击、Developer ID/公证均未做。本轮“开始解析”仅在隔离 fake MinerU + 真实 Chromium 生产构建与冻结 sidecar 上验收；真实库 `fdbd7397…` 的覆盖仍为 unknown → 现仅显示为 `unparsed`，未写入任何 coverage 或文档。
+
+
+## 2026-10-13（第六轮）：旧 page_ranges=1-N 可信前缀迁移 + 部分翻译口径（Orca Worker 实施）
+
+### 用户现象与只读根因
+
+用户截图反馈“The White Lotus Teachings”显示“覆盖未知”且“检查解析范围”失败。只读检查（未改真实库）：
+
+- 项目 `bdb72fda156045379ab8181f32cc16f3`；`source/origin.pdf` 实隖359 页；`manifest.state=ready`、`page_count=50`、无 `parse_coverage`。
+- canonical 50 页 / 242 blocks；`source_files` 单片 `content_list_v2` sha256 `10a620cf…`。
+- 历史 job `99335abf9b8042beb68a4c0127028580`：`completed`、`page_ranges='1-50'`、`page_count=50`、单 slice `start=1/end=50 downloaded`，无 `source_pages/source_page_count`。
+- raw `slice-001`：`content_list_v2` 长度 50（45 非空）、`layout.json` 的 `pdf_info` 长度 50、`*_origin.pdf` 50 页；源/任务二方 hash 均为 `1fc85b93…`。
+- 旧 `migrate_project` 遇到 `page_ranges.strip()` 直接跳过 → `no_trusted_evidence`，与实际存在 completed 任务矛盾。
+
+### 修复规则（严格、可审计）
+
+`migrate_project` 新增可信连续前缀 `1-N` 路径，必须同时满足，否则保守 `unknown` 并给出具体原因码：
+
+- 源文件 hash 与创建时一致；`verify_raw` 无错。
+- `job.page_count`、`slice.start=1`、`slice.end=N`、`len(document.pages)`、`source_files[0].page_count` 均为 N；单片片且与 `source_files` 数量一致。
+- 封存切片可核对页数证据：`content_list_v2` 长度 = N；`layout.json` 的 `pdf_info` 长度 = N；`*_origin.pdf` 存在时页数 = N。
+- 前缀映射：局部第 i 页 = 源页 i+1；不依赖文字或文件名猜页序。
+- 非前缀（如 `2-5`）、非连续、远端原始页号不明确的旧作业仍保守 unknown。
+
+迁移沿用原有原子应用：同时修正 `page.page_index/source_page_index` 与 `block.page_index`；**block/cell ID、人工结构修订、译文与锁定、raw 均不变**。
+
+### UI
+
+- 翻译阶段在覆盖为 `partial` 时显示“已译已解析内容”，描述注明“仅统计已解析的 N/M 页；剩余未解析内容尚未翻译”；总状态仍优先“部分解析 N/M”，避免把当前可译块的全译误认为全书完成。
+- “检查解析范围”失败文案改为按具体原因码（如 `raw_verification_failed`、`source_changed`、`prefix_layout_page_mismatch`、`completed_but_unverifiable`）说明缺失的证据，不再笼统“没有已完成任务”。
+
+### 回归
+
+- 全量 `pytest`：**243 passed**（新增 6 项 `LegacyPrefixMigrationTests`）：359 页源 + 50 页前缀（含 5 空白页）迁移为 `partial 50/359` 且保留旧 ID/结构修订/人工锁定译文；缺/篡改证据失败（删 layout → `raw_verification_failed`；layout 页数不符 → `prefix_layout_page_mismatch`；源变 → `source_changed`）；非前缀 `2-5` → `page_ranges_not_trusted_prefix`；迁移后 `continue` selected 51..359 自动切分 **200+109**。
+- 隔离真实浏览器全流程：**44/44 PASS**（新增“旧 1-10 前缀迁移 10/30 → 继续解析 → fake 完成 30/30”），0 脚本错误。
+- `tsc --noEmit`、Vite 生产构建通过。
+
+### 构建与安装
+
+- 新 sidecar：revision `5010db9b018a80003d21`，sha256 `1ce0ece4b81b52d7170ebf8434573e30f5f2c2adc3af76154c24b02d52846b6d`，size `47692064`。
+- Tauri 产物重建 `Literature.app`（59.10 MiB），adhoc 签名验证通过；包内 sidecar 哈希与 manifest 一致。冻结隔离 API **7/7 PASS**（含新前缀迁移 `mode=legacy_prefix`、部分 3/6）。
+- 安装前无客户端进程、真实库活动 OCR 任务 0；已备份上一版到 `launcher/.rollback-Literature-546812b8.app`，用 `scripts/setup_macos_launcher.sh --app-only` 安全安装；安装后 `codesign --verify --deep --strict` 通过、内置 sidecar 哈希与 manifest 一致。**未修改真实书 coverage**：用户在新版本点击“检查解析范围”后自行迁移。
+
+### 尚未验收
+
+- 真实 MinerU / 真实 provider / 原生窗口逐页点击 / Developer ID 公证；真实书的迁移结果需用户在安装版中点击后确认。
+
+
+## 2026-10-13（第五轮）：客户端安装与原生预览验收（Orca Worker 实施）
+
+### 安装前只读检查
+
+- 无 `launcher/Literature.app` 进程。
+- 真实库 7 个项目：`created` 2、`ready` 5；runtime 8 个 OCR job：`completed` 6、`failed` 2；**活动 OCR 任务 = 0**（无 queued/waiting/interrupted/active），因此启动不会自动恢复外部调用。
+- 旧安装包 sidecar sha256 `015e5d83…`（与上一版一致）；已备份到 `launcher/.rollback-Literature.app/`（安装脚本会在退出时删除自己的 previous.app，故单独备份）。
+
+### 安装
+
+- 用 `./scripts/setup_macos_launcher.sh --app-only`，不动桌面替身。
+- 安装后：`codesign --verify --deep --strict launcher/Literature.app` 通过；内置 sidecar sha256 `dd63b2cb37cdc9f39f48117121b079da472b9b164883f385d38449c56e195c88`，size `47690256`，与 `src-tauri/binaries/manifest.json` 一致（revision `546812b8e04ec5d6d433`）。
+
+### 隔离原生验收（不碰真实库、不读 Keychain、不发外部请求）
+
+- 启动环境：`LITERATURE_LIBRARY=/tmp/lit-native/library`、`LITERATURE_RUNTIME=/tmp/lit-native/runtime`、`MINERU_API_TOKEN=fake-native-token`、`HTTPS_PROXY=http://127.0.0.1:9`（本地黑洞，阻断外部）。首页显示“MinerU 连接检查失败”，证明未触达真实服务。
+- 真实 WKWebView 窗口截图 `docs/verification/native-review.png`：结构校对页的**源文件预览实际渲染出 “PAGE 1”**、bbox 覆盖层、页码 `1 / 9`、原页缩放与结构框；右侧结构编辑列出 p1–p4。这证实上一轮 pdfjs `getOrInsertComputed` 修复在原生 WKWebView 中生效。
+- 首页/文件资源原生渲染正常：资源卡片显示“部分解析 4/9 页”“覆盖未知”“待校对”等；MinerU 状态如实显示。
+
+### 限制与未验收
+
+- 原生窗口的 AX/坐标点击在顶栏导航上不稳定（`STALE_SNAPSHOT`/点击未生效），因此**原生“阅读与翻译”页点击未完成**；该页已在真实 Chromium + 生产构建下强断言验证（`docs/verification/reading-narrow.png`）。不能把浏览器通过当作原生通过。
+- 仅 adhoc 签名，**未做 Developer ID/公证**；未替换桌面替身；未用真实 MinerU/模型；未修改真实库。
+- 如需完整原生逐页点击，建议在允许前台交互且 AX 稳定的环境重跑，或补一个原生 E2E。
+
+
+## 2026-10-13：Lead 最终独立复核
+
+- 独立复跑全量 `pytest tests/ -q`：237 项全部通过；两个解析生命周期测试文件单独运行：41 项全部通过。
+- 独立复跑 `tests/manual/parse_ui_browser_check.py`：实际输出 37 条 PASS，全部通过，0 浏览器脚本错误。包括部分解析到全文、刷新回显、源页 5/7 定位与真实画布像素、125% 缩放、失败重试、中断恢复、防重复提交、旧资源检查成功/失败、UI 调序后 fake 实际顺序 A→C→B。
+- 实际查看校对与阅读窄窗截图：源 PDF 的 PAGE 1/2 可见，没有前轮的渲染失败。核验最终 Tauri 产物 `codesign --verify --deep --strict` 通过，内置 sidecar SHA-256 与 manifest 一致（`dd63b2cb…`）。
+- 浏览器复跑需要沙箱外本地回环监听权限；获得执行许可后完成。全程使用临时库与假 MinerU，不调用真实解析/模型服务，不安装或替换现有客户端。真实 MinerU、原生窗口交互仍待验收。
+
+## 2026-10-13（第四轮）：原文预览真实渲染修复（Lead 肉眼截图发现）
+
+前一轮的浏览器验收有实质遗漏：仅断言页面容器可见/当前页约等于目标，而 `PdfPageCanvas` 的 `.catch` 将真实错误吞成“渲染失败”，所以“0 脚本错误 + 容器定位通过”仍然交付了一个看不到原文的预览。Lead 用 view_image 查看 `docs/verification/reading-narrow.png` 发现：实际是结构校对页，中间橙字“第 1 页渲染失败”，却仍有 bbox。
+
+### 根因
+
+- pdfjs-dist **5.7.284** 在 `OptionalContentConfig` 中调用 TC39 提案方法 `Map/WeakMap.prototype.getOrInsertComputed`；当前 Chromium 与 macOS WKWebView 尚未实现，`page.render` 直接抛 `TypeError: this[#e].getOrInsertComputed is not a function`，所有页面渲染失败。这是真实生产缺陷（WKWebView 同样缺该方法）。
+- 次级缺陷：渲染失败后组件移除 `<canvas>`，且 effect 依赖不含 `failed`，无法重试；取消/尺寸变更时在新渲染前未等待上一次 render task 结束，pdfjs 会因“同一 canvas 并发渲染”再抛错。
+
+### 生产修复
+
+- `frontend/src/pdfAssets.ts`：在 pdfjs 使用前 polyfill `Map/WeakMap.prototype.getOrInsertComputed`；`PdfPageCanvas` 显式 `import "../pdfAssets"` 保证先执行。
+- `frontend/src/review/PdfPageCanvas.tsx`：不再静默吞错（`console.error` 保留真实原因）；canvas 常驻（失败显示覆盖层而非卸载）；新渲染前 await 上一次 render task 结算再复用 canvas；取消不判失败。
+
+### 有效验收（不再用弱断言）
+
+- `parse_ui_flow_check.cjs` 新增 `canvasRendered`：目标页 canvas 存在、宽高 >0、`getImageData` 深色像素 > 50；缩放 125% 后重查；断言无 `.pdf-page-error`。
+- `tests/manual/parse_ui_harness.py` 的测试 PDF 写入“PAGE N”文字与矩形，使像素与截图可辨。
+- **实际检视截图**：`docs/verification/review-narrow.png` 源文件预览显示 PAGE 1/PAGE 2、bbox 覆盖层与右侧结构一致；`docs/verification/reading-narrow.png` 为“阅读与翻译”双语布局。
+- 结果：隔离浏览器全流程 **36/36 PASS**（含 canvas 像素、缩放、双页定位、双页校对、阅读页）；0 脚本错误；全量 `pytest` **237 passed**；`tsc --noEmit`、Vite 生产构建通过。
+
+### 重新构建（未安装）
+
+- 重新 `tauri build --config src-tauri/tauri.ci.conf.json` → `Literature.app`（59.09 MiB），adhoc `codesign --verify --deep --strict` 通过；polyfill 已进入 `frontend/dist` 与包内前端产物。
+- 后端源码未变，sidecar 不重建：revision `546812b8e04ec5d6d433`、sha256 `dd63b2cb37cdc9f39f48117121b079da472b9b164883f385d38449c56e195c88`；包内 sidecar 哈希一致。
+
+### 尚未验收
+
+- 真实 MinerU、真实 provider 译文、原生窗口实际点击与公证未验收；本轮修复只证明生产组件能正确渲染真实 PDF（已在真实 Chromium + 可辨内容 PDF 上验证）。
+
+
+## 2026-10-13（第三轮）：Lead 复跑缺口收口 + 强断言浏览器全流程（Orca Worker 实施）
+
+Lead 第二轮复跑发现 33pass/1fail 与多处实际不可用/弱断言。本轮逐项收口，仍保持隔离 + fake、不 Keychain/外网/真实库/安装/git。
+
+### 缺陷与修复
+
+1. **测试契约与凭据隔离（实证失败）**：`/ocr/jobs/{id}/start`、`/retry` 改为**先校验任务存在（不存在统一 404）再检查 Token**，消除“无 Token 时 400 掩盖 404”；`ApiLifecycleTests.setUp` 显式 patch `api/ocr.get_mineru_token`，两个测试文件可独立跑而不依赖全量测试副作用或 Keychain。
+2. **调度临界区（P0）**：新增 `_schedule_lock` 统一保护“选择候选→领取→从队列移除”与 enqueue/reorder/retry 状态修改；调度器锁外初选、锁内重选并领取，领取前重查队首/停止标志，领取后从等待队列移除（等待序号真实）；`retry_job` 对已排队作业去重。锁序固定 schedule→job/project。回归：阻塞初选后调序 → 领取重查 → fake 执行顺序符合调序；shutdown 到 claim 边界不领取/不运行；并发 retry 只入队一次。
+3. **迁移证据校验（P0）**：`migrate_project` 现在必须同时满足：源文件 hash 与创建时一致；canonical `source_files` 与不可变 raw manifest 一致且 `verify_raw` 无错；存在已完成、无 `page_ranges` 的旧作业且切片按顺序与 `source_files` 页数一一对应。迁移同时修正 page/block 原页索引，修复旧 normalize 每片局部页号重复导致 >200 页书页号重复。回归：401 页旧 normalize 文档迁移为 0..400 唯一且 full；切片数不符/源变不得迁移。
+4. **迁移入口（实际不可用）**：资源详情为未知覆盖资源新增“检查解析范围”按钮，接 `POST /projects/{id}/parse/migrate`，成功刷新后可继续，失败显示真实原因（如源文件已修改/原始证据校验失败）。删除了 `continue` 错误中“重新解析全部页建立可信覆盖”的虚假承诺（当时无对应按钮/API 且未知合并仍保持 unknown）。
+5. **封存 reconcile 事务**：只要 reconcile 改变了切片集合（含“manifest 有记录但目录缺失”）就回写 manifest，修复“全部复用时 verify_raw 永久失败”；保留已记录哈希，不把新算哈希冒充原证据。回归：缺失记录被剔除且 verify_raw 通过；被篡改证书文件仍报哈希变化且记录不变。
+6. **强断言浏览器全流程**：新增 fake 确认完成后真实跑完 create/upload/poll/download/merge；点击校对块后断言目标源页真的落在预览可视区（`data-page-index`）且 `data-current-page≈N`；刷新后资源页显示“全部解析 9 页”；双击继续解析只建 1 个作业；未知资源迁移成功与失败反馈；队列 UI 置顶后 `fake` 实际执行顺序为 A→C→B；窄窗口阅读截图。
+
+### 验证证据
+
+- 全量 `pytest`：**237 passed**；两个测试文件单独跑 `test_parsing_lifecycle.py test_parsing_review_fixes.py` 共 **41 passed**（无 Keychain 依赖）。
+- `tsc --noEmit` 通过；Vite 生产构建通过。
+- 隔离真实浏览器全流程：**29/29 PASS**（含上述强断言）；0 脚本错误；截图 `docs/verification/reading-narrow.png`、`docs/verification/resources-narrow.png`。
+
+### 构建产物（已准备，未安装/未替换运行中的客户端）
+
+- 冻结 sidecar：`.venv/bin/python scripts/build_sidecar.py` → `src-tauri/binaries/literature-sidecar-aarch64-apple-darwin`，revision **`546812b8e04ec5d6d433`**，sha256 **`dd63b2cb37cdc9f39f48117121b079da472b9b164883f385d38449c56e195c88`**，size **47690256**（与 `manifest.json` 一致）。
+- Tauri 产物：`frontend/node_modules/.bin/tauri build --config src-tauri/tauri.ci.conf.json` → `src-tauri/target/release/bundle/macos/Literature.app`（**59.09 MiB**）；`codesign --force --deep --sign -` + `codesign --verify --deep --strict` 通过；包内 `Contents/MacOS/literature-sidecar` sha256 与 manifest 一致。
+- 冻结隔离 API 验收：`tests/manual/frozen_sidecar_check.py` **6/6 PASS**（`/health` revision 与 manifest 一致、能力含 `parse_lifecycle_v1`、`/projects` 可用、冻结进程按证据迁移旧资源为 3/4），用 `MINERU_API_TOKEN` 假值避免 Keychain、不发外部请求。
+- 新增 `src-tauri/tauri.ci.conf.json`（跳过 `pnpm` beforeBuildCommand，供本机无 pnpm 时构建）。**未安装 / 未替换** `launcher/Literature.app`，也未触碰运行中的客户端。
+
+### 尚未验收 / 限制
+
+- 真实 MinerU、真实 provider 译文、原生客户端点击与公证未验收；浏览器外部解析服务仍为 fake。
+- 冻结 sidecar/Tauri 产物仅为源码收口后的构建证据，不等于原生窗口交互与公证完成。
+
+
+## 2026-10-13（第二轮）：Lead 复查缺陷修复 + 全流程真实浏览器验收（Orca Worker 实施）
+
+Lead 独立复查发现上一轮存在严重边界，第一轮不能验收。本轮在同一 A–D 范围内修复 8 类缺陷，并把浏览器验收从“只到入队”扩展为**真实跑完整条流水线**。仍保留全部安全边界：隔离库 + fake MinerU、不读 Keychain、不发外部付费请求、不碰真实 library、不安装、不提交 git。
+
+### 缺陷与修复
+
+1. **源页定位错（P0）**：上一轮把 `page_index` 压缩成 canonical 顺序，导致第 5/7 页被当成第 1/2 页（`ReviewWorkspace` 按 `page.page_index` 建原 PDF metadata、`PdfPane` 覆盖层/跳页按 `block.page_index`）。现改为 **`page_index` 恒等于源文件页号（0-based，稀疏）**，`document.page_count` 为源总页数；`_parse_slice` 与 `merge_imported_project` 不再压缩索引，旧文档按页的 `source_page_index` 还原；`enrich_furniture_evidence` 用切片的 `source_pages` 映射证据页。回归：`make_pdf(9)+[5,7]` 得 `block.page_index=[4,4,6,6]`、`metadata=(4,4)/(6,6)`；补前 4 页后仍为 4/6。
+2. **并发/原子性（P0）**：`continue_parse` 改为项目锁内“检查活动作业 + 创建”，`start/retry/reorder` 改为 job 锁内原子操作；`/start` 只允许 `queued/waiting/interrupted`（不存在 404、运行中/非法 409），`/queue` 只允许等待中任务。回归：Barrier/ThreadPool 并发 continue 得 1 成功 1 冲突；completed 任务 start/reorder 拒绝。
+3. **封存中断不可恢复（P0）**：`seal_raw_mineru` 改为“复制并算哈希 → **先写 manifest** → 再移动目录”的事务；失败重试不重复复制；`_reconcile_raw_slices` 丢掉目录缺失记录、收养孤儿切片；重复 source 去重。回归：注入 `atomic_json` OSError 后重试成功、无阻塞孤儿；重复 source 只封存一次；孤儿被收养。
+4. **旧任务/旧资源迁移（P1）**：`_finish_import` 对旧切片按“无 page_ranges 的连续 start/end”恢复 `source_pages`，`_source_page_count` 从源 PDF 推总页数；新增 `MinerUService.migrate_project` 与 `POST /projects/{id}/parse/migrate`，只在可信历史作业上恢复 coverage 与原页映射；不可信的 `page_ranges` 历史作业保持 unknown，错误文案给出明确下一步。
+5. **document 写锁（P1）**：新增 `ProjectStore.document_lock`，追加合并与 `apply_patch/apply_patch_batch/revert_patch` 共用；合并后回调整理翻译摘要（新页计入总数、老条目保留）。回归：合并与结构补丁并发时两者都保留。
+6. **完整性校验（P1）**：`_parse_slice` 在提供 `source_pages` 时校验结果页数/页码；v2 页数不符、legacy `page_idx` 越界/非法、markdown 多页均报错中止；空白页（v2 空列表）仍计为已覆盖。
+7. **队列/恢复健壮性（P1）**：`resume_all` 跳过无 bridge/无 job.json 的孤儿；`running` 任务的 `queue_position` 置空并单列 `running`；`shutdown` join 调度线程、停止后不再领取新任务；调度器领取前重查停止标志。
+8. **UI 一致性（P1）**：`extractStage` 在续跑/失败时同时显示“本次状态 + 已合并 N/M 页”；提取进行中时“继续解析”禁用并给出原因；首页只展示最近 3 个已结束任务，不无限堆历史。
+
+### 自动测试
+
+- 新增 `tests/test_parsing_review_fixes.py`（17 项）：源页定位契约、并发 continue、start/reorder 状态限制、封存恢复/去重/收养、旧任务推导、迁移可/不可信、document 写锁并发、完整性校验与空白页、resume 跳过孤儿、调序驱动真实执行顺序、队列重启保持。
+- 全量 `pytest`：**230 passed**；`tsc --noEmit` 通过；Vite 生产构建通过。
+
+### 隔离真实浏览器全流程（已完成，15/15 PASS）
+
+`tests/manual/parse_ui_browser_check.py` 使用 `tests/manual/fake_mineru.py`（能真正跑完 create/upload/poll/download/merge 的假客户端）在隔离库上起本地 API + 生产构建前端，用本机 ms-playwright-go 随包 Playwright 真实点击：
+
+- 部分解析 4/9 → 详情“继续解析”弹窗 → 提交 → 等到全文 9/9；
+- 第 5/7 页定位：API 得 `block.page_index=4/6`，校对页 DOM 显示 `p5/p7`；
+- 注入切片失败 → 首页/详情如实显示失败 → 点击“重试失败分段” → 完成全文；
+- 中断任务 → 首页“恢复解析” → 完成；
+- 窄窗口截图 `docs/verification/resources-narrow.png`；浏览器 **0 脚本错误**。
+
+### 修正前轮过强陈述
+
+- 前轮日志说“启动/重试的 400/409 原子守卫”与“全部完成”过强：实际当时只是先检查后操作、无锁；本轮才引入项目/job/document/raw 四类锁与**指令**级事务，且已实测并发冲突。
+- 前轮“页面索引压缩”与项目源 PDF 定位契约冲突，已回退为源页索引。
+
+### 尚未验收
+
+- 真实 MinerU（压缩子集 PDF 远端回传、>200 页真实切分与计费、真实表格/公式）未测；真实 provider 译文、原生客户端点击与公证未验收。
+- 浏览器验收是真实浏览器 + 真实本地 API + fake 解析服务，**不等于**真实 MinerU 端到端。
+
+
+## 2026-10-13：解析任务生命周期、全文覆盖与可调序队列（Orca Worker 实施，已编码/自动测试/tsc/生产构建/隔离真实浏览器点击 8/8）
+
+按 `docs/PARSING_RESOURCE_LIFECYCLE_DESIGN.md` 落地用户需求 1–3 与 Lead 的 A–D。本轮未提交 Git、未调用真实 MinerU/付费模型、未读 Keychain 启动外部服务、未改真实 library、未替换运行中的客户端。
+
+### 三层状态分离
+
+- 任务生命周期：`queued → preparing → uploading → processing → downloading → merging → completed | failed | waiting | interrupted`。新增 `interrupted`：上次进程退出时仍在执行的任务落为可恢复状态，保留切片进度；远端任务可能仍在，恢复时优先沿用已上传切片。
+- 全文覆盖（canonical 已合并源页）：`unparsed | partial | full | unknown`，只统计已成功合并进 `document/document.json` 的源页，不把上传页/远端 done 页算作已覆盖。`project.json.parse_coverage` 与 `document.coverage` 双向一致，`/projects`、`/ocr/jobs` 直接下发。非 PDF / 旧资源为 `unknown`，不误报“全文完成”。
+- 交付完整度（校对/翻译/导出）保持既有 `pipeline` 契约不变。
+
+### 追加解析（不可变分批 raw + 只追加未覆盖源页）
+
+- 新增 `store.append_raw_mineru`：继续 `slice-NNN` 编号、只追加 manifest、旧切片与哈希/只读位不变。
+- 新增 `mineru.merge_imported_project`：只规范化本次新封存目录；新 block 使用独立命名空间 `blk-p{源页:06d}-{页内序号:04d}`，旧 `block_id`/`order`/`structure_revision`/人工校对/译文与锁定/资产引用一律不改；按 `source_page_index` 重排阅读顺序并重算 `page_index`；重叠源页被过滤，绝不覆盖已有页；只有全部成功后才写 `parse_coverage` 与 `state=ready`。
+- `ocr._finish_import` 改为“首次导入 / 继续解析”共用合并路径；旧的 `import_raw_mineru`+全量 `normalize_imported_project` 只保留给手工导入入口（覆盖按 unknown 保守处理）。
+- 修复 `_prepare` 的选页映射缺陷：选页改为在本地生成**只含所选页的压缩子集 PDF**（`split_selected_pages`），`SliceJob.source_pages` 记录真实源页，不再依赖远端 `page_ranges` 的页码语义；超过 `page_limit`/字节上限自动二次切分，支持任意非连续范围与 >200 页剩余，且 `create_batch` 对子集切片不再下发 `page_ranges`。`retry_failed` 重建切片时对非连续范围使用 `_write_pdf_pages`。
+- 新增 `POST /projects/{id}/ocr/continue`：计算未覆盖页，支持“解析全部剩余”或指定范围，返回被过滤的 `skipped_pages`；无剩余页/页数未知时明确拒绝。
+
+### 可调序持久化队列与原子守卫
+
+- 新增 `literature/parse_queue.py`（`ParseQueue` + `select_next_runnable`）：`queue.json` 持久化顺序，支持置顶/上移/下移，重启保留；调度器单文档串行执行，运行任务不可抢占。
+- `MinerUService` 新增调度线程：启动时把活动任务标为 `interrupted`，按队列顺序恢复；无 Token 时不轮询，保存 Token 后 `resume_all` 唤醒。
+- `/ocr/jobs/{id}/start`：任务不存在返回 400 且不污染 running 集合；运行中返回 409。`/ocr/jobs/{id}/retry`：不存在 404、运行中 409，先重置失败切片再入队。`GET /ocr/queue`、`POST /ocr/jobs/{id}/queue` 提供队列视图与调序。`/health` 新增能力 `parse_lifecycle_v1`。
+
+### 自动测试
+
+- 新增 `tests/test_parsing_lifecycle.py`（17 项）：队列调序与持久化、`select_next_runnable`、非连续选页本地子集、>200 页切分、子集切片不下发 page_ranges、首次部分解析→追加到全量时旧 ID/译文锁定/raw 哈希不变、非连续补页按源页排序、重叠过滤、continue 过滤已覆盖页、覆盖未知时拒绝继续、封存幂等与重复合并不重复写入、旧资源无 coverage 保持 unknown、interrupted 恢复、以及隔离 API 的队列/400/404 守卫与 continue 端点。
+- 复跑全量 `pytest`：213 passed；`tsc --noEmit` 通过；Vite 生产构建通过。
+
+### 隔离真实浏览器逐项点击验收（已完成）
+
+- `tests/manual/parse_ui_browser_check.py`：自建隔离 library/runtime/collector + 种子“部分解析 4/9 页”资源与 3 个排队任务 + 后台线程起 FastAPI（假 MinerU 客户端，不读 Keychain、不发任何外部请求）+ 复制生产构建前端并把内联 API 端口改到本次空闲端口；优先用 Playwright（Python 或本机 ms-playwright-go 随包 Node 版）真实点击，缺少时退回 headless Chromium `--dump-dom` 只读断言；`tests/manual/parse_ui_harness.py` 为手动/Cindy 浏览器验收用的常驻服务脚本。
+- 实际结果（模式 playwright-node，8/8 PASS）：资源页显示“部分解析 4/9 页”；点击资源卡片打开详情弹窗并显示“继续解析”；打开继续解析弹窗；提交后创建继续解析任务且 `parse_coverage.covered_pages` 仍为 4（未覆盖已合并页）；首页显示“当前处理任务”与“置顶”；置顶后队列顺序仍包含全部任务。
+- 这些均为“已编码 + 自动测试 + 隔离真实 API + 真实浏览器点击”，**不等于**真实 MinerU/真实模型的端到端验收。
+
+### 尚未验收（必须与“已编码”区分）
+
+- 真实 MinerU（含压缩子集 PDF 的远端页码回传、>200 页真实计费）与真实 provider 译文未验收；本轮全程使用假 MinerU 客户端与隔离库，未读 Keychain、未发外部请求。
+- 原生客户端点击、Developer ID/公证未验收；未重建或替换运行中的客户端与 sidecar。
+- 旧资源（无 `coverage`）按 `unknown` 保守处理，未做自动迁移推断；手工导入入口仍走全量规范化。
+
+
+## 2026-10-12：恢复语义与提交终态修复 + 客户端重建安装（Orca Worker 实施）
+
+用户在 Lead 隔离复现两个 P0/P1 边界后授权：深入测试、修复、重建并安全更新 Literature 客户端。本轮未提交 Git、未动旧 Litera、未改 canonical 稳定 ID 或 raw、未调用真实付费模型/MinerU、未改真实库译文。
+
+### 修复后的恢复语义与提交终态
+
+- **恢复不再漏补初译（Lead 复现 ①）**：原逻辑按 `checkpoint.pass == "polish"` 直接跳过初译阶段，导致 `polish=True` 部分失败（b1 未初译）恢复后 b1 永远 failed。现在按“真正保存下来的有效结果”决定待初译集合：`translate_pending = target 未在 checkpoint.translate_completed` 或“层里并非有效完成（含源变）”；`checkpoint.pass` 只记录阶段，不再作为跳过依据。恢复后先补初译，再对当前可润色范围（`translated/refined` 且未锁定、未 partial、未源变，且不在 `polish_completed`）补润色。
+- **已完成不重复计费**：`polish_target_ids` 每次按当前真实结果重算；已在 `translate_completed`/`polish_completed` 的块不会被重新初译/润色。回归：部分失败恢复只发 2 次请求（b1 初译 + b1 润色），b2 不重复。
+- **提交后以真实保存结果核对终态（Lead 复现 ②）**：新增 `_source_changed_ids`（entry 的 source_hash 与当前 canonical 源不一致，含未完成但只存候选的块），`_task_accounting` 改为接收该集合：源变的旧译不算 completed，归入 failed（原因“原文内容在任务期间已变化，本次结果只保存为候选，需复核”），`source_changed` 作为叠加计数；已保存但未通过完整校验的条目也归 failed，不再静默当作 unhandled。提交守卫创建的新失败条目也带上该 error。最终 `completed/failed/locked/unhandled` 四类互斥且和恒等于 target，job 不再伪报 completed。
+- 快出口（无目标）仍走计数；target 非空但本次无块可处理时不再直接写 completed。
+
+### 故障注入回归（新增 8 项，共 196 项 Python 测试通过）
+
+- 阶段错位恢复：polish 部分失败后恢复补初译再润色，已完成不重复（provider.calls=2）。
+- 源变终态：任务期间改 source_text，job=partial_failed，`source_changed=1`、`completed=0`、`failed=1`、四类之和=target；源稳定后恢复重译成功 → completed。
+- 截断父批 + 截断左子批：不得因标签闭合变成伪完整（b1 failed 且 text 为空）。
+- 15 字段表格首轮漏一格 + 超 12 字段上限：切分重试后 15 格全部保留。
+- 超长单 text 字段被截断：单块失败且不保存半句；恢复后成功。
+- 润色失败恢复：只补润色 1 次请求，不重新初译。
+- 真实 API（TestClient + 隔离库 + 本地 mock provider）：任务先 partial_failed，再 resume 同 job → completed，两条均为 refined。
+
+### 构建与安装（冻结端到端）
+
+- 冻结 sidecar：`src-tauri/binaries/literature-sidecar-aarch64-apple-darwin`，revision `97186a2ca9645671c822`，sha256 `015e5d83c445ec3117ab69ae135886826ad3c185c728f1d2dacc61d2d680695d`，size `47650512`（manifest 与源码指纹一致）。
+- 安装前用冻结后端隔离验证（`tmp/verify_frozen.py` + 本地回环 mock OpenAI 服务 + 临时库与 runtime）：`/health` revision 与 manifest 一致；能力含 `translation_engine_v2/translation_safety_v1/resource_pipeline_v1`；真实 HTTP API 任务 `partial_failed → resume → completed`，counts 正确。
+- Tauri 客户端 `src-tauri/target/release/bundle/macos/Literature.app`（59.06 MiB）内置 sidecar hash 与 manifest 一致；`codesign --verify --deep --strict` 通过。
+- 安装到 `launcher/Literature.app`（`setup_macos_launcher.sh --app-only`）；安装前确认无 `launcher/Literature.app` 进程、真实库无活动任务（`active_total=0`）。安装后 sha256 与签名验证通过；启动后 `/health` revision=`97186a2ca9645671c822`、能力齐全，sidecar 日志显示前端持续调用 `/projects` 等接口（前端连接正常）。
+
+### 尚未验收
+
+- 真实 provider（yellowbee/qwen3.8-flash-next）的译文质量/速度/费用未复测；本轮 mock 只证明协议与状态机。真实库 590 已完成译文保持，未做全书强制重译。
+- 超长单字段的临时子片段预切分（按字段预算提前拆分单个 block/超长 text）未实现：单个 15 字段表格仍会先整块发送，靠失败切分（`_split_units`）补救；已用测试确认不丢字段、不伪完整。
+- 按服务能力配置的思考开关/预算仍未实现（待小样本确认中转是否透传）。
+- 原生窗口逐项点击、Developer ID 签名/公证、干净机器安装未验收。
+
+## 2026-10-12：翻译失败审计与子请求隔离（Orca Worker 实施）
+
+依据 `docs/TRANSLATION_TASK_DIAGNOSIS_2026-10-12.md` 的推荐顺序第 1–2 步实施；保留工作区既有未提交改动，未提交 Git、未打包/安装客户端、未调用真实模型或 MinerU，未修改真实文献库、canonical 或 `ocr/raw/mineru`。
+
+### 已实现（后端）
+
+- 部分完成语义：`_finalize_job` 在仍有失败段落时改为终态 `partial_failed`（progress=1），错误栏写入归类后的失败原因，不再冒充 completed + 空 error。
+- 任务计数（收口后的最终契约）：`_task_accounting` 以 checkpoint 原始 `target_ids` 定义任务目标（去重），初译/润色阶段分开计数，避免“恢复后只剩本次剩余范围”漏计已完成段和“润色把初译+润色 success 相加”重复计同一 block。结果结构与口径：
+  - `counts.target_blocks`：任务目标唯一 block 数（非本次执行剩余范围）。
+  - `counts.translate.{target,completed,failed,locked,unhandled}`：四类互斥且恰好划分 target（completed+failed+locked+unhandled=target），优先级 completed > locked > failed > unhandled；已完成的目标保持 completed，`locked` 只统计尚未完成但因人工锁定而被跳过的目标，不再与 completed 重叠；`translate.source_changed` 是叠加标记（任务期间原文内容变化的块，通常为 completed 子集），不计入划分。
+  - `counts.polish.{target,completed,failed}`：`target` 是允许润色的唯一 block 子集，`completed` 以 status=refined 计；两阶段各自计数，不再相加同一 block。
+  - `failed` 只含“当前仍失败”的块：本轮新失败并集去掉后来重试成功/锁定的块；跨恢复用 checkpoint 的 `translate_failed`/`polish_failed` 累计并在成功/完成时剔除。
+- 持久化兼容：`_save_checkpoint` 改为合并已有 `result` 而不是整体覆盖，避免 checkpoint 写盘丢掉已写入的 `counts`；checkpoint 自身的键仍以本次传入为准。
+- 失败原因持久化：`TranslationEntry` 新增 `error` 字段；`_apply_outcome` 失败分支与 `_mark_failed` 写入具体原因，成功与人工编辑清空。API `translations/{locale}` 载荷直接带出 `error`。
+- 子请求异常隔离：`_translate_units` 的左右子批改走 `_translate_units_isolated`，任一侧 `ProviderError` 只判该子批失败，父请求与兄弟批已解析的字段照常合并保留（复现诊断 3.2 的场景不再丢失已成功结果）。
+- 用量不丢失：`ProviderError` 可携带 `ProviderResponse`；只返回思考内容、子批超时等错误路径仍把已获取的 usage/request_id 登记入账，不再当零消耗。
+- 字段数预算：`_chunks` 除 2400 字符外增加 `DEFAULT_CHUNK_FIELDS = 12`，短段多时不再把 20+ 字段塞进一个请求；失败仍沿 `_split_units` 继续缩批（缩到单字段为止）。
+- 思考截断归因：响应 `finish_reason` 为 length/max_tokens 且 reasoning 占输出 ≥60% 时，失败原因写成“输出预算用在思考过程”，指向换非思考模型/降低思考强度/减小分块。
+
+### 已实现（前端）
+
+- `TranslationEntry.error` 类型；失败列表与当前块失败提示显示真实原因；任务面板识别 `partial_failed`（“部分失败”），恢复/重试按钮覆盖该状态；用量面板显示 reasoning tokens；项目库翻译状态仍由统计推导（`failed>0` → partial）。
+
+### 已验证
+
+- `pytest tests` 共 189 项通过；新增回归：部分失败记录原因并在重试成功后清空、reasoning 预算被吃掉时的可执行原因、父批部分成功+子批超时时保留兄弟/父结果、错误响应携带 usage 仍记账、25 个单字段块按 12 字段上限分成 3 批；另新增计数契约回归：暂停后 `target_blocks` 保持完整 3 段且恢复后 completed=3、润色阶段计数不与初译相加、润色失败只计 `polish.failed` 不误记初译失败、`_save_checkpoint` 不覆盖已有 counts；收口复查补：已完成+人工锁定的重叠边界（四类之和恒等于 target，completed 优先、locked=0）、未完成锁定目标单独归 locked、暂停后已完成目标被锁定再恢复不重复计数。
+- `tsc --noEmit` 通过；`vite build` 通过（Node 22.11.0 低于 Vite 要求的环境警告仍在，产物写入临时目录）。
+
+### 未完成 / 未验收
+
+- 逐请求审计（阶段、耗时、request_id、finish_reason、usage 是否可得的结构化流水）未落库；当前只在 job 级保存失败原因归类与计数。
+- 超长单 text 字段的临时子片段 id 与聚合回填未实现（仍只在字段边界切分）。
+- 按服务能力配置的思考开关/预算未实现：中转是否透传 `enable_thinking` 等参数尚未用小样本确认，未擅自新增会被静默忽略的配置项。
+- 未用真实 provider 重试真实 25 段；未重建/停机更新已安装客户端；3.1/3.2/3.3 的修复尚未进入 `launcher/Literature.app` 的冻结 sidecar。
+
+## 2026-10-12：最近翻译任务错误诊断（未修改业务代码）
+
+- 只读 SQLite、译文层、canonical、客户端日志及已安装 sidecar，定位 `On Being Authentic` 的最新作业 `ec29fb0801544ebd8d1bf4e66ba35a85`（22:48:33–22:51:33，UTC+8）。本次目标 48 段，23 成功、25 失败；真实译文层共 590 translated / 25 failed。任务却保存 completed/100%/空 error。
+- 25 失败段位于第 101–102 页的注释，重建为同批 2302 字符/25 字段。耗时 180.159 秒与 Provider 180 秒响应上限吻合；超时是较高可能性推断，旧版未保存该批错误，不能确认 ReadTimeout、限流或截断。
+- 最近/上次重试/首次未译任务的已记账输出中 reasoning 占比约 88.0%/89.2%/90.1%；未返回或未记账请求的用量不可视为零。当前服务绑定 yellowbee/qwen3.8-flash-next，响应账本模型名为 Qwen，实际后端模型版本未知。
+- 临时目录故障注入复现当前源码缺口：父批 3 段先返回 1 段完整译文、子批 timeout 后 3 段全失败且成功结果未保留；FakeClient 仅思考响应在 usage 返回前被 ProviderError 中断。相关既有 44 项自动测试通过，不能替代这些缺口的修复。
+- 已安装 sidecar SHA-256 `0734660b…` 与 manifest revision `95fe704229347b9c3c75` 一致；只读 PYZ 代码对象确认仍为旧翻译实现。今天源码修复尚未进入安装包。
+- 交付 `docs/TRANSLATION_TASK_DIAGNOSIS_2026-10-12.md`，给出失败审计/部分完成语义、子请求异常隔离、字符+字段组批、思考能力配置、用量保留、停机更新与小样本验收顺序。本轮未修改业务代码、真实文献/译文、安装包，未调用模型或 MinerU；方案尚未实施。
+
+## 2026-10-12：F05 恢复契约（持久化 checkpoint，Orca Worker 实施）
+
+Lead 隔离诊断发现：仅靠恢复时重新按 `scope` 筛选 current entries 不满足目标——`scope=untranslated` 恢复后重新计算为空（零请求却 completed）、`scope=book, force=True` 恢复会把已完成块重新初译（重复付费）。本轮只修此恢复边界，不展开其他模块。
+
+### 恢复契约（实现）
+
+- 启动时把“本次任务实际目标”写进 job `result_json`：`checkpoint_version=1`、`pass`（`translate`/`polish`）、`target_ids`、`translate_completed`、`polish_target_ids`、`polish_completed`。
+- 恢复（existing `job_id` 且带 checkpoint）时**读 checkpoint**，不再 `resolve_scope`/`_eligible_blocks` 重筛：`blocks = target_ids − 已完成 − 已润色`（过滤不可译与已锁定）；`pass=polish` 时跳过初译阶段。
+- `force` 只影响“首次如何解析目标”：目标存进 `target_ids` 后，已完成的块不会再被重译。
+- 润色只针对本次任务自己翻译成功的范围内条目（`polish_target_ids`），不会误润色历史 translated；润色中途暂停按 `polish_completed` 只补剩余。
+- 源变化/锁定仍由提交安全守卫（F01–F02 收口）处理；checkpoint 只决定“处理哪些、跳到哪个 pass”。
+- 无 checkpoint 的旧 job 或新建 job 仍走原有重筛逻辑（向后兼容）。
+
+### 已验证
+
+- Python `177 passed`（+5：`test_resume_keeps_scope_targets_across_ranges`（untranslated/failed/blocks/stale）、`test_resume_force_book_polish_does_not_retranslate`、`test_resume_force_translate_midway_skips_completed`、`test_resume_polish_midway_only_processes_remaining`、`test_api_resume_uses_persisted_checkpoint`（HTTP resume 端到端））。
+- 同步修正上一节 F05 “天然从润色继续”的过强描述。
+
+### 仍未验收
+
+- 真实 provider/MinerU/客户端端到端；checkpoint 只在每次 `_process_blocks` 返回后写盘（暂停/异常路径正确），未做逐块持久化的崩溃级恢复。
+
+## 2026-10-12：第一轮收口（完整性/状态/兼容性，Orca Worker 实施）
+
+在第一轮基础上按 Lead 复查意见收口；同样未提交、未打包/安装、未调用真实服务、未动真实库。
+
+- **P0 源 hash 变化后不可复用旧译文**：新增 `TranslationEntry.partial`；`_reusable_previous(block, entry)` 要求“已校验且 source_hash 等于当前 canonical 摘要”才可复用。`_units_for` 对失败/待重译块一律全字段重发（不再用未校验片段做补缺）；`_apply_outcome` 失败时把本次已解析字段只存为 `candidates`，内容只在可复用时才带过来；`force=True` 全程 `reuse_previous=False`；导出 `_entry_complete` 拒绝 `partial`。回归：`test_source_changed_partial_retry_uses_current_source`、`test_force_partial_retry_ignores_previous_partial`、`test_f02_unverified_partial_is_candidate_not_content`。
+- **P0 提交前复查 canonical 源**：`_commit_translation` 写盘前重新核对当前 canonical 源 hash（`_canonical_digests` 按 document.json mtime+size 失效，避免每块重解析）；不相同时 AI 结果只存候选、条目落为 failed/partial，不把旧源结果写成当前完成。回归：`test_commit_rechecks_canonical_source_hash`。
+- **卡片状态与阅读一致**：新增 `align_structure_only(document, layer)`，`JobManager.refresh_translation_summary` 在结构补丁/撤销后直接写回纯结构对齐（无需再跑翻译作业）；`translate_stage` 改用 `stale_source` 判定 done/partial 并返回 `stale_source`，`ProjectLibrary.translateOf` 同步。回归：`test_structure_only_patch_aligns_card_state`、`test_project_pipeline_summarizes_independent_workflows`（纯层级对齐不产生 stale，正文→列表的 source 变化才 partial）。
+- **兼容性门**：`/health` 新增 `translation_safety_v1`、`export_readiness_v1`，前端 `requiredCapabilities` 同步强制校验，旧 sidecar 会被提示退出重启更新。回归：`test_health_capabilities_include_safety_markers`。
+- **导出策略与状态**：`ExportStrategy` 改为 `keep_source`（缺译标记并保留原文）/ `mark_only`（缺译处仅留标记），命名与行为一致（都是可识别草稿，不会静默回退）；`readiness.ready` 现在还要求 `missing_resources == 0`；ExportPanel 在项目/默认语言变化时重置语言与产物路径，source 模式不再显示“全书未翻译”警告。回归：`test_export_readiness_requires_resources`、`test_f06_mark_only_strategy_omits_untranslated_source`。
+- 上一节 F02 描述中的“失败块只补缺字段”已被本节取代：未通过整块校验的片段一律只存候选。**性能取舍**：为保正确，失败块重试采用整块全字段重发（不再只补缺字段），代价是失败重试可能重复翻译同一块内已成功的字段；后续若要在保证源 hash/校验前提下恢复字段级补缺，需要为每个字段持久化“已验证”依据，本轮不做。
+
+### 已验证
+
+- Python `172 passed`（本轮新增 6 项边界回归，另更新 2 处既有断言）。
+- `tsc --noEmit` 与 Vite 生产构建通过（/private/tmp/literature-safety-build-20261012）。
+
+### 仍未验收
+
+- 真实 provider/MinerU/客户端端到端、原生交互；`instant(save)` 仍只支持纯 text 段落；F07/F11 大范围/F12 未展开。
+
+## 2026-10-12：第一轮翻译与导出闭环加固（Orca Worker 实施）
+
+依据 `docs/PROJECT_REVIEW_2026-10-12.md` 的第一轮范围（F01–F06、F08–F10）实施；保留工作区既有未提交改动，未提交 Git、未打包、未安装/替换正在运行的客户端，未调用真实模型或 MinerU，未触碰用户真实文献库、`ocr/raw/mineru` 或 canonical 稳定 ID。
+
+### 已实现
+
+- **F01 并发写入安全**：`ProjectStore.translation_lock(project_id, locale)` 提供按项目+语言的写锁，翻译作业、人工编辑、解锁、即时翻译保存与术语表冻结/回滚共用。翻译作业不再整层重写：`TranslationService._commit_translation` 每次只重载磁盘最新层、只合并本次触碰的条目；`_merge_entry` 在发现运行期间出现的人工内容（锁定或 `edited`、且内容签名不同于作业基线）时保留人工内容并把模型结果存为 `candidates`，同时保留运行期间追加的 `selection_translations` / `revisions` 与人工冻结的术语表；`TranslationEntry` 新增 `candidates` 字段。
+- **F02 字段级切分合并**：`_translate_units` 现在只返回字段级结果，`_run_chunk` 用“整块预期 segment 集合 ⊆ 已解析集合”做最终完整性判定；递归切分用 `_merge_segment_maps` 按 segment id 深合并，杜绝后到的一半按 block 覆盖前一半。未通过整块校验的局部字段只存 `candidates`，不写入内容、不作为补缺依据（见下一节收口）。
+- **F03 质量门槛**：空 `<seg>`、重复 id、未知 id 均不进入已解析集合；`finish_reason ∈ {length, max_tokens}` 时即使标签闭合也强制切分/重试，切片耗尽仍不完整则只保留候选并记 `failed`，不再判 `translated`。
+- **F04 纯层级变化不重译**：`resolve_scope("stale")` 只返回 source stale 且未锁定的块；`_eligible_blocks` 跳过内容与结构都已对齐的条目；作业开始前 `_align_structure_only_stale` 把仅结构变化的条目对齐到当前 `structure_revision` 且不发请求。`translation_stats` 新增 `stale_source_unlocked`。
+- **F05 润色 checkpoint**：润色阶段的 `stop_reason` 会带回作业总状态，暂停落为 `paused` 且进度保持在中途；`_finalize_job` 用真实停止阶段标注“翻译/润色已暂停”。（早期描述曾说“恢复时天然从润色 pass 继续”，已过强：仅靠重新筛选 current entries 在 `scope=untranslated/force` 下会丢掉原任务范围，现由下面的持久化 checkpoint 取代。）
+- **F06 导出语言与完整性**：`exporters.py` 新增导出视图：绑定真实 `locale`、`_entry_complete` 按整块字段与源 hash 判定完整，缺译处显式输出 `[未完成译文]`（`strategy=draft` 保留原文，`strategy=complete` 只留标记），HTML/EPUB 的 `lang`、导出报告与资源均用真实语言；新增 `GET /projects/{id}/export/readiness` 返回完整/缺译/失败/原文已变/资源缺失；`ExportInput` 新增 `strategy`。
+- **F10 字段级编辑**：`TranslationService.edit` 支持按 `cells` / `items` / `caption` / `footnote` 分别保存（缺省沿用旧值），`TranslationEdit` 同步扩展；整块仍按第一轮约定锁定。
+- **F08 前端状态**：`App.tsx` 改为按“是否有活动翻译作业或最新作业版本变化”增量拉取整层，首次运行即可看到新译文、闲置不再重复拉取；轮询错误与最后同步时间在状态栏可见；项目切换后旧响应不再污染（`activeProjectRef` 守卫）；`ReadingBlockCard` 编辑草稿独立于轮询，新版本到达显示冲突提示。
+- **F09 划选确认**：`ReadingWorkspace` 仅在原文栏同一 block 内划选时浮出“即时翻译”按钮，点击才发请求；划选译文或跨段不弹菜单，翻译过程可关闭。
+- **F10 前端**：表格逐 cell、列表逐 item、图注/脚注分别编辑；保存失败在卡片内可见。`ExportPanel` 接收真实目标语言、展示完整性报告、提供缺译策略选择。
+
+### 已验证
+
+- Python `166 passed`（基线 151 + 新增 15 项边界回归 `tests/test_translation_safety.py`）：直接复现评审六项（人工编辑被覆盖并解除锁定、两 cell 切分丢字段、空 seg 判完成、length+闭合标签判完成、纯层级变化入列、润色暂停误报完成）并断言已修复；另覆盖术语表冻结保留、失败块只补缺字段、导出语言/缺译标记/完整性预检、API 字段级编辑与 readiness、即时翻译保存守卫。
+- `tsc --noEmit` 通过；Vite 生产构建通过，产物写入 `/private/tmp/literature-safety-build-20261012`。
+- 因行为按 F04 变更，更新了两处既有用例的预期：`test_stale_scope_retranslates_and_clears` 与 `test_locked_stale_is_counted_and_excluded_from_stale_scope` 改用“正文→列表”的 source 变化来验证 stale 范围（纯层级变化现在是自动对齐而非重译）。
+
+### 尚未
+
+- 未用真实 provider / MinerU / 客户端做端到端质量、速度与原生交互验收；“自动测试通过”不等于真实质量或速度结论。
+- 报告后续清单（F07 统一导出图题/表注/脚注、DOCX 合并 cell、嵌套目录与稳定锚点/EPUBCheck；F11 校对完成语义与多语言摘要；F12 项目索引/分页/虚拟化；回收站、译文历史恢复、搜索筛选、raw 重建 ID 映射、导出预览/历史、初始化向导、目标预设、全局 provider 调度/RPM/TPM/费用预留/token 分块/真实客户端验收）未实施。
+- 已知待改进（本轮审查发现，未纳入第一轮）：结构校对完成后项目卡片的 `translate.state` 仍以合并 `stale` 判定，纯层级变化的卡片可能停在 `partial`（后续应改用 `stale_source` 或把对齐并入摘要刷新）；人工编辑整块锁定尚未按字段演进；即时翻译的 `save` 仅支持纯 text 段落。
+
+## 2026-10-12：全项目产品与工程评审（未修改业务代码）
+
+- 交付 `docs/PROJECT_REVIEW_2026-10-12.md`，覆盖四个用户目标、12 项主要发现、全流程功能补齐、用户介入点、三轮建议及验收指标；对照当前计划、日志、文件资源原型/设计和结构校对设计。
+- 当前工作区 Python `151 passed`、TypeScript `--noEmit` 通过；Vite 构建到 `/private/tmp/literature-review-build-20261012` 成功。最初终端无 node，改用现有 `.tools/node/bin/node`；其 22.11.0 版本被 Vite 提示低于支持版本，主 JS 包亦有体积警告。
+- 临时目录边界诊断复现六项：任务保存覆盖运行中人工编辑并解除锁定；表格字段切分重试后先成功的 cell 丢失；闭合标签伴随 length 仍判 completed；空 seg 条目仍 translated；纯层级变化仍成为翻译候选；润色开始时暂停最终误报 completed/100%。闭合标签诊断仅证明截断信号被忽略，不宣称该模拟文本存在实际语义截断。
+- 其余静态发现包括导出语言固定 zh-CN、缺译回退原文未提示、图表注释/目录锚点等导出契约缺口、前端全量刷新与编辑草稿覆盖、划选即自动请求、结构化字段人工编辑不匹配、阶段完成语义与大库扫描风险。具体位置和验收建议见报告。
+- 评审这一轮只新增评审文档和状态记录，未实施这些修复（第一轮修复见上一节）；保留用户既有未提交改动。未操作真实文献库、未调用外部模型/MinerU、未安装客户端或进行原生点击验收；自动测试通过不能替代真实质量和速度结论。
+
+## 2026-10-11：文件资源管理模块打通（按已确认设计稿改造前端 + 后端补齐阶段摘要）
+
+### 已实现（依据 `docs/FILE_RESOURCES_DESIGN.md` 与原型 `docs/prototypes/file-resources-v4.html`）
+
+- 产品模型：提取是唯一前置门槛；提取完成后「结构校对 / 翻译 / 导出」三条工作流相互独立。卡片用四个并列阶段格表达，不做线性流水线。
+- 后端 `literature/storage.py`：新增 `structure_review_summary(project_id)`，由 `structure_suggestions` 待确认数与已处理/补丁历史推导 `review.state ∈ todo|confirm|done` 与 `pending`；`_describe_project` 的 `export_count` 现在把导出目录（html、md+json）计为 1 个产物，不再只数文件。
+- 后端 `literature/api.py`：新增 `translate_stage()` 与 `project_pipeline()`，`GET /projects`、`GET /projects/{id}` 返回 `review` 与 `pipeline`（`review` / `translate` / `export`）。`translate.state` 由译文摘要 + 该项目翻译 job 运行态推导（running 优先，其次 done/failed/partial/none），**不把项目归纳成单一 state**。`/health` 新增能力 `resource_pipeline_v1`，前端 `api.ts` 同步强制校验，避免旧后端被静默复用。
+- 翻译摘要刷新：`JobManager.refresh_translation_summary()` 在结构建议采用/忽略、批量决策、结构补丁新增与撤销、本地校准、结构 AI 作业结束后调用，使「先翻译后校对」产生的 stale 能立即回到项目列表；`translation_stats()` 增加 `glossary_frozen`。
+- 前端：`ProjectLibrary.tsx` 按原型重写（网格卡片 + 四格阶段栏 + 概览六维筛选 + 表格化列表就地展开 + 居中详情弹窗 + 翻译范围弹窗 + 卡片 ••• 菜单），新增 `resource.css`（设计 token 与组件样式），移除 `mineru.css` 中旧的资源库规则；`types.ts` 增加 `ProjectPipeline`/`ProjectReviewSummary`/`ProjectTranslateSummary`。翻译范围按状态动态出现：全书 / 仅未翻译 / 仅待复核（stale）/ 仅重试失败 / 选定章节。
+- 接线 `App.tsx`：新增 `openProjectView(view, id)` 与 `translateProject(id, {scope, locale})`（可就地入队，不依赖当前已打开任务）；文件资源页进入即刷新并按 3 秒轮询（不再因存在「最近项目」而停止轮询）；详情动作分别进入 校对/阅读与翻译/导出，失败分段走既有 `POST /ocr/jobs/{id}/retry`。
+
+### 已验证
+
+- Python `151 passed`；新增 `test_project_pipeline_summarizes_independent_workflows`（校对 todo→confirm→done、`glossary_frozen`、结构补丁后 stale 刷新、导出计数）。
+- `tsc --noEmit` 与 Vite 生产构建通过。
+- 真实本地 API + 隔离种子库 + 浏览器（外置自动化浏览器，非模拟）逐项点击：卡片四格阶段、概览筛选计数、详情弹窗四条工作流行与进度条、列表就地展开、翻译弹窗的目标语言/动态范围（含「仅待复核段落」）、「查看记录」跳转结构校对工作区，均按设计渲染；控制台 0 报错。
+- stale 传播端到端：对已完成翻译的项目施加结构补丁后，`GET /projects` 立即返回 `translate.stale=1`、`state=partial`，列表页在 3 秒轮询内把该行更新为「部分 3/3 · 翻译中」，翻译弹窗出现「仅待复核段落」。
+- 冻结 sidecar：`src-tauri/binaries/manifest.json` revision `95fe704229347b9c3c75`，与源码 `/health` 指纹一致；sidecar sha256 `0734660b757660ea32be7dd14e6cb845febe0396441077b9907ace90805642a3`。重建 Tauri 包（59.04 MiB）并 `codesign --verify --deep --strict` 通过。
+
+### 尚未验收 / 阻塞
+
+- 已安装的 `launcher/Literature.app` 仍在运行，安装脚本按既有安全约定拒绝在运行中替换程序包；新版客户端尚未装到 `launcher/Literature.app`，需要用户完全退出 Literature 后执行安装并启动验证。
+- 未做原生窗口（Tauri）逐项点击验收；未调用真实翻译 provider；翻译弹窗的「术语表」下拉目前仅回显冻结状态（实际术语表由既有译文层快照在后端生效），未做术语表选择/草稿入口。
+- 未在真实大库上评估 `/projects` 每 3 秒聚合（逐项目读 `structure_suggestions`、`jobs`）的开销。
+
+## 2026-10-11：翻译引擎 v2（对齐 TranslateBooksWithLLMs 思路，修复慢与质量差）
+
+### 触发问题（实测复现）
+
+- 用户实测项目 “Making Transcendents” 的翻译角色绑定 `yellowbee / qwen3.8-flash-next`（temperature 0.7）。`blk-00000040`（1032 字符）的译文在 700 字处断在 “...including the American” 半句上，却被记为 `translated` 正常落盘。
+- 旧实现的根因：① 12000 字符/块 + 整块严格 JSON 校验，模型漏一个 block_id 或一个 cell_id 就整批 `ProviderError`，没有部分成功；② 无 `finish_reason` 截断检测；③ prompt 只有“不得增删 block”，没有翻译原则、专名处理、上下文衔接；④ 串行请求且每次 `httpx.post` 新建连接；⑤ 术语表整表进每块 system prompt。
+
+### 已实现（后端 `literature/translation.py`、`literature/providers.py`、`literature/api.py`）
+
+- 分块：按字符预算 2400（`DEFAULT_CHUNK_CHARS`）切块，block 之间不拆分；每块附带前文（≤700 字，取尾部）与后文（≤500 字，取头部）；顺序模式（workers=1）额外把上一块末段译文尾部（≤400 字）作为衔接上下文。
+- 输出协议：从“整块 JSON”改为 `<src id="block#field">` / `<seg id="block#field">` 段落标签协议，字段级拆分为 `text`、`item:N`、`caption:N`、`footnote:N`、`cell:<id>`。解析用正则宽松提取，支持代码围栏与前后杂讯；缺哪段只重试/失败哪段。
+- 失败处理：缺段或 `finish_reason ∈ {length,max_tokens}` 时按 segment 中点切分重试（`MAX_SPLIT_DEPTH=3`）；整份响应无 `<seg>` 且未截断（模型不守协议）立即判失败，避免指数级请求；连续 3 个分块彻底失败且零成功时熔断停止后续请求（`GLOBAL_FAILURE_LIMIT`）。部分成功仍落库，仅失败块进入 `failed` 供重试。
+- 并发与连接：`ThreadPoolExecutor` 滑动窗口并发（默认 4，可调 1–8），主线程独占落库与 usage 记录，工作线程只做 HTTP+解析；`OpenAICompatibleProvider` 惰性复用单个 `httpx.Client`（keep-alive），对 429/5xx 做指数退避（尊重 `Retry-After`），超时不自动重发以免重复计费。
+- 质量：system prompt 重写为学术翻译原则（完整性优先、准确性、自然表达、术语一致、专名一律中译并首次附原文、公式/代码/URL 保留、id 结构约束），润色 pass 用“文学编辑”prompt。术语表按块过滤（`GLOSSARY_MAX_ENTRIES=80`）注入 user prompt。输出做 CJK 后处理（去协议标签/围栏、修中日韩标点周围空格）。
+- 两遍制：新增 `polish` 选项，翻译完成后对本次成功块自动跑一遍润色（进度 0–0.5 / 0.5–1）。
+- 写盘：小块并发下按“5 块或 3 秒”节流整层写盘，避免 O(n²)。
+- 接口：`TranslationJobInput` 新增 `polish: bool=False`、`parallel_workers: int=4(1–8)`；`/health` 能力新增 `translation_engine_v2`（前端 `api.ts` 同步强制校验）。`MockProvider` 改写为按 `<src>` 回吐 `<seg>`，即时翻译与连通性探测仍走纯文本分支。
+- 前端：范围弹窗新增“并发请求数”（1–8）、“翻译后自动润色”与“强制重译已有译文”（忽略已译状态重跑，锁定段除外；换模型/换引擎后整本重跑用）。
+- 保留不变：对照翻译、编辑锁定、单块翻译/重译/润色、stale 语义、范围选择、术语表版本、usage 账本。
+
+### 已验证
+
+- Python 全套 `150 passed`。新增 6 项：部分分块失败只标记缺段块、未闭合截断输出不落库、术语表按块过滤、并发 4 路全部译完、`polish` 后条目为 `refined`、CJK 后处理。另因 provider 改用 `httpx.Client`，把 3 项结构校验收据从 patch `httpx.post` 改为 `httpx.Client.post`（超时仍按 `connect=20/write=60/read=配置值` 断言）。
+- `tsc --noEmit` 与 Vite 生产构建通过（`index-D-CgjgVH.js`）。
+- 真实本地 API 进程 + 本地 mock OpenAI 兼容模型：41 块 / 2 分块，4 路并发 `completed`、41/41 完成、usage 与估算费用落账；随后把模型切成“不遵守协议”，作业 `failed`，全程只有 2 次模型请求（无指数重试）。
+- 冻结 sidecar（非源码）隔离验证：`/health` revision `28201d29c74fe4916f8e` 与 `src-tauri/binaries/manifest.json` 一致，能力含 `translation_engine_v2`。
+- 已安装到 `launcher/Literature.app` 并启动验证：`/health` revision `28201d29c74fe4916f8e`、能力含 `translation_engine_v2`，日志显示前端成功调用 `/translations/...`（能力门通过）。
+- 重建 `src-tauri/target/release/bundle/macos/Literature.app`（59.02 MiB），包内 sidecar sha256 `83b01f9121afe190466f7cd042d750ebbea02f6d5dc2ee93665b2098e807f3a0` 与 manifest 一致，`codesign --verify --deep --strict` 通过。
+
+### 尚未验收
+
+- 未用真实 provider（`yellowbee / qwen3.8-flash-next`）跑整本书；真实译文质量、速度提升幅度与并发下的限流/费用仍未验收（本地 mock 只证明链路与并发，不证明模型质量）。
+- 未做原生窗口逐项点击验收（范围弹窗的并发数/自动润色/强制重译、失败块重试、对照编辑）。
+- `polish` 两遍制会使费用与耗时约翻倍，默认关闭；是否默认开启待真实费用数据。
+- 旧项目已存的截断译文不会自动重译（source_hash 未变）；用户需用“强制重译已有译文”或单块“重译”重新生成。
+
+## 2026-10-11：文件资源管理模块设计定稿（原型，未实现）
+
+### 已确认（产品 + 前端设计）
+
+- 提取（MinerU）是唯一前置门槛；提取完成后「结构校对 / 翻译 / 导出」三条工作流**相互独立**，可任意顺序与组合（可不校对直接导出、只校对不翻译、先翻译后校对）。先翻译后校对时结构改动同步到译文，`locked` 人工译文保留只提示复核。卡片不使用线性流水线。
+- 卡片：类型色实底 + 白字的文件图标；四格独立阶段栏（提取/结构校对/翻译/导出）带独立底色；右上状态胶囊不显示「待确认」数量；**去掉底部进度条**。
+- 网格视图点击卡片 → 居中详情弹窗（避免展开导致位置跳动）；列表视图 → 表格化栅格 + 行下通栏就地展开。
+- 翻译必须在弹窗中**每次手动选范围**（全书 / 仅未翻译 / 仅待复核 / 仅重试失败 / 选定章节）。
+- 概览统计按独立维度筛选（解析中/待校对/翻译中/有失败/已导出）。
+
+### 交付物
+
+- 交互原型：`docs/prototypes/file-resources-v4.html`（模拟数据、可点击）。
+- 落地依据：`docs/FILE_RESOURCES_DESIGN.md`（含设计 token、组件规范、与现有代码映射、后端数据契约、实施 checklist）。
+- OpenDesign 稿件：`opendesign-projects/2542d83c-2b70-43a2-ad66-e09274e12513/design.html`。
+
+### 尚未实现
+
+- 本轮**未改动任何业务代码**；前端 `ProjectLibrary.tsx`/`styles.css` 与后端 `/projects` 校对摘要均未改造。
+- 后端已有可复用能力：`translations/<locale>/summary.json` 翻译摘要（`translation_stats`）、`resolve_scope` 的 `stale` 范围、结构补丁与建议决策接口；仅缺 `/projects` 的校对待确认数聚合。
+
+## 2026-10-07：翻译模块前后端打通与客户端重打包（stale 语义、并发保护）
+
+### 根因
+
+- 已安装 `launcher/Literature.app` 内置后端 revision 仍是 `7557bb0a476f8584a731`（2026-10-04），早于 2026-10-06 的翻译模块；前端 `api.ts` 强制要求 `translation_module_v1`，因此打开「阅读与翻译」会直接报“前后端版本不一致（缺少能力：translation_module_v1）”。前端代码是新的、内置后端是旧的，即“前后端没打通”的实际原因。
+
+### 已实现
+
+- `entry_stale_reason` 区分译文落后的原因：`source`=原文内容已变（待复核、可重译）；`structure`=仅层级/标题类型调整（译文自动对齐、无需重译）。`entry_is_stale` 改为基于该判定。
+- `translation_payload` 每个条目新增 `stale_reason`；`translation_stats` 新增 `stale_source`、`stale_structure`、`stale_locked`，并让 `stale` 覆盖全部待复核块（含已锁定），与 `stale_block_ids` 一致，修复锁定块被结构改动却不计数的漏报。
+- `resolve_scope("stale")` 排除已锁定块（锁定条目不会被自动重译，需先解锁）。前端范围弹窗补上此前缺失的“仅待复核段落”入口，计数排除锁定块。
+- 前端状态 chip 拆分为“待复核/已对齐”；块卡片按 `stale_reason` 显示不同提示与“重译本段”，锁定块也显示 stale 提示。
+- `JobManager.start_translation` 增加单项目并发保护：已有 queued/running 翻译作业时拒绝新作业（返回 400），重复 resume 也拒绝，避免重复计费与并发读写互相覆盖译文条目。
+- `App.translate` 失败改为 toast 提示，不再静默。
+
+### 已验证
+
+- Python 全套 `144 passed`（新增 3 项：stale 原因区分、锁定 stale 计数与范围排除、并发拒绝），`tsc --noEmit` 与 Vite 生产构建通过。
+- 真实本地 API 进程 + 本机 mock OpenAI 兼容模型：全书翻译、预估、术语表冻结/版本、失败→resume 恢复、stale 范围、并发拒绝均按预期。
+- 冻结 sidecar（非源码）隔离验证：`/health` revision `124e1fe574069b18c210` 与 manifest 一致、能力含 `translation_module_v1`，全书翻译作业完成、译文正确落盘。
+- 重建并安装 `launcher/Literature.app`（59.01 MiB）；包内 `literature-sidecar` sha256 `f15debdc66cd12a2dfaba9a5f1a43ece0a52ff591c88f826232b496473e94f0e` 与 `src-tauri/binaries/manifest.json` 一致，`codesign --verify --deep --strict` 通过。启动客户端后前端成功调用 `/translations/...` 接口，说明能力校验已通过。
+
+### 尚未验收
+
+- 未调用真实翻译模型；真实 provider 的分块、费用与译文质量仍未验收。
+- 未做原生窗口逐项点击验收（范围切换、目标语言、锁定块待复核提示、术语表回滚）。
+- 并发/速率限制、任务花费硬预检仍未实现。
+
+## 2026-10-06：翻译模块 M3 可用版（范围/状态机/stale 传播/术语表版本/预估）
+
+### 已实现（后端）
+
+- 数据模型：`Block` 与 `TranslationEntry` 新增 `structure_revision`（int，旧数据默认 0），`SCHEMA_VERSION` 升至 1.2。结构补丁 `_prepare_patch` 与 `revert_patch` 改到哪个块就给该块 +1。
+- 段落级状态机与统计：`translation.py` 新增 `entry_is_stale` / `entry_state` / `translation_stats` / `resolve_scope` / `translation_payload` / `estimate_translation`。stale 判定 = 结构版本不一致（结构性改到该块）或 source_hash 与当前源文不一致；locked 条目保持“已锁定”但计入 `stale_block_ids` 供复核提示。
+- 范围语义：`TranslationJobInput.scope` 支持 `auto|book|untranslated|stale|failed|blocks`；`auto` 保持旧行为（有 block_ids 即选段，否则全书）。stale 范围会绕过“已被翻译即跳过”的逻辑，强制重译被结构改动影响的块。
+- `GET /projects/{id}/translations/{locale}` 现返回每个条目的 `state`/`stale`、`stats` 与 `stale_block_ids`；`POST /projects/{id}/translation/estimate` 在不发请求前给出块数/字符数/token/费用预估。
+- 术语表版本：`translations/{locale}/glossary_versions.json` 追加不可变版本；`GET .../glossary/versions`、`POST .../glossary/rollback`（回滚也记为新版本）。
+- 项目列表：`_describe_project` 附带 `translation` 摘要（读取 `translations/{locale}/summary.json`），作业完成、编辑、解锁与译文层读取时刷新摘要。
+
+### 已实现（前端）
+
+- `ReadingWorkspace`：目标语言选择（zh-CN/zh-TW/en/ja/fr/de，localStorage 记忆）、范围选择器（未译/待复核/失败/全书/选段，带计数）、进度与统计条、预估按钮与预估结果、单块操作。保留原三栏布局，范围不弹窗。
+- `TranslationBlock`：状态 chip（未译/已译/已润色/已编辑/已锁定/失败/待复核）、双击或按钮编辑、保存自动锁定、解锁、单块翻译/重译/润色、stale 与锁定提示。
+- `GlossaryEditor`：版本历史与回滚。`ProjectLibrary` 卡片显示翻译进度摘要。
+- `api.ts` 增加 `translation_module_v1` 能力校验；`types.ts` 补齐 TranslationStats/GlossaryVersion/TranslationEstimate。
+
+### 已验证
+
+- Python 全套 `141 passed`（新增 `tests/test_translation_module.py` 9 项）：统计与 payload、结构补丁只标记目标块 stale、locked 仍 stale 标记、stale 范围重译并清除、范围解析（book/auto/untranslated/blocks/failed/非法值）、失败范围重试恢复、预估（有/无单价、完成后为 0）、术语表冻结/版本/回滚经 API、译文层 stats 与 estimate 端点。
+- TypeScript `--noEmit` 与 Vite 生产构建通过（Node v22.11.0，仅 chunk 体积既有警告）。
+- 真实 `python -m literature.api` 本地进程 + 隔离资源库冒烟：`/health` 含 `translation_module_v1`；导入离线 MinerU 夹具后 `/translations/zh-CN` 返回 stats、`/translation/estimate` 返回预估、术语表冻结/版本、`/projects` 返回 translation 摘要均 200 且内容正确。
+
+### 尚未验收
+
+- 未调用真实翻译模型；真实 provider 的分块、费用与译文质量仍未验收。
+- 未做浏览器内点击验收（范围切换、目标语言、单块操作、术语表回滚、stale 提示），未重打包/重装 `launcher/Literature.app`，原生窗口仍未验收。
+- 并发/速率限制、任务花费预检与真实费用对账仍未实现。
+
+## 2026-10-04：结构规划响应超时与失败重试恢复
+
+### 任务事实
+
+- 只读检查 Journal 作业 `f309c6d2f67c4461a92a703812c38964`：231 个候选，使用 14 条确认目录，关闭视觉与自动采用；第一整体规划请求为 160 个候选+48 个 overview、44,749 字节 user 输入。16:32:53 UTC 请求开始，16:35:53 失败。栈位于 httpcore `_receive_response_headers`，明确为 ReadTimeout；无法从本机断言服务端排队/推理状态。没有模型响应或本轮结构补丁。
+
+### 已实现
+
+- 规划窗口 160→64，所有候选仍逐窗口覆盖，保持目录/profile、48 条整体 overview、边界上下文、当前祖先与最近 24 结果；跨窗口上下文补足原标题文字而不重复长理由。模型每条依据要求简短，界面逐规划窗口显示候选数/进度。
+- 结构专用 provider 副本默认响应等待 600 秒，可在校对选项调整 30–1800；翻译 provider 默认仍为原 180 秒。httpx 连接/发送/池等待上限 20/60/30 秒（短响应配置取较小值）。分类报连接/响应/发送/池超时，结构错误补阶段；不因网络失败自动重试或拆批。
+- 审计保存请求起止时间、elapsed_seconds、错误类型/等待上限、响应元数据及输入摘要键。用户再次运行失败任务传入 reuse_job_id；同项目 failed 任务才可作为复用来源。文档版本+模型配置摘要匹配后，再按阶段/system/user/图片摘要精确匹配。仅契约可解析的 responded/reused 响应可复用；旧审计缺字段、模型/文档/输入变化或坏 JSON 不复用。复用结果重新进入当前解析与父子校验，来源可追溯，不重复写 usage，可跨连续失败保留已完成请求。
+
+### 验证与交付
+
+- 全套 `132 passed`（新增 7 项），TypeScript 与 Vite 生产构建、diff 检查通过。新增回归验证响应/连接超时分离、无自动重发、64 条窗口覆盖/边界祖先文字与进度、连续失败恢复/用量去重、模型/文档/输入改变拒绝复用、坏响应不复用、API 等待范围及已完成任务拒绝复用。
+- 实际新版冻结后端+生产 Chrome，在隔离库/运行配置、假 Key、127.0.0.1 模型桩上：目录与规划完成后模拟复核 HTTP 503；浏览器再点 AI 校准，POST 携带失败作业 ID 和 600 秒配置，复用 2 个响应，只重新调用复核。模型桩调用为目录 1/规划 1/复核 2（第一次失败），用量仅 3 条成功请求；角色/父子关系 4/4，3 个 pending、raw 哈希有效、0 脚本错误。报告 `/private/tmp/model-timeout-qa/report.json`，截图同目录 `ui.png`。此联调验证恢复路径；ReadTimeout 本身由注入异常回归验证，没有等待真实 600 秒。
+- 已重建 sidecar、Tauri 包；检查原库无 queued/running 后正常退出、安装并重开客户端，严格签名通过。revision `7557bb0a476f8584a731`，sidecar SHA `580dfef1a5765d1d438ea6faaf961af5ac30b5c1e7a2fa43f77634956825fda9`，47604144 bytes。
+- 本轮未发真实模型/MinerU 请求，原文献、旧失败作业与证据保持；未重复原生点击校准。窗口缩小增加请求数/重复上下文，长等待不能保证远端网关或服务不会超时；真实延迟、费用、效果仍待用户重试验收。原本超时请求的远端处理/费用未知。
+
+## 2026-10-04：运行中安装替换导致 PyInstaller 解压失败
+
+- 用户报告 `Error -3 while decompressing data: incorrect header check`。只读侧车日志定位到 Journal 作业 `0168700080b141e29a7d7bfec5058c14` 的 `plan_structure_analysis → visual_evidence → import fitz → pyimod01_archive.extract`，在本地规划阶段、任何模型请求之前失败。数据库保留该 failed 状态。
+- 原客户端 PID 26831 / 后端 26845 启动于 10 月 3 日 22:57，安装包侧车修改于 10 月 4 日 00:06，报错任务于 00:26 启动。PyInstaller 本地加载器源码确认每次导入重开启动路径读取 PYZ，仍用启动时的 TOC/偏移；运行中替换归档导致新旧不一致。已安装侧车 SHA 与 manifest 完全一致，新进程可正常导入，排除当前包损坏。
+- `setup_macos_launcher.sh` 增加两次目标进程检查（复制前/替换前）；检查失败或客户端/侧车仍在运行则退出且不替换。真实运行中验证退出码 2 与清晰错误；正常退出客户端后安装成功、严格签名校验通过，再打开客户端，确认新 PID 30547 / 后端 30570 及文献 API 读取成功。关闭前只读检查库内无 queued/running 项目作业。
+- 使用已安装冻结侧车、隔离 runtime/library、合成两页 PDF 和假 MinerU 凭据，仅通过 loopback API 执行导入及 `/structure/plan` 的视觉路径：2 个 PNG（目录整页+标题裁片）、raw 校验通过，revision `0a907b0dbf2a480470b9`。报告 `/private/tmp/literature-visual-package-nslf54_7/report.json`；没有模型/MinerU 网络请求，未自动重试原文献 AI 任务。
+- shell 语法检查与 diff 检查通过；本轮只改安装脚本与文档，未改后端/前端业务，也未重跑无关 Python 全套测试。实际 Journal 的真实模型复跑仍由用户重试验证。
+
+## 2026-10-04：修订历史区分人工调整与采用 AI
+
+- 修复显示统一为“人工确认”和建议采用接口错误保存 `source=user` 的两个问题。历史现在区分“人工调整”“采用 AI”“自动采用”，已撤销记录仍保留原来源。
+- 单项/批量采用持久化建议保存 `source=ai, automatic=false`；直接编辑默认 user。兼容无 suggestion_id 的前端采用分支显式传递 ai 来源，批量成功提示改为“已采用…项结构建议”。
+- 扩展现有 API 回归，验证单项建议采用、批量采用、直接手动编辑、历史读取及两个兼容入口的来源和 automatic 字段；手动批量回归也验证 user 来源。全套 `125 passed`，TypeScript、Vite 生产构建和 diff 空白检查通过。
+- 已重建 PyInstaller sidecar、Tauri `.app` 并安装到 `launcher/Literature.app`；严格签名校验通过，revision `0a907b0dbf2a480470b9`，sidecar SHA `a7eaa01b0301513ffc2665c69c6856cf14d76f9539b320c14de41c109e80534d`、47599376 bytes。
+- 本轮未调用模型/MinerU，未重复原生窗口点击验收。旧版已采用但保存为 user 的补丁缺少可靠关联，不能准确反推来源，因此未猜测回填或修改原项目记录。
+
+## 2026-10-03（本轮最新）：Journal 复盘与 AI 整体标题树推理
+
+### 已查明的任务事实
+
+- 只读检查项目 `31f1beb79c884e618334463cdbfbd6dc`、已完成作业 `e6a172aba0cd45869ab7a6f7159961e7` 的 config/result/activity/请求审计与确认基准。147/147 是逐角色有效回答数；回答为 caption 70、h2 66、h1 7、body 3、h3 1。模型理由多次明确说“子标题/小节，保留 h2”，证明角色识别和层级恢复被混为一谈。
+- 本地目录产生 14 条均为 heuristic H2，且作者姓名串入下一条文章标题，随后被用户保存为确认基准。4 个固定 40 条批次未携带完整父子/篇章上下文，前批降文章为 H2，后批保留文章为 H1；自报置信度合并不能解决全局一致性。
+- 原项目、原 PDF、raw、确认基准、旧作业与人工决策均未修改。详见 `JOURNAL_STRUCTURE_REVIEW.md`。
+
+### 已实现
+
+- 新增 `structure_reasoning.py`：模型先判断文献类型、目录收录范围和根层级约定，按阅读顺序给出 role + parent_id 的整体标题树。每窗口最多 160 个短候选，48 条均匀抽样只作 overview；所有候选逐窗口覆盖，携带边界上下文、之前规划的当前祖先链与最近 24 条结果，目录和约定贯穿全任务。
+- AI 主流程总是核对源目录页，本地目录只作草稿；作者与印刷页码独立字段。免费本地读取/校准入口保持。现有标题不因本地精确匹配而被跳过；增加无编号紧凑短段召回。长正文和图片/表格/代码不作为文字候选；竖向窄页边仍排除。
+- `hierarchy-v2` 逐项角色复核携带全局规划、本批祖先和邻近标题；允许 uncertain，不强制维持无目录时的原层级。文档文本只视为内容。AI 模式不预先应用弱规则结论，也不再按本地高 confidence 抢占模型结论；所有模型修改待人工确认。
+- 形式校验检查最终 level 栈生成的树是否与 parent_id 一致，包括同级父子、指向未来、跨新篇章与无效祖先；不通过的标题调整不进入建议，角色回答覆盖率与关系检查分别报告。兼容旧 suggestions 响应的标题修改必须有有效关系才可在新版作业中提出，旧同步 `/structure/analyze-ai` 接口也统一走整体推理/审计/持久化管线，不再绕过关系检查或自动应用边界。
+- 包内联调发现建议父标题信息在原有存储固定字段中丢失；新增幂等 metadata_json 迁移、读写及旧决策保持测试，所属标题在重开后仍可见。
+- 前端显示目录范围、根级约定、角色回答数、父子检查数和建议所属标题；说明回答完整不等于层级准确。实际审计保存每个阶段的输入、响应、usage，网络失败不通过拆批放大。
+
+### 已验证与交付
+
+- `125 passed`（原 111 + 新 14）；TypeScript `--noEmit` 通过；Node v24.21.0 Vite 生产构建通过（既有 bundle 大小提示）。新测试覆盖四级无编号标题树、同级父子与无效后代、跨篇挂接、缺失关系、规划和最终角色冲突、350 候选全窗口覆盖、跨批祖先、重复/uncertain/NaN、网络不重试、已确认匹配也复核、无编号候选与长正文隔离，以及作业入库/人工采用/撤销后文字/稳定 ID/顺序/raw 保持。
+- 以上使用离线桩模型，证明调用契约、形式校验与存储闭环，不证明真实模型准确率。
+- 已重建 PyInstaller sidecar、Tauri 发布包并安装到 `launcher/Literature.app`（58.99 MiB）；`codesign --verify --deep --strict` 与实际包内 sidecar 的 SHA/大小匹配通过。revision `66851b90aca4cd887701`，SHA `deba7d6b1768aefd0b0e093aa1b3621d625cdaf9af76aeaf841151bf1daaa0e2`，47598368 bytes。
+- 实际包内冻结后端连接仅监听 127.0.0.1 的离线桩模型，隔离 library/runtime、假模型/MinerU 凭据：目录核对→整体规划→逐项复核三个阶段真实 HTTP 跑通；4/4 角色、4/4 父子关系、3 条 pending、自动采用开启仍不应用模型修改、raw 哈希有效。原 Journal 源 PDF SHA 与封存 raw 清单只读校验通过。
+- Chrome headless 加载生产前端，连接上述实际冻结 API：角色计数、关系计数、目录范围、建议所属标题均可见，0 页面脚本错误；截图 `structure-hierarchy-v2-qa.png`，报告 `/private/tmp/mmj-hierarchy-qa/report.json`。原生 Tauri 窗口本轮没有逐项点击验收。
+- 逐批输入去掉重复本地建议和标题全文，只保留相关目录锚点及祖先；尚未以真实 token 衡量节省。
+
+### 真实服务与边界
+
+- 新版未调用真实模型或 MinerU。已准备 `/private/tmp/mmj-hierarchy-v2-start-input.json`（Journal 第 4 页目录、231 个短候选及元数据，不含 PDF/图片/正文全文），向用户请求发往既有 yellowbee / glm-5.3-flash 的隔离试跑许可；当前未收到答复、没有发送。
+- “有效父子关系”只是形式一致性；模型可以给出形式合法但语义错误的树。仍需多文献人工基准和真实模型评测，不声称全书校对完成。新增整体规划与目录核对会增加请求/token；尚未衡量成本收益。MinerU 没有提供字体信息时不伪造字体，几何仅作证据。超大文献通过窗口规划，边界语义一致性仍需实测。
+
+## 2026-10-03（本轮最新）：独立样本探索与逐候选角色契约落地
+
+### 实验与已实现
+
+- 使用 `mineru-structure-calibration` skill，在 `/private/tmp/structure-lab-20261003` 复制两份既有真实 MinerU 输出：White Lotus 前 50 页（335 raw 块）与 Making Transcendents 前 20 页（106 raw 块）。先执行独立 skill 的零模型基线，再用实验适配器比较 Literature 改进版；没有改旧 Litera、原文献库或封存 raw，没有新 MinerU 提交。实验产物及方法见 `STRUCTURE_CALIBRATION_EXPERIMENTS.md`。
+- 统一 `analyze_structure` 与 `reconcile_toc`：有序对齐直接决定实际建议，不再一项目录独立匹配多个块；同名项按顺序处理，歧义保留；已有页边/题注/脚注证据不能因目录同名而重新提升。
+- 修复 TOC 行解析：尽可能恢复原始 spans 换行（仅在 raw 与当前文本一致时使用），保留已有换行、去项目符号、排除 MAPS/TABLES，拒绝无页码尾部、短 Chapter 前缀、句中年份/罗马词误切；罗马章号与多级数字正确推断层级，显式保留 heuristic/model 来源。White Lotus 图表目录 11 项不再混入章节目录；地图侧边的窄竖文字不再误提升。
+- `enrich_furniture_evidence` 只读既有 raw 文件，补充已正确过滤的 page_header/footer 证据；新导入在页级元数据记录，旧项目分析时补齐。White Lotus 单个误标的 INTRODUCTION 因其他正确页眉提供重复证据被识别。
+- 生产 AI 改为 `roles-v1`：每候选返回 `h1…h6/body/furniture/caption/footnote`（包括不变项）；校验合法 ID、有限 confidence、冲突重复与遗漏，显示 review_coverage。所有新角色模型建议人工确认，兼容旧 suggestions 响应但不计逐项复核。每批 40 条、文字最多 240 字符；仅响应解析/结构失败拆批，网络/鉴权错误立即报告，避免重试放大。
+- 目录页选择贯穿本地抽取与作业计划；没目录时仍运行角色清理而不臆推层级。本地读取只产生可编辑待确认草稿，非法行阻止确认，服务端保存成功后才切换为项目确认基准；保存失败保留草稿并报告。视觉默认关闭。本地 analyze 建立作业并持久化 pending 建议，自动应用只标记实际应用项。
+- 前端建议分组为全部/误标清理/层级调整/疑似漏标，批量只采用可见组，其他组保留；完整快照新鲜度检查包含列表 items，列表升标题与撤销保留文字。
+
+### 已验证
+
+- Python 全套 `111 passed`；TypeScript `--noEmit` 与 Vite 生产构建通过。新增回归覆盖全局建议匹配、图表目录、原行/罗马词/年份、推断层级不可自动、选择范围、角色不变与漏答、重复冲突、网络不拆批、旧 raw 页眉证据只读、窄侧边文字不提升和列表推广可逆。
+- 独立副本 White Lotus 9 条建议/9 处 MD 修改（3 清理+6 层级）、Making 2 条/2 处。原文字/bbox/顺序与原始文件 SHA 保持；输出只是本地候选修订，不代表人工确认成品。
+- 隔离 API：White Lotus 本地 65 条目录、9 条 pending；采用 6 条层级组后另 3 条 pending 保留，文本/items/bbox/顺序不变，撤销精确还原，重开 ProjectStore pending 保持，raw 验证有效。
+- 本机 in-process 模型模拟：White Lotus 14/14、Making 4/4 返回角色、0 未复核，实际请求审计为 roles-v1；没有副本外写入、没有第三方请求。只验证管线与交互，不验证真实模型效果。
+- 嵌入浏览器实际跑过本地目录草稿、模拟角色任务、覆盖率和层级组筛选；后端重启后回环 API 被浏览器报 `ERR_BLOCKED_BY_CLIENT`，其余用 API 验收。未宣称最终全部浏览器或原生点击通过。
+- 使用已有 PyInstaller/Rust 与临时 Node v24 重建 sidecar、生产前端和 Tauri 发布包（约 58.98 MiB），更新 `launcher/Literature.app`。`codesign --verify --deep --strict` 与包内 sidecar SHA/大小匹配通过；runtime_revision `0c1a6853c2a0cd6ec397`，SHA `b27b7dbf781656dbc93fb2b02dd2beb5e278ad7dc17b98169f6bee7b933708a7`，大小 47590560 bytes。
+- 实际冻结二进制用隔离 library/runtime 和假 MinerU Token 启动，未调用外部模型/MinerU：health 与 revision 一致、真实旧 raw 导入并补入页眉证据、本地目录 65 条、结构建议 9 条入库、raw 哈希校验有效。
+
+### 外部验收与尚未
+
+- 本轮真实模型请求未执行。首次访问 Keychain 受沙箱限制；随后用于试跑的提权请求被自动审批拒绝，明确理由为具体本地文档内容和外部 AI 目的地未获明确授权。未通过其他路径重试；已向用户展示固定目录+15 候选快照并请求许可，目标是已配置 yellowbee `maas.home.hgh.cn.akafeng.me` 的 `glm-5.3-flash`，不含 PDF、图片或正文全文。许可未回复前，效果/token/费用均保持未验收。
+- 本轮新版角色契约不能用历史真实模型验收替代。缺少代表性题注/脚注错误、全书人工基准、印刷页码偏移、跨块标题合并、无目录无编号漏标、视觉缓存、完整原生交互与干净机器/Developer ID 公证验收。
+
+## 2026-10-03（续）：前端与端到端流程验收（运行中的开发环境）
+
+### 环境
+
+- 本机 `PATH` 无 Node.js；下载解压独立运行时到仓库 `.tools/node`（已加入 `.gitignore`），并新增 `scripts/dev_frontend.sh` 一键启动本地 API + Vite（系统有 node 时优先用系统 node）。
+- 开发环境：API `http://127.0.0.1:41731`（`LITERATURE_SESSION_TOKEN=literature-dev`，`LITERATURE_LIBRARY=.e2e/library` 隔离库），前端 `http://127.0.0.1:1420/`。
+
+### 已验证（可复现）
+
+- `frontend` 生产构建通过：`tsc --noEmit` + `vite build`（用 `.tools/node`，输出到 `frontend/dist`）。
+- 真实后端 API 端到端（Test A，导入已有 MinerU 输出）：创建项目 → `/mineru/import`（等于 `_finish_import` 的 `import_raw_mineru` + `normalize_imported_project` 路径）→ 898 块/92 标题 → `GET /structure/local-toc` 104 条 → 手动 `set_type` 降级并 `revert` 精确还原 → 本地 `analyze`（18 条书眉降级 / 5 层级修正 / 3 漏标）→ 真实模型结构作业完成（104 条目录、44 条建议、0 条被拒）→ 采用建议写补丁。
+- 真实浏览器（Playwright + Chrome，连真实后端）结构校对：本地读取目录 104 条、手动 H2→H1 生效、真实 AI 校准完成（对账摘要：目录 104 · 已定位 59 · 层级修正 4 · 疑似漏标 3）。
+- 离线浏览器交互：一键「AI 校准结构（自动识别目录）」在目录页留空时发送 `extract_toc=true, toc_page_indexes=[]`；「本地读取目录 · 0 费用」回填基准并切到已确认模式；目录页输入默认收进「校对选项」；块结构下拉 9 项；Shift 多选跳过图片；批量后清除旧建议；页面 0 脚本错误。
+- 真实前端导入点击路径：选择文件 → 逐文件设置对话框 → 开始解析 → 任务出现，页面 0 脚本错误。
+
+### 未完成 / 外部依赖
+
+- MinerU 云端往返：提交与轮询正常，但两个真实任务（22 页 vlm、3 页 pipeline）在本轮长时间停留在远端 `state=pending`，是 MinerU 服务队列而非本地问题；本地监视器继续轮询，完成后会自动落 `document.json`。Test A 已覆盖“云端完成后导入”的同一代码路径。
+- 原生 Tauri 窗口与 `.app` 重打包未做（本轮以浏览器开发前端为交付面）。
+
+## 2026-10-03：AI 结构校准升级——实验 → skill → Literature 落地（分层信号 + 有序对账）
+
+### 背景与实验
+
+- 在 Literature 之外建独立实验台，对两个真实 MinerU 输出做端到端校准：The Rhetoric of Immediacy（200 页 / 1293 块，书眉被大量误标 title）与 Unruly Gods（301 页 / 2554 块）。
+- 结论：只“对照印刷目录”不够。真正的收益来自分层——本地几何/重复/文本信号先定案，目录用于全局对齐，模型只处理疑难项，且输入有界、可审计。
+- 方法已沉淀为独立 skill `~/.agents/skills/mineru-structure-calibration/`（SKILL.md + scripts/run.py，支持 `--no-model` 零费用本地模式）。
+
+### 发现的真实缺陷（已在 Literature 修复）
+
+- **书眉误标不能只靠模型**：新增 `literature/structure_signals.py` 的跨页重复检测（归一化去页码 + 同一纵向区域跨 ≥3 页重复 + 重复主导区不是正文），`analyze_structure` 对其自动降级（`automatic=True`）。Rhetoric 样本本地即降 18 条书眉，Unruly 降 6 条 Glossary/Index 书眉；各章真实重复小节（Notes 等）因主导区为正文被正确放行。
+- **编号前缀误配**：`_heading_similarity` 原先只凭“都以 2 开头”把脚注 `2. See also…` 匹配成第二章。现要求编号后的正文相似度 ≥0.5 才补偿；Unruly 的 23 条脚注误提升归零。
+- **标记污染**：MinerU 把脚注/公式标记混入标题（`… equation_inline^{1}`）导致匹配失败。新增 `strip_inline_markers`，匹配与显示前剥离 `*_inline^{…}`、`^{…}`。
+- **输出触顶**：真实模型（glm-5.3-flash）在 74 条候选时输出超过 8192 tokens、返回 `None`，整次校对失败。现默认每批 40 条，`max_output_tokens` 默认 16384（本机服务调至 32768），解析失败时对半拆分重试；小批次（<8）仍按真实失败抛出。
+- **越批建议**：批次携带了不在本批候选中的 `local_suggestions/unlisted_titles` 的 block_id，模型据其提建议后被判“未知 block”丢弃（实测 21 条）。现按本批 block_id 过滤，实测降为 0。
+
+### 新能力
+
+- `structure_signals.py`：页眉/页脚/页码/题注/脚注识别、印刷目录抽取（含把被折叠成单行的目录按“页码 + 大写开头”恢复条目）、Needleman–Wunsch 有序对账。
+- `reconcile_toc` 改为全局有序对齐；`structure_model_payload` 给每个候选附带本地信号（role / heading_score / y_top / reasons）。
+- 本地读取目录：`local_printed_toc` + `GET /projects/{id}/structure/local-toc`；作业在 `extract_toc` 时优先本地解析印刷目录，解析失败才回退模型提取。
+- 前端：主按钮改为“AI 校准结构（自动识别目录）”，目录页输入移入高级选项（留空自动识别），新增“本地读取目录 · 0 费用”。
+
+### 已验证
+
+- Python 全套 92 项通过（新增书眉自动降级、同名目录有序对齐、本地目录抽取、标记不阻塞匹配、作业本地抽目录不调模型）。
+- Literature 完整作业链路真实模型验收（临时项目 + Rhetoric 样本）：本地抽目录 104 条（未调模型）→ 32 条候选单批 → 0 条被拒 → 45 条建议、自动应用 31 条，usage 8970/9214 tokens。
+- 独立 skill：`scripts/run.py --no-model` 在 Rhetoric 样本跑通。
+- 未做：前端 `tsc`/构建（本机当前 PATH 无 node）；原生窗口点击与打包验收。
+
+## 2026-10-03：结构校对 AI/手动校准管线修复与 P0 加固（执行者）
+
+### 已修复（跑通 AI 校准的关键缺陷）
+
+- 既有项目的 `literature.sqlite` 只在 `create_project` 建库时迁移；上一提交新增的 `jobs.message/result_json/activity_json` 对旧库缺失，结构 AI 作业在第一次 `update_job(status="running", message=...)` 就抛 `no such column: message`，作业永远停在 `queued`，界面无限重连。真实文献库中的 4 个结构 AI 作业全部卡在 `queued` 且 `error` 为空，即由此产生。现在新增 `ProjectStore.project_database()`，在读写项目任务/修订/用量前按项目幂等建表并补齐新增列；10 处访问统一走它。
+- 新增 `JobManager.recover_interrupted_jobs()`：应用启动时把上次进程遗留的 `queued/running` 项目作业（结构、翻译、即时）标为失败并写明“应用上次退出时该任务被中断”，避免界面把僵尸任务当成进行中任务无限重连。MinerU 作业仍由 `resume_ocr_jobs` 依据远端状态续跑。
+
+### 已实现（设计师验收文档 P0/P1）
+
+- P0 批量原子性：`apply_patch` 拆出 `_prepare_patch`（只校验并改内存文档）与 `_persist_structure`；新增 `apply_patch_batch` 先校验全部再一次性保存文档/source.md 并批量写修订；`apply_automatic` 也改走批量。`/structure/patches/batch` 不再逐项提交，任一项非法则整批不写。
+- P0 陈旧建议：建议携带生成时的块状态 `before`（AI 作业另带 `document_updated_at`）。采用时 `_assert_block_fresh` 按块校验类型/层级/文本，不一致返回 400；按块而非整份文档判断，采用同批兄弟建议不会互相判为过期。`PatchInput` 新增 `before` 字段以便该状态经 API 传入。
+- P0 手动提交锁：`ReviewWorkspace` 用 `submitting` ref 串行化手动结构动作，快速连点/快捷键/双击同帧只产生一份补丁。
+- P0 建议决策持久化：新增项目级 `structure_suggestions` 表与决策，AI 作业完成时持久化 pending/已采用/已忽略；采用时服务端原子应用补丁并记录，新一次分析取代旧 pending 但不复活已决定项。重启后未处理建议从项目数据库恢复，不再依赖 WebView 偏好。
+- P1 失败原因持续可见：作业面板失败时显示 `job.error` 而不是只靠短暂提示；建议卡片显示“第 N 页 · 原文类型 → 目标类型”。
+- P1 目录基准入库：新增 `document/toc_baseline.json`、`ProjectStore.load/save_structure_baseline` 与 `GET/PUT /projects/{id}/structure/baseline`；前端优先加载项目基准，AI 提取采用、本地校准与 AI 校对时写回项目，不再只依赖 localStorage。
+
+### 已验证
+
+- 87 项 Python 测试通过（新增：旧库缺列迁移、启动中断作业恢复、批量原子、兄弟建议同批采用、陈旧建议拒绝、项目基准读写与 API 往返、建议 pending/已采用/已忽略持久化与决策 API）。
+- TypeScript `--noEmit` 通过（借用系统内可用的 node v24 运行 `tsc`；未安装新依赖）。
+- 重新构建 PyInstaller sidecar（`runtime_revision` c85e4dc0…）并在隔离库实测冻结二进制：`/health` 能力与版本一致；旧库自动补齐列并把遗留 queued 作业标为失败；基线 PUT/GET；本地校准返回带版本的 `set_level` 建议；带视觉的 AI 作业跑完（提取目录→本地对账→模型校对），逐批图片隔离正确；建议以 pending 入库并可单独采用、批量忽略，重启后 pending/已采用/已忽略状态均正确保留；陈旧建议采用返回 400 且不覆盖；有效+非法批量返回 400 且零写入；同批兄弟建议两条都生效。
+- 上述 AI 作业验证使用本机回环桩模型（OpenAI 兼容），只验证链路、持久化与审计，不代表真实模型准确率或费用。
+- 前端已重建：用临时 adhoc 签名的 node 副本与重签的 rollup/tauri native `.node` 绕过签名 Team ID 不匹配，`vite build` 与 `tauri build` 均成功；`launcher/Literature.app` 已重装为新包（前端资源 `index-JADs8ymS.js`、sidecar sha256 b52ff247…），`codesign --verify --deep --strict` 通过，启动后 `/health` 返回 c85e4dc0…。
+- 为在 node 可执行文件名不是 `node` 的环境运行 Tauri CLI，新增 `scripts/tauri-run.cjs`（绕过 `tauri.js` 的 binStem 判断）。
+
+### 尚未
+
+- 未调用真实模型或 MinerU，未做扫描书准确率与费用验收；未做 Developer ID 签名、公证、Intel/通用构建或干净机器安装验收。
+- 建议决策已入库（`structure_suggestions`），但前端建议卡片的显示与批量按钮仅在 `tsc --noEmit` 与打包层面验证，本轮未做原生窗口逐项点击验收。
+
+## 2026-10-03：结构校对产品核查与基准入口修复
+
+### 已实现
+
+- AI 面板新增明确的目录基准来源选择。用户切换为“使用已确认的目录”后直接编辑基准，不再被源目录页校验阻断；没有原书目录时可自行填入标题。条目数量来自实际解析，空标题被过滤、缩进被接受，无有效条目时校准禁用并显示格式提示。
+- 手动范围选择和修饰键选择只计入可修改的文本结构块；跳过图片、表格、公式、代码。批量修订保存成功后删除目标块的旧 AI 建议，避免再次覆盖人工调整。已有标题的结构下拉移除重复当前层级项。
+- 新增 `docs/STRUCTURE_REVIEW_ACCEPTANCE.md`，列出具体问题、已修复项、建议持久化 / 批量原子性 / 陈旧采用 / 手动提交锁等剩余 P0 与最终客户端验收步骤。
+
+### 已验证
+
+- TypeScript 类型检查与 Vite 生产构建通过，产物写入 `/private/tmp/literature-design-validation-dist`，未覆盖现有客户端。
+- Python 结构模块回归 41 项通过；本轮未修改服务端。
+- Chrome headless 加载生产前端、所有本地 API 请求由离线模拟替代：基准来源切换、手动模式不要求目录页、非法格式提示、AI 请求参数、标题选项无重复、Shift 范围排除图片、批量修改清除旧建议通过，页面脚本错误为 0。该验证覆盖前端交互和请求契约，不等同于服务端事务或真实 AI 验收。
+
+### 尚未验收
+
+- 未调用真实模型或 MinerU，未改动文献库，也未重打包或替换 `launcher/Literature.app`。原生客户端最终整合打包、待确认决策重启恢复、批量失败一致性和跨窗口陈旧采用仍待执行者验证与修复。
+
+## 2026-10-03：结构校对文本结构类型与本地优先 AI 对账
+
+### 已实现
+
+- 可修改结构类型对齐 MinerU 归一化后的文本结构：新增 `TEXT_STRUCTURE_TYPES = (paragraph, list, footnote)` 与 `EDITABLE_STRUCTURE_TYPES = (title, ...)`；图片、表格、公式、代码作为“由内容推导的类型”保持只读。`_apply_set_type` 支持文本类型互转，转列表时把正文搬入 `items`，转回时还原 `source_text`；补丁 before 记录 `{type, level, source_text, items}` 完整快照，`revert_patch` 精确还原且向后兼容旧的字符串 before。
+- 自动应用边界收紧：`apply_patch` 仅在 已有标题 → 正文 时允许 `automatic`；`StructureJobInput.auto_apply` 默认改为 False；置信度必须是 0–1 的有限数值（拒绝 NaN、Infinity、布尔、越界、不可转换类型），层级必须是 1–6 的整数（拒绝小数与越界）。
+- AI 校对重建为本地优先两阶段：新增 `reconcile_toc` 把已确认目录逐条对账到文档结构块，产出 `summary{已定位, 层级修正, 疑似漏标, 未定位, 未收录标题}`、`local_suggestions`、`missing`、`unlisted_titles`。`structure_model_payload` 只把本地未高置信定案的疑难候选（含疑似漏标短文本、未收录标题）发给模型，并携带 `unresolved_toc`／`unlisted_titles`；本地自动定案的块不再重复发送。
+- 相似度改用带编号前缀补偿的 `_heading_similarity`；本地模糊匹配（非精确）一律 `automatic=False`，只有 `score == 1.0` 的精确匹配才可能自动改级；目录同名条目层级冲突时层级视为不可信。
+- 明确选择目录页时 `excluded_pages` 只使用所选页（未选定时才回退到本地 `find_toc_page_candidates`），避免仅凭候选把真正的正文页误排除；`proofread=False` 时清空标题候选与标题裁片，`extract-only` 只发送目录页图片。
+- 模型输出健壮化：编造或重复的 `block_id`、非法操作、非法置信度／层级一律跳过而非让整次作业失败，且**显式留痕**：`analyze_structure_with_provider(..., skipped=...)` 返回被丢弃条目及原因；`run_structure_job` 写入 warning 活动、结果 `skipped_suggestions` 与 `audit.skipped_model_suggestions`，界面同步提示，不默认为“全部建议已验证”。同批候选最多 80 个，标题裁片只附带属于本批候选的块（新增 `_batch_payload`）。本地与模型对同一块的冲突结论由 `_merge_suggestion` 处理：本地自动定案优先，否则取置信度更高者。
+- 源目录提取后按动态疑难候选重新生成视觉裁片；`run_structure_job` 结果新增 `reconciliation` 摘要并写入进度活动。
+- 前端：结构下拉框扩展为 正文／列表／脚注／H1–H6（单块与批量），快捷键同步；AI 面板合并“提取目录＋校对”为单一主按钮、移除冗余的“从源目录建立基准”勾选、显示目录对账摘要、自动应用／视觉／手动基准收进选项。
+- 前端任务恢复：同帧防重复 POST（`posting` ref）；离开后重连运行中作业；状态读取失败时保留当前任务并 3 秒重连；已完成作业仅在 `localStorage.literature.review.consumedJob.<projectId>` 未记录时回填建议与源目录，并在作业保存的 `document_updated_at` 与当前文档不一致时不回填、提示重新校准。**注意：这个消费标记只是防重复回填，不等同于完整的人工决策持久化——应用重启后尚待处理（未采用/未忽略）的建议不会自动恢复。**后台失败错误保留在任务面板。
+
+### 已验证
+
+- 77 项 Python 测试通过（新增 15 项）：结构类型互转与精确撤销、自动应用仅限降为正文、非法置信度／层级拒绝、provider 跳过非法值并留痕、模糊匹配保持人工、明确目录页不误排正文、proofread-only 仍排除识别出的目录页、对账摘要、失败 JSON 仍记录 usage 与审计、批次候选与图片隔离、extract-only 无标题图、跳过建议在批次审计（rejected_count/reasons）与活动中显式告警、结果记录 document_updated_at 且后续改结构能被检测、本地／模型冲突合并。
+- TypeScript `--noEmit` 通过；Vite 生产构建通过（本机 shell 无 node，用现有可用运行时并把临时副本 adhoc 重签以解决 rollup 原生模块的签名不匹配；未安装新依赖）。
+- 重新构建 PyInstaller sidecar 与 Tauri 发布客户端并更新 `launcher/Literature.app`（约 59 MiB，Apple Silicon，最低 macOS 15）；`codesign --verify --deep --strict` 通过。包内 `Contents/MacOS/literature-sidecar` 与 `src-tauri/binaries/manifest.json` 的 sha256（05da37f9…）与大小（47.55 MiB）一致。
+- 冻结 sidecar 在隔离库实际运行（`LITERATURE_LIBRARY`/`LITERATURE_RUNTIME` 指向临时目录、显式 token、不调用模型、禁用真实凭据）：`/health` 能力齐全且 `runtime_revision` 47b98b95… 与构建清单一致；离线 MinerU `content_list_v2` 导入、`/document`、`/structure/analyze`（本地 set_level）与 `/structure/plan`（对账摘要）均返回 200。
+- 打包链路用已有 cargo/rustc（离线 `CARGO_NET_OFFLINE=true`）与已安装 PyInstaller，未安装新依赖；因本机无 `pnpm`，以 `-c '{"build":{"beforeBuildCommand":""}}'` 跳过 Tauri 的 pnpm 构建步骤，前端 `dist` 已先行构建。
+
+### 尚未验收与外部服务事实
+
+- 未调用真实视觉／文本模型，未做扫描书准确率与费用验收；服务端视觉缓存、无目录且无编号的漏标识别、人工决策持久化仍是下一步。
+- 原生窗口 AX 自动化不可靠，未做原生文件选择/拖放/另存的实际点击与视觉验收；未做 Developer ID 签名、公证、Intel／通用构建或干净机器安装。
+
+## 2026-10-03：WebUI 转为独立 macOS 客户端与资源整理
+
+### 已实现
+
+- 根据用户本轮要求，当前交付优先级从 WebUI 切换为 Tauri macOS 客户端；同步更新 AGENTS.md、PROJECT_PLAN.md、README、架构与打包文档。React 工作区复用，浏览器保留为开发调试入口，旧 Litera 未改动。
+- Rust 内置服务管理改为动态 loopback 端口、随机会话令牌、单实例聚焦、启动错误反馈、日志、退出进程组回收；Python 监测 App PID 处理父进程结束。发布只使用同包 sidecar，开发态可使用 .venv/显式解释器。
+- 前端初始化共享就绪 Promise，实际业务请求等待连接，检查能力与本会话鉴权后才展示工作区，避免子组件抢先连接旧端口。新增 desktop_resources_v1 标记。
+- 原生多选与拖放接入路径队列，认证元数据接口返回文件大小及 PDF 页数，保留逐文件设置。确认解析时直接创建项目原件副本，跳过 multipart 暂存；浏览器调试仍有上传回退。
+- 当前机器继续使用既有 library；新机器默认使用 Application Support/Literature/library。library-location.json 保存位置；设置可打开资源库/运行数据/日志并选择其他独立文件夹，重启生效，旧数据不自动搬移。选择时检查可写并禁止选现有项目内部目录。
+- 文件资源提供 Finder 定位，导出显示实际路径，EPUB/DOCX 与原件可通过原生对话框另存。Rust 校验真实路径，拒绝越界与符号链接逃逸，另存不覆盖应用管理数据。
+- 实际接通 PyInstaller 与 Tauri 发布链；后端附带源码指纹和目标二进制哈希清单；本机构建约 59 MiB、Apple Silicon、最低 macOS 15（与打包 Python 库要求一致）。补上应用 adhoc 签名和严格校验。launcher/Literature.app 已替换为独立客户端。
+- PDF worker/WASM/ICC/CMap/标准字体与许可证改为从锁定 pdfjs-dist 自动生成，移除旧静态副本。删除未引用 PdfPage.tsx、旧 JXA 与 start_webui.sh 浏览器启动链；保留现有其余组件和历史文档。
+- 新增 clean_resources.py 固定允许列表与预览功能。本次删除 2909.5 MiB（约 2.84 GiB）的 PyInstaller/Vite/Rust 中间产物、schema 和源码缓存；保留客户端、release bundle、开发依赖、sidecar 输入、library、回收站和应用配置。库外旧源码目录未清理。
+
+### 已验证
+
+- 57 项 Python 测试通过，新增认证本地元数据、重复路径/错误文件、无上传副本、资源位置及 Tauri Origin CORS 测试。
+- 2 项 Rust 测试通过：管理路径与符号链接逃逸限制、后端进程组回收；TypeScript 和最终 Vite/Tauri release 构建通过。最后补充资源库选择/初始化错误处理均已编入最终包。
+- 自包含 sidecar 在 /private/tmp 隔离资源库实际运行，鉴权、源码指纹、3 页 PDF 元数据、离线 raw 规范化、四种导出和 raw 哈希校验通过；不依赖源码 Python 启动后端。
+- 系统记录新 bundle ID 的客户端进程与本地 API 请求。实际重复打开保留同一个 App 及两级 frozen sidecar；结束 App 后 5 秒内两级后端都退出。
+- 安装后的应用 codesign --verify --deep --strict 通过。缓存删除后，launcher 与 release bundle 仍各约 59 MiB，原 library 仍约 324 MiB。现有 6 个项目保留，其中 4 个有 raw manifest 的项目哈希复核无错误；另 2 个没有 manifest，未尝试补写或将其报告为证据已验收。
+
+### 尚未验收与外部服务事实
+
+- 原生窗口的自动化 AX 读取多次超时；不能把进程存活或 API 请求成功当作原生对话框、拖放、Finder/另存按钮及 PDF 视觉验收。上述实际点击与视觉项目仍待手工验收。
+- 首页初始化曾读取既有 Keychain Token 并成功执行 MinerU 连通性检查。本轮没有上传真实文献、创建远端解析批次或调用视觉/翻译模型，真实服务能力验收状态未提升。
+- 未做 Developer ID 签名、公证、Intel/通用构建、干净机器安装或真实局域网模型服务在新 bundle 身份下的验收。本地 adhoc 包是当前机器可运行交付，不代表已完成对外发行。
+
+## 2026-10-03：结构校对简化、源页视觉与分层校准
+
+### 已实现
+
+- 左侧改为文档目录与 AI 校准，移除翻译范围勾选、技术状态步骤和数据文件名；高级目录文本、本地校准和审计按需展开。右侧当前块用一个正文／H1–H6 下拉框编辑，图片、表格等不显示标题编辑；可见复选框与批量下拉框降低多选操作负担。
+- 建立独立源目录基准：要求查看并填写 PDF 目录页；不再把 MinerU 解析目录自动当作可靠基准。目录基准按项目保存在本浏览器 localStorage，文档修订不覆盖它。建议默认待确认，可以采用／忽略；历史按同块逆序撤销，整体撤销按时间逆序处理。
+- PDF 预览不依赖 bbox 是否存在，按源文件真实页数补全页面，新增页码跳转、缩放、结构框开关。SplitPane 的最小宽度现在同时应用于窗口布局，并修正小于 1 的 fr 比例造成窄窗留白；窄窗顶栏不显示被挤成竖排的标题，预览工具栏可完整换行。
+- 视觉校准接入现有模型服务：选定源目录页文本／图片（最多 6 页）用于提取独立目录，少量标题 bbox 裁片用于排版判断（最多 6 个）。兼容 /chat/completions 的图像 content parts，沿用 usage 账本；输入计划可实际预览将发送的图片，不输出 Base64 长串。
+- 本地校准处理明确目录层级差异；正确标题跳过模型；短正文与目录匹配生成漏标 set_title 建议，紧凑短编号标题作为模型候选。疑难标题最多 80 个一批。未入目录的小标题保持原类型，本地长文形态判断不再授权自动降级；重名目录层级冲突不自动匹配。
+- 关闭自动应用时所有未应用建议保留在队列；补回标题不自动应用；分析期间结构变化则拒绝陈旧结果。结构操作限定标题与正文，防止图片／表格被快捷键或批量操作改成标题。健康能力增加 structure_vision_v1。
+- OpenDesign 在本会话创建三栏交互稿，包含层级调整、目录定位、AI 演示建议、采用／忽略、批量修改与撤销；演示不调用外部模型。
+
+### 已验证
+
+- Python：55 passed（新增 10 项），覆盖漏标、编号候选、视觉请求、正文输入边界、重复目录冲突、陈旧结果与撤销顺序；旧测试调整为明确的目录层级自动修正及跳过冗余模型调用。
+- TypeScript --noEmit 与 Vite 生产构建通过，产物仅写 /private/tmp。已有 PDF worker 带来的包体积提示仍存在。
+- 使用 /private/tmp 隔离项目库、禁用真实 MinerU／模型服务的本机 API + Chrome：PDF 渲染、正文升标题、Markdown 同步、单项撤销、bbox 选中、150% 缩放、页码跳转、目录图片输入预览与两块批量调整均通过，页面脚本错误为零。
+- 桌面与 1024px 截图确认三栏和源文件可见，窄窗三栏宽度为 260／364／364px，顶栏仅出现一次。示例截图保存在 docs/structure-review-20261003.png。
+
+### 尚未验收及边界
+
+- 未调用真实视觉模型，不能把图片输入单元测试或演示建议表述为实际扫描书校准准确率／费用已验收。Office 视觉预览、无目录无编号漏标标题、长作业恢复、视觉缓存、预算硬上限和完整逐批实际输入审计尚未实现。
+- 输入计划是初始目录／候选／图片集合，目录提取后会动态生成新候选；普通正文不全文发送，但疑似标题的短正文候选可能实际属于正文。完整设计和性价比策略见 docs/STRUCTURE_REVIEW_DESIGN.md。
+
+## 2026-10-03：模型列表直读、代理环境规范化与局域网模型服务直连修复
+
+### 已实现
+
+- 模型服务「拉取模型」：新增 `providers.list_remote_models(base_url, api_key)` 读取 OpenAI 兼容的 `GET {base_url}/models`，`ModelServiceStore.list_models(service_id)` 用该服务已保存的 base URL + Keychain 密钥调用，API 增加 `POST /model-services/{service_id}/models`。前端 `workbench/ModelServicesDialog.tsx` 在「模型 ID」旁新增「拉取模型」按钮，结果通过 `<datalist>` 提供给输入框下拉选择；`mineru.css` 新增 `.model-input-row` 样式。
+- 代理环境规范化：`providers.normalize_proxy_environment()` 把 `NO_PROXY`/`no_proxy` 中带方括号的 IPv6（如 `[::1]`）规范为 httpx 可解析的形式（`::1`），并在 `OpenAICompatibleProvider.complete()` 与 API 启动时（`main()`）调用。
+- 局域网模型服务直连（macOS 本地网络隐私）：`scripts/Literature.js` 改用 `NSTask` + `waitUntilExit` 启动 `scripts/start_webui.sh`，让启动器 App 常驻；`scripts/start_webui.sh` 末尾 `wait "$api_pid"`（未新起 API 时 wait `web_pid`）保持脚本存活；`scripts/setup_macos_launcher.sh` 与新增的 `src-tauri/Info.plist` 增加 `NSLocalNetworkUsageDescription`。
+
+### 已验证
+
+- 后端 `pytest tests/test_model_services.py` 4 passed（新增「模型列表端点」用例，含服务不存在返回 502）。
+- `tsc --noEmit` 通过。
+- 真实局域网 relay（`http://maas.home.hgh.cn.akafeng.me/v1` → `192.168.21.3:80`）连通性：替换为有效 Key 后，`POST /model-services/{id}/models` 返回真实模型列表（`deepseek-v4-flash` / `glm-5.3-flash` / `qwen3.8-flash-next` 等 5 条）。
+- 进程树核对：`Literature.app applet → zsh start_webui.sh → python -m literature.api`，后端不再以孤儿进程（PPID=1）运行。
+- 启动器生命周期：退出 App 后 6 秒内 api/vite 自动退出、`launch.lock` 自动释放；退出后再次启动可正常拉起；重复启动不会产生重复进程。
+
+### 本轮发现并修正
+
+- `NO_PROXY=...,[::1]` 会让 httpx 0.28 的 `is_ipv6_hostname` 拼出 `all://*[::1]` 并抛 `InvalidURL: Invalid port: ':1]'`，被包装成「模型请求失败」，请求根本没发出。已在 providers 层规范化。
+- 应用内访问局域网模型服务报 `[Errno 65] No route to host`，而终端直连正常。根因是 macOS 14+ 的本地网络授权按 App 归属：旧启动器 `doShellScript("... &")` 启动后立刻退出，后端成为孤儿进程，系统日志出现 `Got local network blocked notification ... bundle_id: (null)`，且「系统设置 → 隐私与安全性 → 本地网络」中看不到 Literature。修正为启动器常驻持有进程树。
+- 常驻化带来的生命周期缺陷：结束时 App 被强杀后，它拉起的 zsh/API/vite 不会跟着退出（父死子不灭），`launch.lock` 也留在原地；再点快捷方式时脚本看到锁就 `exit 0`，表现为“启动没反应”。修正：锁内记录脚本 PID 与启动它的 App PID，仅当两者都活着才算在运行，否则视为陈旧锁并接管；并在 `start_webui.sh` 末尾加 watchdog 轮询 App PID，App 一死就停掉服务并释放锁；陈旧锁接管时先停掉旧进程树再以当前 App 为父重新拉起。
+
+### 未验证
+
+- 「拉取模型」下拉控件的肉眼验收（后端接口已多次返回真实列表）。
+- 启动器 watchdog 在 App 收到 SIGKILL 时的清理时机（已用 SIGTERM 场景验证）。
+
 ## 2026-10-02：任务生命周期、模块空白页、可收起目录与模型服务库
 
 ### 已实现

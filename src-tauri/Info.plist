@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- macOS 14+ 本地网络隐私：后端要访问局域网内的模型中转站 / MinerU 服务，
+         缺少该声明时系统会把连接直接拦成 "No route to host"（EHOSTUNREACH）。 -->
+    <key>NSLocalNetworkUsageDescription</key>
+    <string>Literature 需要访问局域网内的模型服务与 MinerU 服务。</string>
+</dict>
+</plist>
