@@ -389,6 +389,7 @@ class StructureBudgetIntegrationTests(unittest.TestCase):
                 ProviderConfig.preset("custom", base_url="https://relay.example.invalid/v1", model="m",
                                       input_price_per_million=100.0, output_price_per_million=100.0),
                 api_key="fixture")
+            provider._stream_disabled = True  # 本用例 patch 的是非流式 client.post
             budget = 0.00061
             coordinator.attempt_hooks_for("svc", provider, project_id=project, budget=budget,
                                           cost_of=lambda chars: 0.0002)

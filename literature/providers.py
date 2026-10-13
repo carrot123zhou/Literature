@@ -10,7 +10,7 @@ import uuid
 from copy import copy
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Iterable, Protocol
 
 
 KEYCHAIN_SERVICE = "local.literature.providers"
@@ -37,6 +37,72 @@ class ProviderTimeoutError(ProviderError):
             if kind == "read" else ""
         )
         super().__init__(f"{action}超时（等待上限 {seconds:g} 秒）。可稍后重试或更换模型服务。{hint}")
+
+
+class _StreamUnsupported(Exception):
+    """流式请求没有得到可用输出（空事件流），应回退非流式重试。"""
+
+
+def _aggregate_sse_events(lines: Iterable[Any]) -> dict[str, Any] | None:
+    """把 SSE 行流聚合成与非流式一致的响应 JSON；无任何有效事件时返回 None。
+
+    思考增量（delta.reasoning_content）只参与保活，不计入译文内容；
+    usage/finish_reason/model/id 以事件流为准（include_usage 时 usage 在末尾事件）。
+    """
+    content_parts: list[str] = []
+    finish_reason = ""
+    usage: dict[str, Any] = {}
+    model = ""
+    request_id = ""
+    for raw in lines:
+        line = (raw or "").strip()
+        if not line.startswith("data:"):
+            continue
+        payload = line[len("data:"):].strip()
+        if payload == "[DONE]":
+            break
+        try:
+            event = json.loads(payload)
+        except ValueError:
+            continue
+        if not isinstance(event, dict):
+            continue
+        model = str(event.get("model") or model)
+        request_id = str(event.get("id") or request_id)
+        event_usage = event.get("usage")
+        if isinstance(event_usage, dict) and event_usage:
+            usage = event_usage
+        choices = event.get("choices") or []
+        choice = choices[0] if choices and isinstance(choices[0], dict) else {}
+        delta = choice.get("delta") if isinstance(choice.get("delta"), dict) else {}
+        piece = delta.get("content")
+        if isinstance(piece, str):
+            content_parts.append(piece)
+        elif isinstance(piece, list):
+            content_parts.extend(
+                str(item.get("text", "")) for item in piece if isinstance(item, dict)
+            )
+        reason = choice.get("finish_reason")
+        if reason:
+            finish_reason = str(reason)
+    if not any(part.strip() for part in content_parts) and not usage and not finish_reason:
+        return None
+    return {
+        "model": model,
+        "id": request_id,
+        "choices": [{"message": {"content": "".join(content_parts)}, "finish_reason": finish_reason}],
+        "usage": usage,
+    }
+
+
+class _HTTPStatusError(Exception):
+    """携带 httpx 响应的错误，便于外层统一处理重试/报错。"""
+
+    def __init__(self, response: Any, detail: str) -> None:
+        super().__init__(detail)
+        self.response = response
+        self.detail = detail
+        self.status_code = int(getattr(response, "status_code", 0) or 0)
 
 
 def normalize_proxy_environment() -> None:
@@ -250,6 +316,11 @@ class OpenAICompatibleProvider:
         # 这是把整本书翻译从「每段都重新建连接」提速下来的关键之一。
         self._client = None
         self._client_lock = threading.Lock()
+        # 流式（SSE）请求：默认开启。流式把「读超时」从「等待整份响应的总时限」变成
+        # 「两个数据块之间的空闲时限」，思考型模型长时间生成不再整单超时作废。
+        # 服务端不支持时自动回退非流式（_stream_disabled 置位，本 provider 实例
+        # 不再重试流式；ModelServiceStore 每个作业新建实例，因此新作业会重试一次流式）。
+        self._stream_disabled = False
         # 可选：每次真实 HTTP attempt 进入公共协调层（预算预留/并发/退避）。
         # begin(prompt_chars) 在发请求前调用并返回句柄；end(handle, response, error, final) 在 attempt 后处理。
         # final=True 时预算预留不在 end 释放，而是留在线程本地，由调用方写账后原子 reconcile。
@@ -311,6 +382,42 @@ class OpenAICompatibleProvider:
             content.append({"type": "image_url", "image_url": {"url": item["image_url"], "detail": "high"}})
         return self._complete(system=system, content=content)
 
+    def _read_stream(self, client: Any, url: str, headers: dict[str, str], body: dict[str, Any], timeouts: Any) -> tuple[Any, dict[str, Any]]:
+        """发起一次 SSE 流式请求，聚合成与非流式一致的响应 JSON 后返回。
+
+        流式把「读超时」的语义从「等待整份响应的总时限」变成「两个数据块之间的
+        空闲时限」：只要模型还在持续吐 token（包括思考型模型的 reasoning 增量），
+        长时间生成不会再在总时限处整单超时作废——这是降低翻译失败率的关键。
+        思考增量（delta.reasoning_content）只参与保活，不计入译文内容。
+        """
+        with client.stream("POST", url, headers=headers, json=body, timeout=timeouts) as response:
+            if response.status_code >= 400:
+                response.read()
+                raise _HTTPStatusError(response, response.text)
+            content_type = str(response.headers.get("content-type") or "").lower()
+            if "text/event-stream" not in content_type:
+                # 必须先 read()：真实流式响应未读取前访问 .json()/.text 会抛
+                # httpx.ResponseNotRead（它不是 ValueError/HTTPError，不会被下捕）。
+                response.read()
+                # 中转服务忽略 stream 参数、直接返回完整 JSON：按非流式解析。
+                # 解码失败也要归成 _HTTPStatusError（外层转 ProviderError），
+                # 否则连续失败熔断对「200+门户 HTML」这类响应失效。
+                try:
+                    return response, response.json()
+                except ValueError as error:
+                    # 少数中转返回 SSE 体却标错/缺失 content-type：按文本再试一次 SSE 解析。
+                    text = response.text
+                    if "data:" in text:
+                        value = _aggregate_sse_events(text.splitlines())
+                        if value is not None:
+                            return response, value
+                    raise _HTTPStatusError(response, f"响应不是有效 JSON：{error}") from error
+            value = _aggregate_sse_events(response.iter_lines())
+            if value is None:
+                # 连一个有效事件都没有：视为协议不兼容，回退非流式，而不是伪造成空译文。
+                raise _StreamUnsupported("空事件流")
+            return response, value
+
     def _complete(self, *, system: str, content: str | list[dict[str, Any]]) -> ProviderResponse:
         try:
             import httpx
@@ -320,24 +427,40 @@ class OpenAICompatibleProvider:
         normalize_proxy_environment()
         url = f"{self.config.base_url.rstrip('/')}/chat/completions"
         headers = {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json", **self.config.extra_headers}
-        body = {
+        base_body = {
             "model": self.config.model,
             "messages": [{"role": "system", "content": system}, {"role": "user", "content": content}],
             "temperature": self.config.temperature,
             "max_tokens": self.config.max_output_tokens,
-            "stream": False,
         }
-        body.update(reasoning_request_fields(self.config))
+        base_body.update(reasoning_request_fields(self.config))
         timeouts = httpx.Timeout(self.timeout, connect=min(20.0, self.timeout),
                                  write=min(60.0, self.timeout), pool=min(30.0, self.timeout))
         client = self._client_instance(httpx)
         prompt_chars = len(system) + (len(content) if isinstance(content, str) else 0)
         response = None
         value: dict[str, Any] = {}
-        for attempt in range(self.max_retries + 1):
+        attempt = 0
+        while True:
+            use_stream = not self._stream_disabled
+            body = dict(base_body)
+            if use_stream:
+                body["stream"] = True
+                body["stream_options"] = {"include_usage": True}
             handle = self.attempt_hooks[0](prompt_chars) if self.attempt_hooks else None
             try:
-                response = client.post(url, headers=headers, json=body, timeout=timeouts)
+                if use_stream:
+                    response, value = self._read_stream(client, url, headers, body, timeouts)
+                else:
+                    response = client.post(url, headers=headers, json=body, timeout=timeouts)
+                    if response.status_code >= 400:
+                        raise _HTTPStatusError(response, response.text)
+                    # 解码失败也归成 _HTTPStatusError（外层转 ProviderError）：否则
+                    # 「200+门户 HTML」不触发连续失败熔断，且调用方捕获不到 ProviderError。
+                    try:
+                        value = response.json()
+                    except ValueError as error:
+                        raise _HTTPStatusError(response, f"响应不是有效 JSON：{error}") from error
             except httpx.TimeoutException as error:
                 if self.attempt_hooks:
                     self.attempt_hooks[1](handle, None, error, True)
@@ -350,22 +473,40 @@ class OpenAICompatibleProvider:
                     self.attempt_hooks[1](handle, None, error, final)
                 if not final:
                     time.sleep(self._retry_delay(None, attempt))
+                    attempt += 1
                     continue
                 raise ProviderError(f"模型请求失败：{error}") from error
-            if response.status_code in RETRY_STATUS_CODES and attempt < self.max_retries:
-                # 429/5xx 且还会重试：释放本次 attempt 的预留并记退避冷却。
+            except _StreamUnsupported:
+                # 空事件流：服务端可能不兼容流式协议，关闭流式后同一 attempt 预算内重发。
                 if self.attempt_hooks:
-                    self.attempt_hooks[1](handle, response, None, False)
-                time.sleep(self._retry_delay(response, attempt))
+                    self.attempt_hooks[1](handle, None, None, False)
+                self._stream_disabled = True
                 continue
-            try:
-                response.raise_for_status()
-                value = response.json()
-            except Exception as error:
+            except httpx.StreamError as error:
+                # 流式读取异常（含 ResponseNotRead 等）：它不是 httpx.HTTPError，
+                # 不萘既有的 HTTPError/ValueError 分支；必须归成 ProviderError，
+                # 否则连续失败熔断对这类响应失效（与「200+门户 HTML」同型缺口）。
                 if self.attempt_hooks:
-                    self.attempt_hooks[1](handle, response, error, True)
-                detail = getattr(getattr(error, "response", None), "text", "")
-                raise ProviderError(f"模型请求失败：{detail or error}") from error
+                    self.attempt_hooks[1](handle, None, error, True)
+                raise ProviderError(f"模型请求失败：{error}") from error
+            except _HTTPStatusError as error:
+                if use_stream and error.status_code == 400:
+                    # 服务端拒绝流式请求（不支持 stream/stream_options 等）：
+                    # 同一 attempt 的预算预留不浪费，关闭流式后立即重发一次。
+                    if self.attempt_hooks:
+                        self.attempt_hooks[1](handle, error.response, None, False)
+                    self._stream_disabled = True
+                    continue
+                if error.status_code in RETRY_STATUS_CODES and attempt < self.max_retries:
+                    # 429/5xx 且还会重试：释放本次 attempt 的预留并记退避冷却。
+                    if self.attempt_hooks:
+                        self.attempt_hooks[1](handle, error.response, None, False)
+                    time.sleep(self._retry_delay(error.response, attempt))
+                    attempt += 1
+                    continue
+                if self.attempt_hooks:
+                    self.attempt_hooks[1](handle, error.response, error, True)
+                raise ProviderError(f"模型请求失败：{error.detail or error}") from error
             if self.attempt_hooks:
                 self.attempt_hooks[1](handle, response, None, True)
             break

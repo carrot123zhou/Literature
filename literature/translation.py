@@ -12,7 +12,7 @@ from typing import Any, Iterable
 from collections.abc import Callable
 
 from .models import Block, TranslationEntry, UsageRecord, block_source_digest, utc_now
-from .providers import ProviderConfig, ProviderError, ProviderResponse, TextProvider
+from .providers import ProviderConfig, ProviderError, ProviderResponse, ProviderTimeoutError, TextProvider
 from .request_coordinator import BudgetExhausted, RequestCoordinator
 from .storage import ProjectStore, StorageError
 
@@ -1937,6 +1937,16 @@ class TranslationService:
                 # 预算不足：已解析的子段随 outcome 返回并落为中间证据，不能让它们被重发。
                 budget_paused = True
                 break
+            except ProviderTimeoutError as error:
+                # 超时（流式下即“长时间无输出”）：与协议失败一样沿 segment 中点切分重试。
+                # 小批生成更快，超时概率骤降；单 segment 仍超时才真正失败。
+                batch_resolved, batch_reasons = self._retry_batch_after_timeout(
+                    batch, error, refine=refine, instructions=instructions, locale=locale,
+                    source_language=source_language or "", glossary=active_glossary,
+                    context_before=context_before, context_after=context_after,
+                    previous_translation=previous_translation, usages=usages,
+                )
+                batch_run_id = ""
             except ProviderError as error:
                 # 单个子请求失败要隔离，不能作废同一次作业里其他子请求已解析的字段。
                 response = getattr(error, "response", None)
@@ -1966,6 +1976,45 @@ class TranslationService:
             else:
                 failed[block.block_id] = reasons.get(block.block_id, "模型输出缺少该段译文")
         return _ChunkOutcome(segments, failed, usages, None, run_id, resolved=resolved, budget_paused=budget_paused)
+
+    def _retry_batch_after_timeout(
+        self, batch: list[tuple[Block, list[tuple[str, str]]]], error: ProviderTimeoutError,
+        *, refine: bool, instructions: str, locale: str, source_language: str, glossary: dict[str, str],
+        context_before: str, context_after: str, previous_translation: str,
+        usages: list[ProviderResponse], depth: int = 0,
+    ) -> tuple[dict[str, dict[str, str]], dict[str, str]]:
+        """超时后的降级重试：把批次沿 segment 中点切半，两半分别隔离重试。
+
+        单 segment 无法再切、或递归超过 MAX_SPLIT_DEPTH 时才把该批判为失败。
+        每次切分后的生成时间大约减半，超时概率随之骤降；子批内协议层面的
+        进一步切分仍由 _translate_units 自己处理。
+        """
+        flat = sum(len(segments) for _, segments in batch)
+        if flat < 2 or depth >= MAX_SPLIT_DEPTH:
+            return {}, {block.block_id: f"请求超时：{error}" for block, _ in batch}
+        left, right = _split_units(batch)
+        if not left or not right:
+            return {}, {block.block_id: f"请求超时：{error}" for block, _ in batch}
+        kwargs = dict(
+            refine=refine, instructions=instructions, locale=locale, source_language=source_language,
+            glossary=glossary, context_before=context_before, context_after=context_after,
+            previous_translation=previous_translation, usages=usages,
+        )
+        resolved: dict[str, dict[str, str]] = {}
+        reasons: dict[str, str] = {}
+        for half in (left, right):
+            try:
+                half_resolved, half_reasons, _run_id = self._translate_units(half, depth=0, **kwargs)
+            except ProviderTimeoutError as sub_error:
+                half_resolved, half_reasons = self._retry_batch_after_timeout(half, sub_error, depth=depth + 1, **kwargs)
+            except ProviderError as sub_error:
+                response = getattr(sub_error, "response", None)
+                if isinstance(response, ProviderResponse):
+                    usages.append(response)
+                half_resolved, half_reasons = {}, {block.block_id: str(sub_error) for block, _ in half}
+            resolved = _merge_segment_maps(resolved, half_resolved)
+            reasons.update(half_reasons)
+        return resolved, reasons
 
     def _units_for(self, blocks: list[Block], layer: TranslationLayer, *, refine: bool) -> list[tuple[Block, list[tuple[str, str]]]]:
         units: list[tuple[Block, list[tuple[str, str]]]] = []

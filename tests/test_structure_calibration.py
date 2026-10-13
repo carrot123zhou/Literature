@@ -117,8 +117,10 @@ class StructureCalibrationTests(unittest.TestCase):
     def test_images_are_sent_as_chat_content_parts(self):
         config = ProviderConfig.preset("custom", base_url="https://example.invalid/v1", model="test")
         provider = OpenAICompatibleProvider(config, api_key="fixture")
+        provider._stream_disabled = True  # 非流式回退路径：本用例只验证请求体组装
         from unittest.mock import Mock
         response = Mock()
+        response.status_code = 200
         response.json.return_value = {"choices": [{"message": {"content": "{}"}}]}
         response.headers = {}
         with patch("httpx.Client.post", return_value=response) as post:
@@ -131,6 +133,7 @@ class StructureCalibrationTests(unittest.TestCase):
     def test_read_timeout_is_separate_from_connect_and_does_not_retry(self):
         import httpx
         provider = OpenAICompatibleProvider(ProviderConfig.preset("custom", base_url="https://example.invalid/v1", model="test"), api_key="fixture")
+        provider._stream_disabled = True  # 超时语义用非流式回退路径验证
         structure_provider = provider.with_read_timeout(600)
         with patch("httpx.Client.post", side_effect=httpx.ReadTimeout("timed out")) as post:
             with self.assertRaises(ProviderTimeoutError) as raised:
@@ -146,6 +149,7 @@ class StructureCalibrationTests(unittest.TestCase):
     def test_connect_timeout_reports_connection_not_model_generation(self):
         import httpx
         provider = OpenAICompatibleProvider(ProviderConfig.preset("custom", base_url="https://example.invalid/v1", model="test"), api_key="fixture", timeout=600)
+        provider._stream_disabled = True
         with patch("httpx.Client.post", side_effect=httpx.ConnectTimeout("timed out")) as post:
             with self.assertRaises(ProviderTimeoutError) as raised:
                 provider.complete(system="test", user="test")

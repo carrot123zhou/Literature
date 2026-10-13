@@ -262,6 +262,9 @@ class TranslationJobInput(BaseModel):
     polish: bool = False
     # 同一作业内并发请求数。小块 + 并发是整本书提速的主要来源。
     parallel_workers: int = Field(default=4, ge=1, le=8)
+    # 单次模型请求的读超时。流式下是「两个数据块之间的空闲时限」，
+    # 非流式回退时才是等待整份响应的总时限；供不支持流式的中转站调大。
+    request_timeout_seconds: int = Field(default=300, ge=30, le=1800)
 
 
 class InstantInput(BaseModel):
@@ -566,6 +569,10 @@ class JobManager:
             provider = None
             try:
                 provider = self.provider_from(request.service_id, request.provider)
+                # 翻译请求的读超时可按作业配置（冻结快照不含超时，恢复沿用创建时的值）。
+                # 测试/自定义 provider 可能不实现该方法，缺省时保持原超时。
+                if hasattr(provider, "with_read_timeout"):
+                    provider = provider.with_read_timeout(float(request.request_timeout_seconds))
                 # 用实际 resolved 的 service_id 做限流键，避免空串把多个默认服务混在一起。
                 resolved_service = request.service_id or (self.models.roles().get(ROLE_TRANSLATION, "") if self.models else "")
                 service = TranslationService(

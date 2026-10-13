@@ -2,6 +2,62 @@
 
 > 本日志记录可验证事实、架构决策和仍需外部条件完成的验收。更新代码时应同步更新本文，避免把“已编码”“已测试”和“已用真实服务验证”混为一谈。
 
+## 2026-10-14（离线实验，未部署）：结构校对上下文压缩与复核范围收紧
+
+目标：回应用户“现有方案准确率高但耗时/token 多、拒绝仅按目录校准导致未收录小节被忽视”。以 `d7a0cbd` 选择性第二遍为 baseline（不是早期全量双遍），测两个变体：V1 仅压缩重复上下文（复核选择不变）；V2 压缩上下文 + 仅异常/高风险补查。只读真实库/历史审计，用 Lead 只读快照，未调模型、未安装/启动、未改真实库/raw、未提交。
+
+### 可复现性与数据
+
+- White Lotus 快照 348 候选；历史作业 `17e682665d914a0d82948c3594c18141`（2026-10-13，6 规划 + 9 复核）请求内嵌候选 ID 与当前重建 **完全一致（对称差 0）**，可做忠实两遍回放。
+- Journal（228）/ Authentic（58）历史作业候选逻辑版本不同，**不做回放**，只测规划阶段输入开销；Journal 未收录标题 63、Authentic 12，风险画像不同。
+- 快照为 2026-10-14 只读状态，可能已含人工采纳；涉及“相对当前文档”的建议集合为近似，非逐步 gold。
+
+### 输入开销（精确字符/字节；无 tokenizer，token 为估算）
+
+- White Lotus 请求拆为 6 规划窗（64/窗）+ 复核批（40/批）：历史全量双遍 15 请求/409,603 字符；**baseline 选择性 13 请求/363,728**；**V1 13 请求/279,275（-23.2%）**，其中规划 -41.5%（去后续窗口重复 overview/整本目录/过长 previous_outline，保留近邻目录/祖先/相邻标题）、复核 -4.5%（去每候选重复 reasons 与 layout，heading_context 截 120 字符）；**V2 7 请求/146,177（-59.8%）**，复核字符 -78.6%。
+- Journal 规划 101,352→68,691（-32.2%）；Authentic 单窗口 15,080→15,080（0%）。
+- 历史真实 usage（White Lotus 全量双遍，仅供参考）：规划 input 95,606 / output 59,602；复核 input 109,177 / output 61,124；非新请求计量。
+
+### 两遍分歧与省略风险（White Lotus）
+
+- 规划节点 348、复核答案 348；**role/level/parent 完全一致（role_changed=level_changed=parent_changed=0）**。V2 相比 baseline 省略复核 241 项，历史两遍分歧为 0；省略项构成 paragraph 238 + footnote 3，规划角色 body 232/furniture 6/footnote 3，本地“仍像标题”仅 4 项、非散文短块 240 项。
+- 未收录标题 5 个仍保留在目录树；其中 `Analysis` 进入 V2 复核，其余第一遍即为标题且层级不变，未被删除或降级。
+- 两遍共有 2 个父子关系错误（`1.1 Defining the problem`、`1.2 Defining some terminology` 挂为根），**两遍都没修**；说明两遍一致≠真实正确。
+- 人工采纳：该历史作业 43 条 applied；落在 V2 省略集的仅 2 条本地 `set_type→paragraph` 归一（规划/复核一致，非模型复核被省略而丢失），无“人工采纳项存在两遍分歧”。
+
+### 结论 / 未验收
+
+- **V1 有低风险离线收益证据**（候选与复核选择不变，机制明确）；**V2 收益明确但质量未证**：单样本单模型、两遍一致非真值、Journal/Authentic 无法回放、token 为估算。均 **不能声称可部署或准确率/真实耗时已验证**。
+- 生产默认路径未变：`select_review_targets` 仅新增默认 `strict_local=True` 的可选参数（默认行为同 `d7a0cbd`）。
+- 产物：`tests/manual/experiments/structure_context_experiment.py`、`tests/test_structure_context_experiment.py`（11 项边界回归，全量 `pytest` 390 passed 含既有 379）、`docs/verification/structure-context-experiment-2026-10-14.md` 与同名 JSON。
+- 下一步（交 Lead/用户决策）：真实小样本 A/B（3 样本×2 模型×3 分支，≤120 请求，硬预算；人工小规模 gold 覆盖全部未收录标题与历史分歧项）；V2 只要漏掉任一 gold 未收录小节或省略任一人工采纳修正即不通过，保留 baseline+V1。
+
+## 2026-10-14（第十九轮）：翻译链路流式传输、超时切分重试与读超时可配（Lead 直接实施，已编码/自动测试/tsc/生产前端构建，未重建 sidecar/未安装/未真实 provider 验收）
+
+### 诊断背景（只读检查真实库，未改数据）
+
+- 《The White Lotus Teachings》300 段译文中 **16 段 failed**，错误全部为「等待模型响应超时（等待上限 180 秒）」；该书 Qwen（中转）用量 815,668 输出 token 中 **721,697（88.5%）为 reasoning**；《On Being Authentic》同型（958,431 输出中 859,784 为 reasoning）。
+- 三个叠加缺口：翻译链路从未调用 `with_read_timeout`（吃 provider 默认 180s，只有结构用 600s）；超时后不沿 segment 切分重试（只有协议失败才切），整批 12 字段一起判死，连续 3 块全失败触发 `GLOBAL_FAILURE_LIMIT` 熔断；思考模式开关后端协议已落地但此前前端不可达（前端入口已在第十八轮提交）。
+
+### 实现
+
+1. **SSE 流式请求**（`literature/providers.py`）：`_complete` 默认 `stream=true + stream_options.include_usage`；新增 `_read_stream` 聚合 `delta.content`（`delta.reasoning_content` 只参与保活、不计入译文），usage/finish_reason/model/id 取自事件流，聚合成与非流式一致的响应 JSON 后走同一下游提取。读超时语义变为「两个数据块之间的空闲时限」。三重回退：①服务端 400 拒绝流式 → 置 `_stream_disabled` 本会话永久回退非流式，同一 attempt 预算内重发（hooks `end(final=False)` 释放本次预留，不重复预留）；②空事件流（无内容/无 usage/无 finish_reason）→ 同上回退，不伪造成空译文；③中转站忽略 `stream` 返回完整 JSON（content-type 非 event-stream）→ 按非流式解析，不关流式。流中网络中断仍映射 `ProviderTimeoutError(read)`；`_HTTPStatusError`/`_StreamUnsupported` 为模块内私有异常；429/5xx 退避重试与 attempt 预算钩子语义不变。
+2. **超时切分重试**（`literature/translation.py`）：`_run_chunk` 捕获 `ProviderTimeoutError` 调 `_retry_batch_after_timeout`：批次沿 segment 中点切半（复用 `_split_units`），两半分别隔离重试，递归受 `MAX_SPLIT_DEPTH=3` 限制；单 segment 无法再切或超深时才把该批标失败（错误带「请求超时：」前缀）。每个成功子响应仍立即落盘中间证据；超时分支 `batch_run_id` 置空不影响 run_id 归属。
+3. **读超时可配**（`literature/api.py`）：`TranslationJobInput.request_timeout_seconds`（默认 300，范围 30–1800），启动翻译作业时用 `with_read_timeout` 应用（`hasattr` 守卫：测试/自定义 provider 未实现该方法时保持原超时）。冻结快照不含超时，恢复沿用创建时的配置值。
+4. **reviewer 只读复验后的修复（E/F 回归）**：复验发现非流式分支的 `response.json()` 解码失败不再归成 `ProviderError`（HEAD 原实现包在 `except Exception`），导致①错误文案变成原始 JSONDecodeError、②`provider_error_streak` 不自增 → 连续失败熔断对「200+门户 HTML」失效。修复：非流式与 relay-JSON 分支的解码失败统一经 `_HTTPStatusError`（status=200 不在重试集，外层转 `ProviderError` 且 hooks `end(final=True)`）。**reviewer 第二轮定向复验证实 E 有效且熔断恢复（200+HTML 连续 3 次即触发 GLOBAL_FAILURE_LIMIT），但发现 F 修复在真实 httpx 流下无效**：非 event-stream 分支在未 `read()` 的流式响应上访问 `.json()/.text` 抛 `httpx.ResponseNotRead`（它不是 ValueError/HTTPError，不会被捕获），relay-JSON 回退与 200+HTML 在真实流下全部失效（MockTransport 预置 `_content`，故单测未暴露）。修复：该分支解析前先 `response.read()`；另在 `_complete` 增加 `except httpx.StreamError` 兼底（任何流读取异常都归 `ProviderError`，熔断语义不破口）。新增真实本机 HTTP 服务（127.0.0.1 随机端口）回归 3 项：relay 返回 JSON、SSE 体标错 content-type、流式 200+HTML → ProviderError 而非 ResponseNotRead。SSE 聚合抽为模块级 `_aggregate_sse_events` 复用。另按复验意见：`_stream_disabled` 语义表述修正为「本 provider 实例」（每作业新建 provider，新作业仍会先试一次流式）；确认流式覆盖所有 `_complete` 调用方（结构/即时/译审/vision）属有意设计。复验观察项 3（超时切分块 `model_run_id` 为空、`run_token` 正常）与 4（跨半块成功半不落 partial、存为 candidates 后恢复重发，既有行为）记录在案，均不阻塞。
+
+### 测试与验证
+
+- 新增 `tests/test_translation_streaming.py` **12 项**：SSE 聚合含 usage/finish_reason/request_id、思考增量不计入内容、请求体含 `stream_options.include_usage`、400 拒流式回退（非流式重发成功且本实例关闭流式）、中转站忽略 stream 返回 JSON 正常解析、空事件流回退、流中 ReadTimeout 映射 `ProviderTimeoutError(kind=read)`、qwen_thinking 字段在流式路径照发、200+HTML 归 `ProviderError`、relay 分支非法 JSON 归 `ProviderError`、无 content-type 的 SSE 体照常解析、超时切分后全部块译出、单段超时任务 failed 且条目错误含「超时」、`request_timeout_seconds` 默认/自定义。
+- 既有测试适配：`test_structure_calibration.py` 三个 patch `httpx.Client.post` 的用例与 `test_structure_speed.py` 预算用例显式置 `_stream_disabled = True`（它们验证的是非流式路径的请求体组装/超时语义）；images 用例的 Mock 响应补 `status_code = 200`。
+- 全量 `pytest` **379 passed**（364 + 新增 15，含 3 项真实本机 HTTP 流回归）；`tsc --noEmit`、Vite 生产构建通过。reviewer 两轮复验：基线三项全绿；定向检查（回退路径预算峰值=1 无双重预留、流中超时 final=True、超时切分中间证据落盘 spy 证据、with_read_timeout 保留 `_stream_disabled`、E 修复后熔断恢复）全部 PASS；第三轮待复验 ③ 真实流三项。
+
+### 边界与未验收
+
+- 未重建 sidecar/Tauri 包、未安装客户端（当前已安装客户端仍为第十八轮 revision `21664b1e108399c8335c`，不含本轮流式改动）。
+- 未用真实中转/真实 provider 验证：流式兼容性（尤其各家中转对 `stream_options` 的支持）、真实耗时/费用/失败率改善。中转站若对 `include_usage` 静默忽略，usage 将记为未知费用（既有 `unknown_cost_records`/待对账路径承接）。
+- 真实 MinerU/付费模型、原生交互、公证仍未验收（未变）。
+
 ## 2026-10-14（第十八轮）：AI 结构校对提速保质（Orca Worker 实施，已编码/自动测试/tsc/生产构建/隔离浏览器，未真实模型 A/B、未安装）
 
 目标：在不牺牲漏标召回的前提下加快 AI 结构校对。不改数据分层、不改真实库/raw、不调付费服务。
