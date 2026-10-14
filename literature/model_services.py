@@ -141,10 +141,12 @@ class ModelServiceStore:
 
     # ---- 读写与 v1→v2 迁移 ---------------------------------------------- #
 
-    def _normalize_entry(self, item: dict[str, Any]) -> dict[str, Any]:
+    def _normalize_entry(self, item: dict[str, Any], *, legacy: bool = False) -> dict[str, Any]:
         entry = ModelEntry(
             model=_clean_text(item.get("model"), maximum=200),
-            name=_clean_text(item.get("name"), maximum=200),
+            # v1 扁平服务上的 ``name`` 是“服务名”（旧流程一个服务就是一个模型），
+            # 不是模型显示名；当成模型名会在 UI 里显示成服务商名（yellowbee）。
+            name="" if legacy else _clean_text(item.get("name"), maximum=200),
             context_window=max(0, min(10_000_000, _as_int(item.get("context_window"), default=0))),
             max_output_tokens=max(256, min(128_000, _as_int(item.get("max_output_tokens"), default=16384))),
             temperature=max(0.0, min(2.0, _as_float(item.get("temperature"), default=0.2))),
@@ -157,32 +159,28 @@ class ModelServiceStore:
         return entry.to_dict()
 
     def _normalize_provider(self, item: Any) -> dict[str, Any] | None:
+        """归一化一个**已经是 v2 形态**的服务商（带 `models` 列表，不参与合并）。"""
         if not isinstance(item, dict) or not item.get("service_id"):
             return None
         preset = _clean_text(item.get("preset"), maximum=40) or "custom"
-        provider = {
+        raw_models = item.get("models")
+        entries = [self._normalize_entry(entry) for entry in raw_models if isinstance(entry, dict)] if isinstance(raw_models, list) else []
+        return {
             "service_id": str(item["service_id"]),
             "name": _clean_text(item.get("name"), maximum=120) or preset,
             "preset": preset,
             "base_url": _clean_text(item.get("base_url"), maximum=500),
-            "models": [],
+            "models": [entry for entry in entries if entry["model"]],
         }
-        raw_models = item.get("models")
-        if isinstance(raw_models, list):
-            entries = [self._normalize_entry(entry) for entry in raw_models if isinstance(entry, dict)]
-        else:
-            entries = [self._normalize_entry(item)]  # v1 扁平结构：整个服务就是一个模型
-        provider["models"] = [entry for entry in entries if entry["model"]]
-        return provider
 
-    def _normalize_role(self, value: Any, providers: list[dict[str, Any]]) -> dict[str, str]:
+    def _normalize_role(self, value: Any, *, providers_by_id: dict[str, dict[str, Any]], legacy_model: dict[str, str]) -> dict[str, str]:
         if isinstance(value, dict):
             return {"service_id": _clean_text(value.get("service_id"), maximum=64), "model": _clean_text(value.get("model"), maximum=200)}
         if isinstance(value, str) and value:
-            # v1：角色绑定到服务（当时服务=模型），迁移到该服务的第一个模型。
-            provider = next((item for item in providers if item["service_id"] == value), None)
-            model = provider["models"][0]["model"] if provider and provider["models"] else ""
-            return {"service_id": value, "model": model}
+            # v1：角色绑定到服务（当时服务=模型）。合并后取该服务贡献的那个模型，而不是合并组里的第一个。
+            provider = providers_by_id.get(value)
+            model = legacy_model.get(value) or (provider["models"][0]["model"] if provider and provider["models"] else "")
+            return {"service_id": provider["service_id"] if provider else value, "model": model}
         return _empty_role()
 
     def _read(self) -> dict[str, Any]:
@@ -190,13 +188,48 @@ class ModelServiceStore:
             value = json.loads(self.path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             value = {}
-        raw_services = value.get("services")
+        raw_services = value.get("services") if isinstance(value.get("services"), list) else []
         raw_roles = value.get("roles") if isinstance(value.get("roles"), dict) else {}
-        providers = [item for item in (self._normalize_provider(entry) for entry in raw_services) if item] if isinstance(raw_services, list) else []
+        providers: list[dict[str, Any]] = []
+        providers_by_id: dict[str, dict[str, Any]] = {}
+        legacy_model: dict[str, str] = {}
+        groups: dict[tuple[str, str], dict[str, Any]] = {}
+        for item in raw_services:
+            if not isinstance(item, dict) or not item.get("service_id"):
+                continue
+            service_id = str(item["service_id"])
+            if isinstance(item.get("models"), list):
+                provider = self._normalize_provider(item)
+                if provider is not None:
+                    providers.append(provider)
+                    providers_by_id[service_id] = provider
+                continue
+            # v1 扁平服务：同一个 Base URL + 预设的服务合并成一个服务商（Cindy 的「一个服务商挂多个模型」）。
+            # 旧流程为每个模型建一条服务，所以历史配置会以 base_url 合并。
+            preset = _clean_text(item.get("preset"), maximum=40) or "custom"
+            base_url = _clean_text(item.get("base_url"), maximum=500)
+            key = (base_url, preset)
+            provider = groups.get(key)
+            if provider is None:
+                provider = {
+                    "service_id": service_id,
+                    "name": _clean_text(item.get("name"), maximum=120) or preset,
+                    "preset": preset,
+                    "base_url": base_url,
+                    "models": [],
+                }
+                groups[key] = provider
+                providers.append(provider)
+            entry = self._normalize_entry(item, legacy=True)
+            if entry["model"]:
+                legacy_model[service_id] = entry["model"]
+                if not any(existing["model"] == entry["model"] for existing in provider["models"]):
+                    provider["models"].append(entry)
+            providers_by_id[service_id] = provider
         return {
             "version": 2,
             "services": providers,
-            "roles": {role: self._normalize_role(raw_roles.get(role), providers) for role in MODEL_ROLES},
+            "roles": {role: self._normalize_role(raw_roles.get(role), providers_by_id=providers_by_id, legacy_model=legacy_model) for role in MODEL_ROLES},
         }
 
     def _write(self, value: dict[str, Any]) -> None:
@@ -387,6 +420,20 @@ class ModelServiceStore:
             return False
 
     # ---- 写入 ----------------------------------------------------------- #
+
+    def ensure_migrated(self) -> None:
+        """把旧版 v1 扁平配置一次性落盘为 v2（同一个 Base URL 的服务合并成一个服务商）。
+        失败不影响读取（读取时仍按迁移后视图）。"""
+        try:
+            raw = json.loads(self.path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return
+        if isinstance(raw, dict) and raw.get("version") == 2:
+            return
+        try:
+            self._write(self._read())
+        except OSError:
+            logger.exception("模型配置 v1→v2 迁移写盘失败（读取仍按迁移后视图）")
 
     def create(self, payload: dict[str, Any]) -> dict[str, Any]:
         value = self._read()

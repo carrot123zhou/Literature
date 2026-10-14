@@ -142,13 +142,12 @@ function entryBadges(entry: ModelEntry): string[] {
 
 /** 模型服务商库（v3 两层：服务商 → 模型）：左侧服务商列表，右侧服务商表单 + 内嵌模型列表。
  *
- * 交互对齐 Cindy：「获取模型列表 → 选择器（可多选批量加）→ 追加进服务商并保存」；
- * 思考配置挂在每个模型上（统一档位 + 高级区协议/预算）；顶部角色绑定改为
- * 「服务商 + 模型」两级下拉。
+ * 作为「设置 → 模型服务」分区嵌入（不再是独立弹窗）。交互对齐 Cindy：
+ * 「获取模型列表 → 选择器（可多选批量加）→ 追加进服务商并保存」；思考配置挂在每个
+ * 模型上；顶部角色绑定为「服务商 + 模型」两级下拉。
  */
-export default function ModelServicesDialog({ api, role, close, onMessage }: { api: ModelServicesApi; role: ModelRole; close: () => void; onMessage: (value: string) => void }) {
-  const bound = api.serviceFor(role);
-  const [draft, setDraft] = useState<Draft>(() => bound ? draftFrom(bound) : emptyDraft());
+export default function ModelServicesPanel({ api, onMessage }: { api: ModelServicesApi; onMessage: (value: string) => void }) {
+  const [draft, setDraft] = useState<Draft>(() => api.services[0] ? draftFrom(api.services[0]) : emptyDraft());
   const [keyInput, setKeyInput] = useState("");
   const [busy, setBusy] = useState(false);
   const [checking, setChecking] = useState(false);
@@ -160,15 +159,11 @@ export default function ModelServicesDialog({ api, role, close, onMessage }: { a
   const [modelQuery, setModelQuery] = useState("");
   const [pickedModels, setPickedModels] = useState<Set<string>>(new Set());
   const [expandedModel, setExpandedModel] = useState("");
+  /** 用户点了「+ 新增」：不要被“自动选中第一个服务商”的效果覆盖。 */
+  const [creating, setCreating] = useState(false);
 
   /** 状态行：默认成功色；失败/校验提示用 error=true 标红，避免「密钥无效」显示成绿色。 */
   const showStatus = (text: string, error = false) => { setCheckResult(text); setStatusError(error); };
-
-  useEffect(() => {
-    const onKeyDown = (event: KeyboardEvent) => { if (event.key === "Escape") close(); };
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
-  }, [close]);
 
   const isNew = !draft.service_id;
   const selected = useMemo(() => api.services.find(item => item.service_id === draft.service_id), [api.services, draft.service_id]);
@@ -182,7 +177,14 @@ export default function ModelServicesDialog({ api, role, close, onMessage }: { a
 
   const resetTransient = () => { setKeyInput(""); setCheckResult(""); setRemoteOptions([]); setPickerOpen(false); setModelQuery(""); setPickedModels(new Set()); setExpandedModel(""); };
 
+  // 首次加载（或删除后）自动选中第一个服务商；用户新建时不干扰。
+  useEffect(() => {
+    if (creating || draft.service_id || !api.services.length) return;
+    setDraft(draftFrom(api.services[0]));
+  }, [api.services, draft.service_id, creating]);
+
   const selectService = (service: ModelService) => {
+    setCreating(false);
     setDraft(draftFrom(service));
     resetTransient();
   };
@@ -202,18 +204,18 @@ export default function ModelServicesDialog({ api, role, close, onMessage }: { a
     setBusy(true);
     try {
       const saved = isNew ? await api.create(payloadOf(draft)) : await api.update(draft.service_id, payloadOf(draft));
+      setCreating(false);
       setDraft(draftFrom(saved));
-      // 仅新建时自动绑定当前角色；编辑已保存服务商不得静默改写用户手工设置的角色绑定。
-      if (isNew) await api.setRoles({ [role]: { service_id: saved.service_id, model: saved.models[0]?.model ?? "" } });
+      // 未绑定的角色由后端在创建时自动绑定到服务商的第一个模型，这里不再改写用户手工设置。
       onMessage(`模型服务商已保存：${saved.name}（${saved.models.length} 个模型）`);
     } catch (error) { showStatus(normalizeProviderError(String(error)), true); }
     finally { setBusy(false); }
   };
 
   const remove = async () => {
-    if (isNew) { setDraft(emptyDraft()); resetTransient(); return; }
+    if (isNew) { setCreating(false); setDraft(emptyDraft()); resetTransient(); return; }
     setBusy(true);
-    try { await api.remove(draft.service_id); setDraft(emptyDraft()); resetTransient(); onMessage("模型服务商已删除"); }
+    try { await api.remove(draft.service_id); setCreating(false); setDraft(emptyDraft()); resetTransient(); onMessage("模型服务商已删除"); }
     catch (error) { showStatus(normalizeProviderError(String(error)), true); }
     finally { setBusy(false); }
   };
@@ -332,14 +334,8 @@ export default function ModelServicesDialog({ api, role, close, onMessage }: { a
     api.setRoles({ [item]: { service_id: binding.service_id, model } } as Partial<Record<ModelRole, { service_id: string; model: string }>>).catch(error => onMessage(String(error)));
   };
 
-  return <div className="modal-backdrop model-services-backdrop" onClick={close}>
-    <section className="model-services-dialog" role="dialog" aria-modal="true" aria-label="模型服务商" onClick={event => event.stopPropagation()}>
-      <header>
-        <div><h2>模型服务商</h2><p>集中管理模型服务商（厂商预设或自定义中转站）及其模型列表，再按「服务商 → 模型」分配给「结构校对」与「翻译」。模型与上下文从服务商的 /v1/models 自动读取，API Key 只保存在本机 Keychain。</p></div>
-        <button aria-label="关闭模型服务商设置" onClick={close}>×</button>
-      </header>
-
-      <div className="model-role-row model-role-row-v3">
+  return <div className="model-services-panel">
+    <div className="model-role-row model-role-row-v3">
         {(["structure", "translation"] as ModelRole[]).map(item => {
           const binding = roleValue(item);
           const roleProvider = api.services.find(candidate => candidate.service_id === binding.service_id);
@@ -361,7 +357,7 @@ export default function ModelServicesDialog({ api, role, close, onMessage }: { a
 
       <div className="model-services-body">
         <aside className="model-service-list">
-          <div className="model-service-list-head"><strong>服务商</strong><button onClick={() => { setDraft(emptyDraft()); resetTransient(); }}>+ 新增</button></div>
+          <div className="model-service-list-head"><strong>服务商</strong><button onClick={() => { setCreating(true); setDraft(emptyDraft()); resetTransient(); }}>+ 新增</button></div>
           {api.services.length === 0 && <p className="empty-note">还没有模型服务商。点击「+ 新增」开始配置。</p>}
           {api.services.map(service => <button key={service.service_id} className={`model-service-item${service.service_id === draft.service_id ? " selected" : ""}`} onClick={() => selectService(service)}>
             <span className={`model-dot${service.configured ? " configured" : ""}`}/>
@@ -470,7 +466,6 @@ export default function ModelServicesDialog({ api, role, close, onMessage }: { a
           </div>
           {checkResult && <p className={`model-form-status${statusError ? " is-error" : ""}`} role={statusError ? "alert" : "status"}>{checkResult}</p>}
         </form>
-      </div>
-    </section>
+    </div>
   </div>;
 }

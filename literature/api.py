@@ -1634,6 +1634,7 @@ def create_app(store: ProjectStore | None = None):
         return {"configured": False}
 
     def _service_view() -> dict[str, Any]:
+        models.ensure_migrated()
         return {
             "services": [{**item, "configured": models.configured(item["service_id"])} for item in models.list()],
             "roles": models.roles(),

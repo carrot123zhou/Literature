@@ -336,23 +336,36 @@ class ModelServiceApiTests(unittest.TestCase):
         # 删除后引用它的角色被清空，避免悬空绑定。
         self.assertEqual(listing["roles"]["translation"], {"service_id": "", "model": ""})
 
-    def test_v1_flat_config_migrates_to_provider_model_hierarchy(self) -> None:
-        """旧的扁平配置（服务=模型、roles 是字符串）读取时自动迁移为服务商 → 模型层级。"""
+    def test_v1_flat_config_migrates_and_merges_same_base_url(self) -> None:
+        """旧配置里同一个 Base URL 的多条「服务」应合并成一个服务商、多个模型（对齐 Cindy）。"""
         path = Path(os.environ["LITERATURE_RUNTIME"]) / "model-services.json"
         path.write_text(json.dumps({
             "version": 1,
-            "services": [{"service_id": "svc-1", "name": "yellowbee", "preset": "custom",
-                          "base_url": "http://relay.example.com/v1", "model": "qwen3.8-flash-next",
-                          "max_output_tokens": 4096, "reasoning_style": "qwen_thinking", "reasoning_effort": "off"}],
-            "roles": {"structure": "svc-1", "translation": "svc-1"},
+            "services": [
+                {"service_id": "svc-1", "name": "yellowbee", "preset": "custom",
+                 "base_url": "http://relay.example.com/v1", "model": "qwen3.8-flash-next",
+                 "max_output_tokens": 4096, "reasoning_style": "qwen_thinking", "reasoning_effort": "off"},
+                {"service_id": "svc-2", "name": "deepseek-v4-flash", "preset": "custom",
+                 "base_url": "http://relay.example.com/v1", "model": "deepseek-v4-flash", "context_window": 1048576},
+                {"service_id": "svc-3", "name": "other", "preset": "custom",
+                 "base_url": "https://other.example.com/v1", "model": "gpt-5-mini"},
+            ],
+            "roles": {"structure": "svc-1", "translation": "svc-2"},
         }, ensure_ascii=False), encoding="utf-8")
         listing = self.client.get("/model-services", headers=self.headers).json()
-        self.assertEqual(len(listing["services"]), 1)
-        provider = listing["services"][0]
-        self.assertEqual(provider["models"][0]["model"], "qwen3.8-flash-next")
-        self.assertEqual(provider["models"][0]["reasoning_style"], "qwen_thinking")
-        self.assertEqual(provider["models"][0]["max_output_tokens"], 4096)
+        # 同 Base URL 的两条合并为一个服务商；不同 Base URL 的仍是独立服务商。
+        self.assertEqual(len(listing["services"]), 2)
+        merged = listing["services"][0]
+        self.assertEqual(merged["service_id"], "svc-1")
+        self.assertEqual([entry["model"] for entry in merged["models"]], ["qwen3.8-flash-next", "deepseek-v4-flash"])
+        self.assertEqual(merged["models"][0]["reasoning_style"], "qwen_thinking")
+        # v1 的 name 是服务名，不得当成模型显示名。
+        self.assertEqual(merged["models"][0]["name"], "")
+        # 角色保留到各自原来贡献的那个模型，而不是合并组的第一个。
         self.assertEqual(listing["roles"]["structure"], {"service_id": "svc-1", "model": "qwen3.8-flash-next"})
+        self.assertEqual(listing["roles"]["translation"], {"service_id": "svc-1", "model": "deepseek-v4-flash"})
+        # 读取即落盘为 v2，避免每次都重新合并。
+        self.assertEqual(json.loads(path.read_text(encoding="utf-8"))["version"], 2)
 
     def test_model_service_lists_remote_models(self) -> None:
         service = self.create_service()

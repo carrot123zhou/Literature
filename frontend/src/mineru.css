@@ -543,3 +543,27 @@ body.is-resizing { cursor: col-resize; user-select: none; }
 .history-slice { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 6px 10px; border-radius: 7px; background: #f3f6f0; font-size: 12px; }
 .history-slice.slice-failed { background: #f7e2df; color: #8a2f24; }
 .model-form-status.is-error { color: #b91c1c; }
+
+/* 设置：左侧分类导航 + 右侧内容（模型配置归口在「模型服务」） */
+.settings-backdrop { justify-content: center; align-items: center; }
+.settings.settings-v2 { width: min(1080px, 94vw); height: min(780px, 92vh); padding: 0; display: grid; grid-template-rows: auto minmax(0, 1fr); border-radius: 14px; border-left: 1px solid var(--mineru-border); overflow: hidden; }
+.settings-v2 .settings-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 15px 20px; border-bottom: 1px solid #e1e5e0; }
+.settings-v2 .settings-head h2 { margin: 0; font: 600 20px Georgia, "Noto Serif CJK SC", serif; }
+.settings-v2 .settings-body { min-height: 0; display: grid; grid-template-columns: 208px minmax(0, 1fr); }
+.settings-v2 .settings-nav { display: flex; flex-direction: column; gap: 2px; padding: 12px; border-right: 1px solid #e6eae5; overflow: auto; background: #faf9f4; }
+.settings-v2 .settings-nav button { display: grid; gap: 1px; text-align: left; border: 1px solid transparent; background: none; border-radius: 8px; padding: 9px 11px; }
+.settings-v2 .settings-nav button small { color: #8a958e; font-size: 11px; }
+.settings-v2 .settings-nav button:hover { border-color: #e3e7e1; }
+.settings-v2 .settings-nav button.active { background: #fffefa; border-color: #d8ded7; box-shadow: 0 1px 3px #20322b12; }
+.settings-v2 .settings-content { min-height: 0; overflow: auto; padding: 18px 22px 26px; }
+.settings-v2 .settings-content h3 { margin: 4px 0 10px; font: 600 14px -apple-system, sans-serif; }
+.settings-v2 .settings-content h3:not(:first-child) { margin-top: 22px; }
+.settings-v2 .settings-content hr { margin: 20px 0; }
+.settings-v2 .settings-content label { max-width: 560px; }
+.settings-v2 .settings-content input[type="number"], .settings-v2 .settings-content input[type="password"] { max-width: 320px; }
+/* 模型服务面板在设置里铺满内容区，不自己滚动（由设置内容区统一滚动） */
+.model-services-panel { display: grid; gap: 12px; }
+.model-services-panel .model-role-row { border: 1px solid #e0e5e0; border-radius: 10px; background: #f8f9f5; }
+.model-services-panel .model-services-body { border: 1px solid #e0e5e0; border-radius: 10px; overflow: hidden; min-height: 460px; }
+.model-services-panel .model-service-list { max-height: none; }
+.model-services-panel .model-service-form { max-height: none; }

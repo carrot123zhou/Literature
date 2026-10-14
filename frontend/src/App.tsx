@@ -7,11 +7,11 @@ import TaskHistory from "./TaskHistory";
 import ReviewWorkspace from "./review/ReviewWorkspace";
 import { flattenToc } from "./review/projection";
 import { useModelServices } from "./modelServices";
-import { InstantPanel, ModelServicesDialog, ReadingWorkspace, Settings, TaskPicker } from "./workbench";
+import { InstantPanel, ReadingWorkspace, Settings, TaskPicker, type SettingsSection } from "./workbench";
 import type { ScopeConfirm } from "./workbench/ReadingPanels";
 import type { ReasoningMode } from "./workbench/ThinkingLevelField";
 import { isWorkView, readLastProject, useHashRoute, writeLastProject } from "./viewState";
-import type { DocumentGraph, GlossaryVersion, Job, ModelRole, Project, StructurePatch, StructureSuggestion, TranslationEstimate, TranslationLayer, TranslationStats, UsageRecord } from "./types";
+import type { DocumentGraph, GlossaryVersion, Job, Project, StructurePatch, StructureSuggestion, TranslationEstimate, TranslationLayer, TranslationStats, UsageRecord } from "./types";
 
 function savedInstructions(): string { try { return window.localStorage.getItem("literature.translation.instructions") || "" } catch { return "" } }
 
@@ -31,7 +31,7 @@ export default function App() {
   const [usage, setUsage] = useState({ input_tokens: 0, output_tokens: 0, cached_tokens: 0, reasoning_tokens: 0, estimated_cost: 0, unknown_cost_records: 0, pending_cost_records: 0 });
   const [instructions, setInstructions] = useState(savedInstructions);
   const [settings, setSettings] = useState(false);
-  const [modelRole, setModelRole] = useState<ModelRole | null>(null);
+  const [settingsSection, setSettingsSection] = useState<SettingsSection>("general");
   const [message, setMessage] = useState("");
   const [instantResult, setInstantResult] = useState<{ source: string; text: string; blockId: string } | null>(null);
   const [reviewCandidate, setReviewCandidate] = useState<{ job_id?: string; project_id: string; locale: string; block_id: string; candidate_id: string; source_hash: string; base_revision: string; changed: boolean; complete: boolean; revised: Record<string, unknown>; original: Record<string, unknown>; source?: string; current?: string } | null>(null);
@@ -188,7 +188,7 @@ export default function App() {
   };
   // 文件资源卡片可以就地启动翻译：范围与目标语言来自弹窗，不依赖当前已打开的任务。
   const translateProject = async (projectId: string, options: { scope: string; locale: string }) => {
-    if (!models.roles.translation.service_id) { setModelRole("translation"); setMessage("请先配置翻译模型"); return false; }
+    if (!models.roles.translation.service_id) { openSettings("models"); setMessage("请先配置翻译模型"); return false; }
     const binding = models.roles.translation;
     try {
       await api(`/projects/${projectId}/translation/jobs`, { method: "POST", body: JSON.stringify({
@@ -218,7 +218,7 @@ export default function App() {
     const binding = models.roles.translation;
     // 弹窗里可以直接选服务商/模型：守卫按“实际将使用的 service_id”判断，而不是只看角色绑定。
     const effectiveServiceId = options.serviceId || binding.service_id;
-    if (!effectiveServiceId) { setModelRole("translation"); setMessage("请先配置翻译模型"); return; }
+    if (!effectiveServiceId) { openSettings("models"); setMessage("请先配置翻译模型"); return; }
     if (taskScope === "blocks" && !blockIds.length) { setMessage("请先在目录中勾选要翻译的章节或段落"); return; }
     const targetLocale = options.locale || locale;
     if (options.locale && options.locale !== locale) setLocale(options.locale);
@@ -278,7 +278,7 @@ export default function App() {
     setMessage(`术语表已回滚为 v${version} 的内容（新版本 v${value.version}）`);
   };
   const reviewBlock = async (blockId: string) => {
-    if (!models.roles.translation.service_id) { setModelRole("translation"); setMessage("请先配置翻译模型"); return; }
+    if (!models.roles.translation.service_id) { openSettings("models"); setMessage("请先配置翻译模型"); return; }
     const projectId = activeProjectId;
     const requestedLocale = locale;
     const seq = ++reviewSeqRef.current;
@@ -317,7 +317,7 @@ export default function App() {
   const instant = async (text: string, blockId: string) => {
     const selection = text.trim();
     if (!selection) return;
-    if (!models.roles.translation.service_id) { setModelRole("translation"); setMessage("请先配置翻译模型"); return; }
+    if (!models.roles.translation.service_id) { openSettings("models"); setMessage("请先配置翻译模型"); return; }
     try {
       const value = await api<any>(`/projects/${activeProjectId}/translate/instant`, { method: "POST", body: JSON.stringify({ service_id: models.roles.translation.service_id, model: models.roles.translation.model, text: selection, locale, block_id: blockId || null }) });
       setInstantResult({ source: selection, text: value.text, blockId });
@@ -328,7 +328,7 @@ export default function App() {
 
   const usageBadge = document ? <span className="usage">{(usage.input_tokens + usage.output_tokens).toLocaleString()} Token · ${usage.estimated_cost.toFixed(4)}{document.budget_usd ? ` / $${document.budget_usd.toFixed(2)}` : ""}{(usage.unknown_cost_records + usage.pending_cost_records) ? ` · ${usage.unknown_cost_records + usage.pending_cost_records} 个请求费用未知/待对账` : ""}</span> : undefined;
   const stats: TranslationStats = translation?.stats || { total: 0, done: 0, pending: 0, percent: 0, untranslated: 0, translated: 0, refined: 0, edited: 0, failed: 0, locked: 0, stale: 0, stale_locked: 0, stale_source: 0, stale_source_unlocked: 0, stale_structure: 0, stale_block_ids: [] };
-  const openModelsForView = () => { setSettings(false); setModelRole(view === "read" ? "translation" : "structure"); };
+  const openSettings = (section: SettingsSection = "general") => { setSettingsSection(section); setSettings(true); };
   const projectPlaceholder = (hint: string) => activeProjectId
     ? <WorkspaceState title={projectLoadError ? "无法打开任务" : "正在载入任务…"} body={projectLoadError || "正在读取规范文档。"} action={projectLoadError ? openResources : undefined} label={projectLoadError ? "查看文件资源" : undefined}/>
     : <TaskPicker projects={projects} onOpen={openProjectFor} onUpload={openHome} hint={hint}/>;
@@ -378,7 +378,7 @@ export default function App() {
           modelService={models.serviceFor("structure")}
           boundModel={models.roles.structure?.model || ""}
           providers={models.services}
-          onConfigureModel={() => setModelRole("structure")}
+          onConfigureModel={() => openSettings("models")}
         />
       : projectPlaceholder("选择一个已完成处理的文档，进入结构校对；或去首页上传新文件。"))}
     {view === "read" && (document
@@ -416,7 +416,7 @@ export default function App() {
           onOpenReview={() => navigate("review", activeProjectId)}
           providers={models.services}
           translationBinding={models.roles.translation}
-          onConfigureModel={() => setModelRole("translation")}
+          onConfigureModel={() => openSettings("models")}
         />
       : projectPlaceholder("选择一个已完成处理的文档，进入阅读与翻译；或去首页上传新文件。"))}
     {isWorkView(view) && <footer className="statusbar"><span>{syncError ? <b style={{ color: "var(--rdg-fail, #b91c1c)" }}>同步失败：{syncError}</b> : lastSyncAt ? `已同步 ${new Date(lastSyncAt).toLocaleTimeString()}` : "本地项目 · 已保存"}</span><span>{jobs[0] ? `${jobs[0].kind} · ${jobs[0].status} · ${Math.round(jobs[0].progress * 100)}%` : "无运行任务"}</span><span>{suggestions.filter(value => !value.automatic).length} 项待确认</span></footer>}
@@ -428,12 +428,13 @@ export default function App() {
       instructions={instructions}
       setInstructions={setInstructions}
       usageRecords={usageRecords}
+      models={models}
+      section={settingsSection}
+      onSectionChange={setSettingsSection}
       close={() => setSettings(false)}
       onUpdated={setDocument}
       onMessage={setMessage}
-      onOpenModels={openModelsForView}
     />}
-    {modelRole && <ModelServicesDialog api={models} role={modelRole} close={() => setModelRole(null)} onMessage={setMessage}/>}
     {instantResult && <InstantPanel projectId={activeProjectId} locale={locale} value={instantResult} close={() => setInstantResult(null)} onSaved={() => refreshProject(activeProjectId)}/>}
     {message && <button className="toast" onClick={() => setMessage("")}>{message}</button>}
   </div>;
