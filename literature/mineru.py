@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from .models import BBOX_SPACE_MINERU_1000, BBOX_SPACE_NONE, Block, Cell, Document, Page, TocNode, utc_now
-from .storage import ProjectStore, StorageError, atomic_json, sha256_file
+from .storage import ProjectStore, StorageError, atomic_json, atomic_text, sha256_file
 
 
 IGNORED_TYPES = {"header", "footer", "page_header", "page_footer", "page_number"}
@@ -356,6 +356,16 @@ def _page_metadata(directory: Path, project: Path, page_offset: int, page_count:
     return pages
 
 
+def write_source_markdown(project: Path, document: Document) -> None:
+    """原子写入可读投影 ``document/source.md``。
+
+    source.md 是 ``document.json`` 的人类可读投影，不是事实来源；它会在导入、结构补丁、
+    撤销三处重写，原本用 ``write_text`` 直接覆盖，崩溃或并发读到的是被截断的 Markdown。
+    实测渲染 + 写入仅 1–3 ms（最大 8 MB 文档），无需删掉这个投影，但必须用原子写法。
+    """
+    atomic_text(project / "document" / "source.md", render_source_markdown(document))
+
+
 def render_source_markdown(document: Document) -> str:
     lines = []
     for block in document.blocks:
@@ -473,7 +483,7 @@ def normalize_imported_project(store: ProjectStore, project_id: str) -> Document
     document = enrich_furniture_evidence(document, project)
     document.toc = build_toc(document.blocks)
     store.save_document(document)
-    (project / "document" / "source.md").write_text(render_source_markdown(document), encoding="utf-8")
+    write_source_markdown(project, document)
     store.update_manifest(
         project_id, state="ready", source_language=source_language,
         source_language_mode=source_language_mode, detected_source_language=detect_language(blocks),
@@ -796,7 +806,7 @@ def _merge_imported_project_locked(
         source_page_count=total_source_pages or None, parse_coverage=document.coverage,
     )
     try:
-        (project / "document" / "source.md").write_text(render_source_markdown(document), encoding="utf-8")
+        write_source_markdown(project, document)
     except OSError:
         pass
     return document

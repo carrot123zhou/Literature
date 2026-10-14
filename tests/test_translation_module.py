@@ -8,11 +8,14 @@ from pathlib import Path
 
 from literature.api import create_app
 from literature.mineru import import_mineru
+from literature.models import Block
 from literature.providers import MockProvider, ProviderConfig, ProviderError, ProviderResponse
 from literature.storage import ProjectStore
 from literature.structure import apply_patch
 from literature.translation import (
     TranslationService,
+    _chars_per_token,
+    _chunks,
     _clean_translated_text,
     entry_is_stale,
     entry_stale_reason,
@@ -520,15 +523,22 @@ class TranslationModuleTests(unittest.TestCase):
         self.assertEqual(entry.status, "failed")
         self.assertEqual(entry.text, "")
 
-    def test_glossary_is_filtered_to_terms_present_in_chunk(self):
+    def test_glossary_is_injected_as_stable_system_prefix(self):
+        """v3 契约：术语表整份按稳定排序注入 system prompt（prefix caching 友好），
+        user prompt 不再携带术语表，也不再按块过滤。"""
         document = self.store.load_document(self.project_id)
         provider = ScriptedProvider()
         TranslationService(self.store, provider).run(
-            self.project_id, glossary={"Introduction": "导论", "Nonexistent": "不存在的词"}, force=True,
+            self.project_id, glossary={"Zebra": "斑马", "Introduction": "导论"}, force=True,
         )
-        prompt = "\n".join(user for _, user in provider.calls)
-        self.assertIn("Introduction → 导论", prompt)
-        self.assertNotIn("Nonexistent", prompt)
+        for system, user in provider.calls:
+            # system 前缀逐请求一致：术语表、排序稳定，命中自动前缀缓存。
+            self.assertIn("术语表", system)
+            self.assertLess(system.index("Introduction → 导论"), system.index("Zebra → 斑马"))
+            # user prompt 只包含跨块变化的部分。
+            self.assertNotIn("术语表", user)
+            self.assertNotIn("Nonexistent", system)
+        self.assertIn("Introduction → 导论", provider.calls[0][0])
 
     def test_parallel_workers_translate_every_block(self):
         document = self.store.load_document(self.project_id)
@@ -551,6 +561,40 @@ class TranslationModuleTests(unittest.TestCase):
     def test_cjk_post_processing_cleans_spacing(self):
         self.assertEqual(_clean_translated_text("这 是 译 文， 请 查 看 。"), "这是译文，请查看。")
         self.assertEqual(_clean_translated_text('```\n<seg id="a">译文</seg>\n```'), "译文")
+
+    def test_chunk_budget_is_token_based_per_language(self):
+        """同一 token 预算下：英文块可容纳更多字符（减少请求数），中文块更小（降截断）。"""
+        self.assertGreater(_chars_per_token("en"), _chars_per_token("zh-CN"))
+        english = [Block(block_id=f"e{i}", type="paragraph", order=i, page_index=0, source_text="word " * 200) for i in range(4)]
+        chinese = [Block(block_id=f"c{i}", type="paragraph", order=i, page_index=0, source_text="字" * 1200) for i in range(4)]
+        # 英文 200 词 ≈ 1200 字符 ≈ 300 token：4 块应打包进更少的分块。
+        self.assertLessEqual(len(_chunks(english, language="en")), 2)
+        # 中文 1200 字 ≈ 750 token：预算 900 下每块只能装 1 段。
+        self.assertEqual(len(_chunks(chinese, language="zh-CN")), 4)
+
+    def test_thinking_disabled_respects_explicit_config(self):
+        from literature.providers import OpenAICompatibleProvider
+
+        def make(style: str, effort: str) -> OpenAICompatibleProvider:
+            config = ProviderConfig.preset(
+                "custom", model="qwen3.8-flash-next", base_url="https://relay.example/v1",
+                reasoning_style=style, reasoning_effort=effort,
+            )
+            return OpenAICompatibleProvider(config, api_key="k")
+
+        # qwen 协议：未显式开思考 → 翻译任务强制 off；显式 on 尊重用户配置。
+        self.assertEqual(make("qwen_thinking", "").with_thinking_disabled().config.reasoning_effort, "off")
+        self.assertEqual(make("qwen_thinking", "on").with_thinking_disabled().config.reasoning_effort, "on")
+        self.assertEqual(make("glm_thinking", "").with_thinking_disabled().config.reasoning_effort, "off")
+        # openai_effort 协议：降到 minimal，显式 high 例外；未声明协议的服务不发送未知字段。
+        self.assertEqual(make("openai_effort", "").with_thinking_disabled().config.reasoning_effort, "minimal")
+        self.assertEqual(make("openai_effort", "high").with_thinking_disabled().config.reasoning_effort, "high")
+        untouched = make("", "")
+        self.assertIs(untouched.with_thinking_disabled(), untouched)
+        # 原对象不被修改。
+        original = make("qwen_thinking", "")
+        original.with_thinking_disabled()
+        self.assertEqual(original.config.reasoning_effort, "")
 
 
 if __name__ == "__main__":

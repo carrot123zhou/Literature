@@ -23,9 +23,12 @@ RETRY_STATUS_CODES = {408, 409, 425, 429, 500, 502, 503, 504}
 class ProviderError(RuntimeError):
     # 有些错误（例如只返回思考内容、截断）发生时其实已经拿到了服务端响应与 usage；
     # 把它挂在异常上，上层仍能将真实用量记账，而不是把已产生的费用当成零。
-    def __init__(self, message: str, *, response: "ProviderResponse | None" = None) -> None:
+    # status_code：429/5xx 等临时故障的状态码。调度层（AIMD 并发自适应）据此
+    # 降低并发，而不是把 429 和确定性失败混在一起。
+    def __init__(self, message: str, *, response: "ProviderResponse | None" = None, status_code: int = 0) -> None:
         super().__init__(message)
         self.response = response
+        self.status_code = int(status_code or 0)
 
 
 class ProviderTimeoutError(ProviderError):
@@ -342,6 +345,33 @@ class OpenAICompatibleProvider:
         provider._client_lock = threading.Lock()
         return provider
 
+    def with_thinking_disabled(self) -> "OpenAICompatibleProvider":
+        """返回一个“思考已按所声明协议尽量关闭”的 provider 副本（不修改原对象）。
+
+        翻译是确定性任务，reasoning 对译文质量近乎零贡献却占掉大部分输出延迟
+        （实测思考型模型 reasoning 占输出的 85–90%），因此翻译作业默认调用本方法。
+
+        规则：只在用户已显式声明协议（reasoning_style 非空）时才改写字段——
+        从未声明协议的服务不发送任何未声明字段（providers 的显式协议原则），
+        此时想关思考需在模型服务设置里选择协议并把开关设为 off。
+        用户显式要求开思考（开关=on / effort=high）时尊重用户配置，不覆盖。
+        """
+        style = (self.config.reasoning_style or "").strip()
+        effort = (self.config.reasoning_effort or "").strip()
+        if not style:
+            return self
+        if effort in THINKING_TOGGLES and effort == "on":
+            return self  # 用户显式要求开思考：尊重配置。
+        if effort == "high":
+            return self  # openai_effort 协议下显式选了 high：视为有意开启。
+        target = "off" if style in ("qwen_thinking", "glm_thinking") else "minimal"
+        if effort == target:
+            return self
+        provider = copy(self)
+        provider.config = copy(self.config)
+        provider.config.reasoning_effort = target
+        return provider
+
     def close(self) -> None:
         client, self._client = self._client, None
         if client is not None:
@@ -506,7 +536,9 @@ class OpenAICompatibleProvider:
                     continue
                 if self.attempt_hooks:
                     self.attempt_hooks[1](handle, error.response, error, True)
-                raise ProviderError(f"模型请求失败：{error.detail or error}") from error
+                raise ProviderError(
+                    f"模型请求失败：{error.detail or error}", status_code=error.status_code,
+                ) from error
             if self.attempt_hooks:
                 self.attempt_hooks[1](handle, response, None, True)
             break

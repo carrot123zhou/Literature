@@ -219,8 +219,10 @@ class ConcurrentProofreadTests(unittest.TestCase):
             root = Path(tmp)
             store, project = build_store(root, blocks or self.make_doc())
             job = store.create_job(project, "structure_ai", {}, {})
+            # 本类验证的是“多批并发”机器本身，显式用 full 模式产生 3 批；
+            # 默认的 sample 模式只发 1 批抽查（见 DefaultReviewModeTests）。
             merged = {"proofread": True, "extract_toc": False, "auto_apply": False,
-                      "proofread_concurrency": 3, **(options or {})}
+                      "proofread_concurrency": 3, "proofread_mode": "full", **(options or {})}
             result = run_structure_job(store, project, job, merged, provider)
             return result, store, project
 
@@ -269,7 +271,7 @@ class ConcurrentProofreadTests(unittest.TestCase):
             store, project = build_store(root, self.make_doc())
             job = store.create_job(project, "structure_ai", {}, {})
             run_structure_job(store, project, job, {"proofread": True, "extract_toc": False,
-                                                    "proofread_concurrency": 2}, Provider())
+                                                    "proofread_concurrency": 2, "proofread_mode": "full"}, Provider())
             completed = [row for row in store.get_job(project, job)["activity"]
                          if "标题角色复核完成" in row["text"]]
             self.assertGreaterEqual(len(completed), 2)
@@ -300,7 +302,7 @@ class ConcurrentProofreadTests(unittest.TestCase):
             job = store.create_job(project, "structure_ai", {}, {})
             with self.assertRaises(ProviderError):
                 run_structure_job(store, project, job, {"proofread": True, "extract_toc": False,
-                                                        "proofread_concurrency": 2}, provider)
+                                                        "proofread_concurrency": 2, "proofread_mode": "full"}, provider)
             # 第二批失败后不再提交第三批；在途/已完成的请求已持久化。
             self.assertEqual(provider.review_calls, 2)
             job_value = store.get_job(project, job)

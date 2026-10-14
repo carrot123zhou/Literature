@@ -6,7 +6,7 @@ from __future__ import annotations
 import json
 import math
 import re
-from typing import Any, Callable
+from typing import Any, Callable, Iterable
 
 from .providers import ProviderError, TextProvider, extract_json
 
@@ -30,6 +30,19 @@ TOC_ANCHOR_LEVEL_SOURCE = "confirmed"
 PROSE_MIN_LENGTH = 40
 PUNCT_TAIL_RE = re.compile(r"[。！？!?;；,，、:：]$")
 NON_HEADING_ROLES = {"body", "furniture", "caption", "footnote"}
+
+# 第二遍复核模式：
+# - ``full``   ：第一遍规划只复用通过一致性检查的候选，其余全部进第二遍（d7a0cbd 的历史行为）。
+# - ``sample`` ：第一遍规划即可定案；第二遍只抽查固定比例做一致性指标，结论不产生建议。
+# - ``off``    ：第一遍规划即可定案，不发第二遍请求。
+# 实测依据：White Lotus / Authentic 的历史两遍在 role/level/parent 上分歧为 0，而第二遍
+# 占墙钟 64%；默认改为 ``sample`` 把“逐条复核”降级为“有界抽查”。
+REVIEW_MODES = ("full", "sample", "off")
+DEFAULT_REVIEW_MODE = "sample"
+QA_REASON = "抽查一致性（只做指标，不产生建议）"
+QA_SAMPLE_RATIO = 0.05
+QA_SAMPLE_MIN = 8
+QA_SAMPLE_MAX = 40
 
 # 与 structure.numbered_heading_candidate 同义的长度/形态判据（此处只看文本，
 # 用于“本地仍像编号标题就保守复核”）。
@@ -100,17 +113,38 @@ def _prose_like(text: str) -> bool:
     return len(text) >= PROSE_MIN_LENGTH or bool(PUNCT_TAIL_RE.search(text))
 
 
+def qa_sample_size(total: int) -> int:
+    """抽查条数：候选数的 5%，下限 8、上限 40（最多一批，永远是 0 或 1 个请求）。"""
+    if total <= 0:
+        return 0
+    return min(QA_SAMPLE_MAX, max(QA_SAMPLE_MIN, math.ceil(QA_SAMPLE_RATIO * total)))
+
+
+def qa_sample_ids(block_ids: Iterable[str], size: int) -> list[str]:
+    """确定性抽查样本：按 block_id 的 SHA-256 排序取前 N。
+
+    用 id 哈希而不是随机数：同一文档重跑得到同一批样本，指标可复现、可审计；
+    与候选顺序、并发完成顺序无关。
+    """
+    import hashlib
+    ordered = sorted(set(block_ids), key=lambda bid: hashlib.sha256(str(bid).encode()).hexdigest())
+    return ordered[:max(0, int(size))]
+
+
 def select_review_targets(
     candidates: list[dict[str, Any]],
     plan: dict[str, Any],
     reconciliation: dict[str, Any],
+    *,
+    strict_local: bool = True,
+    review_mode: str = "full",
 ) -> tuple[dict[str, dict[str, Any]], list[str], dict[str, str], dict[str, int]]:
     """决定第二遍复核范围。
 
     返回 ``(reused_decisions, review_ids, review_reasons, stats)``。
 
-    复用必须同时满足“完整、合法、父子关系成立、与已确认目录不冲突、置信度有限且在
-    区间内”，并且不触发以下安全规则（触发即复核）：
+    ``review_mode="full"``（默认，历史行为）时，复用必须同时满足“完整、合法、父子关系成立、
+    与已确认目录不冲突、置信度有限且在区间内”，并且不触发以下安全规则（触发即复核）：
 
     - 疑似漏标：非标题候选被规划为标题（提升标题最需要第二意见）；
     - 现有标题被判为非标题（降级会直接影响正文/目录）；
@@ -119,7 +153,18 @@ def select_review_targets(
     - 标题层级要改变但没有已确认目录锚点；
     - 标题的规划父子关系与最终标题树冲突，或父标题本身仍要复核；
     - 非标题候选的本地信号仍支持“像标题”，或短块不足以判定为正文（非散文形态）。
+
+    ``review_mode="sample"`` / ``"off"`` 时，上述“安全规则”不再阻止复用：第一遍规划直接
+    定案，规则命中只写进该决定的 ``review_flags`` 供人工确认时查看；第二遍只剩两类候选：
+
+    - **硬阻塞**：规划缺失/角色非法/置信度非法（没有可定案的答案），必须由第二遍补上；
+    - **抽查**：``sample`` 模式下按 ``qa_sample_ids`` 取固定比例，仅用于一致性指标。
+
+    调用方用 ``review_reasons[bid] == QA_REASON`` 区分抽查项，绝不能把抽查结论写回建议。
     """
+    if review_mode not in REVIEW_MODES:
+        review_mode = "full"
+    soft_review = review_mode == "full"
     by_id = {item["block_id"]: item for item in candidates if isinstance(item.get("block_id"), str)}
     order = {item["block_id"]: index for index, item in enumerate(candidates)}
     nodes = plan.get("nodes", {}) if isinstance(plan, dict) else {}
@@ -154,13 +199,28 @@ def select_review_targets(
     reused: dict[str, dict[str, Any]] = {}
     review: list[str] = []
     reasons: dict[str, str] = {}
+    flags: dict[str, list[str]] = {}
     stats = {"reused": 0, "review": 0, "promotions": 0, "demotions": 0,
-             "conflicts": 0, "missing_plan": 0, "invalid_plan": 0, "tree_conflicts": 0, "local_heading": 0}
+             "conflicts": 0, "missing_plan": 0, "invalid_plan": 0, "tree_conflicts": 0,
+             "local_heading": 0, "annotated": 0, "qa": 0}
 
     def need(bid: str, reason: str) -> None:
+        """硬阻塞：没有可定案的答案，必须由第二遍补上。"""
         review.append(bid)
         reasons[bid] = reason
         stats["review"] += 1
+
+    def soft(bid: str, reason: str) -> bool:
+        """安全规则命中。full 模式：进第二遍；sample/off 模式：只标注，仍采纳第一遍规划。
+
+        返回 True 表示调用方应 ``continue``（本项已交给第二遍）。
+        """
+        if soft_review:
+            need(bid, reason)
+            return True
+        flags.setdefault(bid, []).append(reason)
+        stats["annotated"] += 1
+        return False
 
     for bid, candidate in by_id.items():
         node = nodes.get(bid)
@@ -183,52 +243,53 @@ def select_review_targets(
         is_title = candidate.get("type") == "title"
         if not is_title and level is not None:
             stats["promotions"] += 1
-            need(bid, "疑似漏标标题，必须复核")
-            continue
+            if soft(bid, "疑似漏标标题，需人工确认"):
+                continue
         if is_title and level is None:
             stats["demotions"] += 1
-            need(bid, "现有标题被判为非标题，必须复核")
-            continue
+            if soft(bid, "现有标题被判为非标题，需人工确认"):
+                continue
         if toc_level is not None and level is not None and level != toc_level:
             stats["conflicts"] += 1
-            need(bid, "与已确认目录层级冲突")
-            continue
+            if soft(bid, "与已确认目录层级冲突"):
+                continue
         if toc_level is not None and level is None:
             stats["conflicts"] += 1
-            need(bid, "目录已定位为标题但规划判为非标题")
-            continue
+            if soft(bid, "目录已定位为标题但规划判为非标题"):
+                continue
         if bid in unlisted and level is None:
-            need(bid, "目录未收录的小标题被判为非标题")
-            continue
+            if soft(bid, "目录未收录的小标题被判为非标题"):
+                continue
         if level is not None:
             if bid in tree_invalid:
                 stats["tree_conflicts"] += 1
-                need(bid, "规划父子关系与最终标题树冲突")
-                continue
+                if soft(bid, "规划父子关系与最终标题树冲突"):
+                    continue
             if not _plan_parent_ok(order, nodes, bid):
-                need(bid, "规划父子关系不成立")
-                continue
+                if soft(bid, "规划父子关系不成立"):
+                    continue
             parent = node.get("parent_id")
             if parent is not None and parent not in reused:
                 # 父标题本身仍要复核，子标题先跟着复核，避免复用结论依赖未验证的父。
-                need(bid, "父标题仍需复核")
-                continue
+                if soft(bid, "父标题仍需复核"):
+                    continue
         threshold = REUSE_CONFIDENCE_TOC if toc_level is not None else (
             REUSE_CONFIDENCE if level is not None else REUSE_CONFIDENCE_NON_HEADING)
         if float(confidence) < threshold:
-            need(bid, "规划置信度不足")
-            continue
+            if soft(bid, "规划置信度不足"):
+                continue
         if is_title:
             current = int(candidate.get("level") or 0)
             if level != current and toc_level != level:
-                # 改层级但没有已确认目录锚点：交给第二遍复核。
-                need(bid, "标题层级将改变且缺少目录锚点")
-                continue
-        elif _local_heading_shape(candidate) or not _prose_like(str(candidate.get("text") or "")):
+                # 改层级但没有已确认目录锚点：full 模式交给第二遍；否则人工确认。
+                if soft(bid, "标题层级将改变且缺少目录锚点"):
+                    continue
+        elif strict_local and (_local_heading_shape(candidate) or not _prose_like(str(candidate.get("text") or ""))):
             # 非标题复用不能只凭“本地分低”：无编号的几何短块、仍带标题形态的块一律复核。
+            # strict_local=False 供离线实验测“仅异常/高风险补查”变体，不改变生产默认。
             stats["local_heading"] += 1
-            need(bid, "本地证据仍支持标题或短块不足以判定为正文，必须复核")
-            continue
+            if soft(bid, "本地证据仍支持标题或短块不足以判定为正文，需人工确认"):
+                continue
         reused[bid] = {
             "block_id": bid,
             "role": role,
@@ -237,6 +298,19 @@ def select_review_targets(
             "reason": str(node.get("reason", ""))[:500],
         }
         stats["reused"] += 1
+    if not soft_review:
+        # sample/off 模式下，被安全规则标注但已采纳的项把标注带回决定，供界面提示。
+        for bid, flag_list in flags.items():
+            if bid in reused:
+                reused[bid]["review_flags"] = flag_list
+        if review_mode == "sample" and reused:
+            for bid in qa_sample_ids(reused.keys(), qa_sample_size(len(by_id))):
+                if bid in reasons:
+                    continue
+                reasons[bid] = QA_REASON
+                review.append(bid)
+                stats["review"] += 1
+                stats["qa"] += 1
     return reused, review, reasons, stats
 
 OUTLINE_PROMPT = (
@@ -258,8 +332,53 @@ OUTLINE_PROMPT = (
 )
 
 
+def compare_qa_sample(
+    stage1: dict[str, dict[str, Any]],
+    sample: dict[str, dict[str, Any]],
+    candidates: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """比对抽查结论与第一遍规划，只输出一致性指标，不修改任何决定。
+
+    这是“第二遍降为 QA”的核心约束：抽查只能告诉人“两遍在不一致”，绝不能盖回建议。
+    """
+    by_id = {item["block_id"]: item for item in candidates if isinstance(item.get("block_id"), str)}
+    agree = disagree = 0
+    rows: list[dict[str, Any]] = []
+    for bid, decision in sample.items():
+        base = stage1.get(bid)
+        if base is None:
+            # 第一遍没有定案的项在“必须定案”路径单独处理，不计入一致性。
+            continue
+        same = (base.get("role") == decision.get("role")
+                and base.get("parent_id") == decision.get("parent_id"))
+        if same:
+            agree += 1
+            continue
+        disagree += 1
+        rows.append({
+            "block_id": bid,
+            "text": str(by_id.get(bid, {}).get("text") or "")[:80],
+            "stage1": {"role": base.get("role"), "parent_id": base.get("parent_id")},
+            "sample": {"role": decision.get("role"), "parent_id": decision.get("parent_id")},
+        })
+    total = agree + disagree
+    return {"checked": total, "agree": agree, "disagree": disagree,
+            "agreement": round(agree / total, 3) if total else None,
+            "disagreements": rows[:20]}
+
+
 def compact_candidate(item: dict[str, Any]) -> dict[str, Any]:
     return {key: item.get(key) for key in ("block_id", "text", "text_truncated", "type", "level", "page_index", "bbox", "layout")}
+
+
+# 抽查复核（review_mode="sample"）用的输出契约：只回角色与父标题，不写 reason。
+# 抽查结论不产生建议，只需要能和第一遍规划逐项比对 role / parent_id。
+QA_PROOFREAD_INSTRUCTION = (
+    '只返回 JSON：{"decisions":[{"block_id":"...",'
+    '"role":"h1|h2|h3|h4|h5|h6|body|furniture|caption|footnote|uncertain",'
+    '"parent_id":null,"confidence":0.0}]}。'
+    "这是抽查：每条只给角色、父标题和置信度，**不要写 reason**，不要复述输入；每个候选恰好一次。"
+)
 
 
 def outline_inputs(payload: dict[str, Any]) -> list[dict[str, Any]]:
@@ -280,8 +399,68 @@ def outline_inputs(payload: dict[str, Any]) -> list[dict[str, Any]]:
     } for index in range(0, len(candidates), OUTLINE_WINDOW)]
 
 
+def nearby_toc(toc: list[dict[str, Any]], items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """保留与本窗口候选/相邻标题相关的目录条目及相邻 ±2 条，而不是整本目录。"""
+    from . import structure_signals as signals
+    indexes: set[int] = set()
+    for item in items:
+        text = str(item.get("text") or "")
+        if not text:
+            continue
+        for index, entry in enumerate(toc):
+            if signals.heading_similarity(text, str(entry.get("title", ""))) >= 0.6:
+                indexes.update({index - 2, index - 1, index, index + 1, index + 2})
+    return [entry for index, entry in enumerate(toc) if index in indexes]
+
+
+def compact_outline_request(request: dict[str, Any]) -> dict[str, Any]:
+    """压缩规划窗口上下文（默认关闭；仅 compact_context=True 时由 plan_outline 调用）。
+
+    全局 overview/完整目录只在第 1 窗；后续窗口只带近邻目录；
+    上一轮规划只保留前 6（根/祖先）+ 最近 8；相邻上下文保留 4+4。候选本身不动。"""
+    output = dict(request)
+    window = int(request.get("window") or 1)
+    if window > 1:
+        output.pop("overview", None)
+        output["toc"] = nearby_toc(request.get("toc") or [],
+                                    (request.get("candidates") or []) + (request.get("context") or []))
+    previous = request.get("previous_outline") or []
+    if len(previous) > 14:
+        output["previous_outline"] = previous[:6] + previous[-8:]
+    context = request.get("context") or []
+    if len(context) > 8:
+        half = len(context) // 2
+        output["context"] = context[:4] + context[half: half + 4]
+    return output
+
+
+def compact_proofread_batch(batch: dict[str, Any]) -> dict[str, Any]:
+    """压缩逐批复核上下文（默认关闭）：去掉每个候选重复的本地中文 reasons 与字体 layout；
+    heading_context 文本截到 120 字符。候选 id/type/level/bbox/父子/目录锚点全部保留。"""
+    output = dict(batch)
+    compact_candidates = []
+    for candidate in batch.get("title_candidates", []):
+        item = dict(candidate)
+        local = dict(item.get("local") or {})
+        local.pop("reasons", None)
+        item["local"] = local
+        item.pop("layout", None)
+        compact_candidates.append(item)
+    output["title_candidates"] = compact_candidates
+    context = []
+    for item in batch.get("heading_context", []):
+        entry = dict(item)
+        if isinstance(entry.get("text"), str):
+            entry["text"] = entry["text"][:120]
+            entry["text_truncated"] = True
+        context.append(entry)
+    output["heading_context"] = context
+    return output
+
+
 def plan_outline(payload: dict[str, Any], provider: TextProvider,
-                 *, on_window: Callable[[int, int, int], None] | None = None) -> dict[str, Any]:
+                 *, on_window: Callable[[int, int, int], None] | None = None,
+                 compact_context: bool = False) -> dict[str, Any]:
     nodes: dict[str, dict[str, Any]] = {}
     profile: dict[str, str] = {}
     issues = []
@@ -305,6 +484,8 @@ def plan_outline(payload: dict[str, Any], provider: TextProvider,
              "role": node["role"], "parent_id": node["parent_id"]}
             for node in {node["block_id"]: node for node in ancestors + previous[-24:]}.values()
         ]
+        if compact_context:
+            request = compact_outline_request(request)
         response = provider.complete(system=OUTLINE_PROMPT, user=json.dumps(request, ensure_ascii=False))
         try:
             result = extract_json(response.content)

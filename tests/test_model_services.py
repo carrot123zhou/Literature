@@ -191,7 +191,7 @@ class ModelServiceApiTests(unittest.TestCase):
         with patch("literature.model_services.ModelServiceStore.config_for", return_value=provider):
             created = self.client.post(f"/projects/{self.project_id}/structure/jobs", headers=self.headers, json={
                 "service_id": service["service_id"], "toc": [], "extract_toc": True, "proofread": True, "auto_apply": True,
-                "proofread_full": True,
+                "proofread_full": True, "toc_extraction": "model",
             })
             self.assertEqual(created.status_code, 200, created.text)
             job_id = created.json()["job_id"]
@@ -209,6 +209,8 @@ class ModelServiceApiTests(unittest.TestCase):
         self.assertFalse(job["result"]["audit"]["body_text_included"])
         self.assertEqual(job["scope"]["extract_toc"], True)
         # Matching the printed TOC does not establish the whole hierarchy.
+        # toc_extraction=model 显式要求模型核对目录，所以仍是 TOC / outline / role review 三次；
+        # 默认 auto 在本地有显式目录标记时不再发 TOC 请求（见 test_structure_calibration）。
         self.assertEqual(len(provider.calls), 3)  # TOC, outline plan, role review
 
 

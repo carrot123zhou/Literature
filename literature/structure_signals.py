@@ -46,8 +46,22 @@ SOFT_PUNCT_RE = re.compile(r"[,，、:：]$")
 FOOTNOTE_MARK_RE = re.compile(r"^\s*(?:\d{1,3}|[*†‡])\s+\S")
 
 TOC_MARKER_RE = re.compile(
-    r"^\s*(?:table\s+of\s+contents|contents|目\s*次|目\s*录|目\s*錄)\s*$",
+    r"^\s*(?:table\s+of\s+contents|content|contents|目\s*次|目\s*录|目\s*錄)\s*$",
     re.IGNORECASE,
+)
+# 目录条目必须像标题。尾注/参考书目页同样满页“编号 + 页码”，但条目是长句书目：
+# 实测真实目录条目中位长度 26–38、最长 62；尾注页中位 89–101、最长 815。
+TOC_ENTRY_MAX_TITLE = 100
+TOC_ENTRY_SHAPE_RATIO = 0.6
+# 索引页的条目也是“短词 + 页码”（实测 ratio 0.92，光看形态区分不了），但索引带
+# 注释引用（24n、188n）与 See/See also 交叉引用；真实目录页这些几乎为 0。
+INDEX_NOTE_REF_RATIO = 0.25
+INDEX_SEE_RATIO = 0.15
+INDEX_NOTE_REF_RE = re.compile(r"\b\d{1,4}[a-z]{1,2}\b")
+INDEX_SEE_RE = re.compile(r"\bSee(?:\s+also)?\b")
+BIBLIO_ENTRY_RE = re.compile(
+    r"(?:University Press|Verlag|https?://|\bIbid\b|\beds?\.\s+[A-Z]|"
+    r"\btrans\.\s+[A-Z]|\bvol\.\s*\d|\bpp?\.\s*\d{1,4}\s*$)"
 )
 ILLUSTRATION_LIST_RE = re.compile(r"^(?:list of )?(?:maps|tables|figures|plates|illustrations|图表目录|插图目录|表目录|図表一覧)$", re.I)
 ANY_PAGE_RE = re.compile(r"(?:^|[\s.·\t])(\d{1,4}|[ivxlcdm]{1,7})(?=[\s.·]|$)", re.IGNORECASE)
@@ -409,12 +423,59 @@ def _page_lines(document: Document, page_index: int) -> list[str]:
     return lines
 
 
+def _toc_entry_shape(title: str, trailing: str) -> bool:
+    """目录条目必须像标题：短、不以句读结尾、不是书目引用。"""
+    title = title.strip(" .·•\t")
+    if not title or len(title) > TOC_ENTRY_MAX_TITLE:
+        return False
+    if TERMINAL_PUNCT_RE.search(title):
+        return False
+    return not (BIBLIO_ENTRY_RE.search(title) or BIBLIO_ENTRY_RE.search(trailing))
+
+
 def _page_looks_like_toc(document: Document, page_index: int) -> bool:
     lines = _page_lines(document, page_index)
     if len(lines) < 4:
         return False
-    refs = sum(1 for line in lines if _page_reference(line))
-    return refs >= 3 and refs / len(lines) >= 0.4
+    if _page_looks_like_index(lines):
+        return False
+    refs = shaped = 0
+    for line in lines:
+        parsed = _page_reference(line)
+        if parsed is None:
+            continue
+        refs += 1
+        if _toc_entry_shape(parsed[0], parsed[2]):
+            shaped += 1
+    if refs < 3 or refs / len(lines) < 0.4:
+        return False
+    # 尾注/参考书目页也满足“多行带页码”，但条目多数不像标题。
+    return shaped / refs >= TOC_ENTRY_SHAPE_RATIO
+
+
+def _page_looks_like_index(lines: list[str]) -> bool:
+    """索引页：条目标注注释引用（24n）或 See/See also 交叉引用。目录页几乎不会。"""
+    total = len(lines)
+    if total < 4:
+        return False
+    notes = sum(1 for line in lines if INDEX_NOTE_REF_RE.search(line))
+    if notes / total >= INDEX_NOTE_REF_RATIO:
+        return True
+    see = sum(1 for line in lines if INDEX_SEE_RE.search(line))
+    return see / total >= INDEX_SEE_RATIO
+
+
+def toc_marker_pages(document: Document) -> list[int]:
+    """含显式目录标记（contents / content / 目录 / 目次）的页。
+
+    显式标记是“这页真的是目录”的强证据：本命中的页可以直接采信本地解析结果，
+    不必再花一次模型请求去“核对目录”。无标记（靠行扫描猜出来）的页不做此保证。
+    """
+    by_page: dict[int, list[Block]] = {}
+    for block in document.blocks:
+        by_page.setdefault(block.page_index, []).append(block)
+    return [page for page in sorted(by_page)
+            if any(TOC_MARKER_RE.match(normalize_text(block.source_text)) for block in by_page[page])]
 
 
 def find_toc_pages(document: Document) -> list[int]:
@@ -422,10 +483,7 @@ def find_toc_pages(document: Document) -> list[int]:
     by_page: dict[int, list[Block]] = {}
     for block in document.blocks:
         by_page.setdefault(block.page_index, []).append(block)
-    marked: list[int] = []
-    for page in sorted(by_page):
-        if any(TOC_MARKER_RE.match(normalize_text(block.source_text)) for block in by_page[page]):
-            marked.append(page)
+    marked = toc_marker_pages(document)
     if marked:
         pages = [marked[0]]
         cursor = marked[0] + 1

@@ -25,22 +25,30 @@ TRANSLATABLE_TYPES = {"title", "paragraph", "list", "footnote", "table", "image"
 ENTRY_STATES = ("untranslated", "translated", "refined", "edited", "failed", "locked", "stale")
 
 # 分块与并发策略（对齐 TranslateBooksWithLLMs 的思路：小块 + 前后文 + 并发 + 失败切分）。
-# 单请求目标字符数保持较小，既让每次响应更快，也大幅降低长段被模型截断的概率。
-DEFAULT_CHUNK_CHARS = 2400
-# 除字符预算外，限制单批字段数：短段落多时，按字符打包会把几十个字段塞进一个请求，
+# 分块预算按估算 token 计量（不是字符）：拉丁文约 4 字/token、CJK 约 1.6 字/token。
+# 同一 token 预算下英文块更大（减少请求数）、中文块更小（降低输出截断率），
+# 两边都更接近模型的实际输出长度，减少 finish_reason=length 引发的切分重试往返。
+DEFAULT_CHUNK_TOKENS = 900
+# 除 token 预算外，限制单批字段数：短段落多时，按 token 打包会把几十个字段塞进一个请求，
 # 一旦响应超时/漏段就整批失败。先取 12 作试验起点（失败再沿 _split_units 缩批）。
 DEFAULT_CHUNK_FIELDS = 12
 # 单个字段（段落/单元格/图题/脚注）超过这个字符数时，预先沿句子边界拆成临时子段，
 # 让它在失败重试时可以继续缩批，而不是「只有一个 segment，不可再分」直接失败。
 MAX_SEGMENT_CHARS = 1200
 DEFAULT_PARALLEL_WORKERS = 4
-MAX_PARALLEL_WORKERS = 8
+MAX_PARALLEL_WORKERS = 16
+# AIMD 并发自适应（additive increase / multiplicative decrease）：
+# 连续成功若干块后并发 +1 探测回用户设定的上限；收到 429 后并发减半。
+# 服务级信号量（RequestCoordinator）负责多作业共享同一服务的总量上限，
+# 本控制器只在单次作业内部逼近/回退，两者叠加后 429 不再需要整作业退避等待。
+AIMD_PROBE_SUCCESS_STREAK = 3
 # 一块失败时最多向下切分几层；越深越小，最终退化为逐段重试。
 MAX_SPLIT_DEPTH = 3
 # 连续多少个分块彻底失败且没有任何成功时，判定模型服务不可用，停止后续请求避免无谓计费。
 GLOBAL_FAILURE_LIMIT = 3
 # prompt 组装契约版本：冻结进任务快照，方便审计“同一次生成用的是哪版 prompt 语义”。
-PROMPT_VERSION = "translation-v2"
+# v3：术语表从按块过滤的 user prompt 改为按稳定排序注入 system prompt 前缀（prefix caching 友好）。
+PROMPT_VERSION = "translation-v3"
 GLOSSARY_MAX_ENTRIES = 80
 CONTEXT_BEFORE_CHARS = 700
 CONTEXT_AFTER_CHARS = 500
@@ -519,7 +527,7 @@ def _clean_translated_text(text: str) -> str:
 
 
 def _filter_glossary(glossary: dict[str, str], text: str) -> dict[str, str]:
-    """只把当前分块确实出现的术语注入 prompt：既省 token，也让模型更容易遵守。"""
+    """按块过滤术语表（保留供其它调用方/未来策略使用；主链路已改为稳定前缀注入）。"""
     if not glossary:
         return {}
     haystack = text.lower()
@@ -535,15 +543,38 @@ def _filter_glossary(glossary: dict[str, str], text: str) -> dict[str, str]:
     return selected
 
 
+def _stable_glossary(glossary: dict[str, str] | None) -> dict[str, str]:
+    """把术语表整理成稳定字节序的前缀（去空项、按源词排序、截到上限）。
+
+    Prefix caching（DeepSeek/Qwen/OpenAI 兼容服务的自动前缀缓存）要求跨请求的
+    前缀逐字节一致：系统提示 + 全量排序术语表在整次任务内不变，命中缓存后
+    输入费用和 TTFT 都大幅下降。按块过滤会让前缀每块都不同，缓存全废。
+    """
+    cleaned = {
+        str(source or "").strip(): str(target or "").strip()
+        for source, target in (glossary or {}).items()
+        if str(source or "").strip() and str(target or "").strip()
+    }
+    return dict(sorted(cleaned.items(), key=lambda item: item[0])[:GLOSSARY_MAX_ENTRIES])
+
+
 def _render_glossary(glossary: dict[str, str]) -> str:
     if not glossary:
         return ""
     lines = "\n".join(f"{source} → {target}" for source, target in glossary.items())
-    return f"# 术语表（本段涉及，必须采用下列译法）\n{lines}\n\n"
+    return f"# 术语表（整本书统一，必须采用下列译法）\n{lines}\n\n"
 
 
-def _system_prompt(source_language: str, target_language: str, *, refine: bool, instructions: str = "") -> str:
+def _system_prompt(
+    source_language: str, target_language: str, *, refine: bool, instructions: str = "",
+    glossary: dict[str, str] | None = None,
+) -> str:
+    # 术语表注入 system prompt 尾部且按稳定排序：同一任务内所有请求的 system 前缀
+    # 逐字节一致，OpenAI 兼容服务的自动前缀缓存才能命中（省输入费与 TTFT）。
+    # 代价是不再按块过滤（部分术语当前块未出现），但上限 GLOSSARY_MAX_ENTRIES
+    # 的额外 token 在缓存命中后接近免费，且代词指代处也能拿到正确译法。
     extra = f"\n\n# 用户附加要求（不得覆盖上面的完整性与 id 约束）\n{instructions.strip()}" if instructions.strip() else ""
+    glossary_block = _render_glossary(_stable_glossary(glossary))
     if refine:
         return (
             f"你是{target_language}文学编辑与学术译审，负责在不改变事实、术语、专名和段落结构的前提下，"
@@ -557,7 +588,7 @@ def _system_prompt(source_language: str, target_language: str, *, refine: bool, 
             "<seg id=\"...\">，id、数量与顺序完全一致，不得合并或拆分。\n\n"
             "# 输出格式\n"
             "只输出 <seg id=\"...\">定稿</seg> 序列，不要任何解释、标题或 Markdown 代码块。"
-            + extra
+            + extra + (f"\n\n{glossary_block.rstrip()}" if glossary_block else "")
         )
     return (
         f"你是资深的{target_language}学术翻译与母语写作者，负责把{source_language}的人文社科文献完整、准确地译成{target_language}。\n\n"
@@ -573,7 +604,7 @@ def _system_prompt(source_language: str, target_language: str, *, refine: bool, 
         "<seg id=\"...\">，id、数量与顺序与输入完全一致，不得合并、拆分或调换。\n\n"
         "# 输出格式\n"
         "只输出 <seg id=\"...\">译文</seg> 序列，不要任何解释、标题或 Markdown 代码块。"
-        + extra
+        + extra + (f"\n\n{glossary_block.rstrip()}" if glossary_block else "")
     )
 
 
@@ -588,8 +619,9 @@ def _render_units(units: list[tuple[Block, list[tuple[str, str]]]]) -> str:
 def _user_prompt(
     units: list[tuple[Block, list[tuple[str, str]]]], *,
     context_before: str = "", context_after: str = "", previous_translation: str = "",
-    glossary: dict[str, str] | None = None,
 ) -> str:
+    # 术语表已迁入 system prompt 稳定前缀（见 _system_prompt）；user prompt 只保留
+    # 跨块变化的部分，让前缀缓存能命中。
     parts: list[str] = []
     if context_before:
         parts.append(f"# 前文（仅供理解语境，不要翻译）\n{context_before}\n")
@@ -597,9 +629,6 @@ def _user_prompt(
         parts.append(f"# 后文（仅供理解语境，不要翻译）\n{context_after}\n")
     if previous_translation:
         parts.append(f"# 上一段已定译文（用于衔接语气，不要重复翻译）\n{previous_translation}\n")
-    glossary_block = _render_glossary(glossary or {})
-    if glossary_block:
-        parts.append(glossary_block.rstrip("\n") + "\n")
     parts.append("# 待翻译内容\n" + _render_units(units))
     parts.append("\n请为上面每一个 id 输出一个 <seg id=\"...\">译文</seg>，不要输出其他内容。")
     return "\n".join(parts).strip()
@@ -609,15 +638,38 @@ def _user_prompt(
 # 分块与上下文
 # --------------------------------------------------------------------------- #
 
+def _chars_per_token(language: str) -> float:
+    """按源语言的字符→token 粗比率估计分块体积（对齐 context_optimizer 的经验值）。"""
+    value = (language or "").strip().lower()
+    if value.startswith(("zh", "ja")):
+        return 1.6
+    if value.startswith("ko"):
+        return 2.2
+    if value.startswith("ru"):
+        return 3.2
+    if value.startswith(("en", "fr", "de", "es", "it", "pt")):
+        return 4.0
+    return 3.5
+
+
+def _estimate_tokens(chars: int, language: str) -> int:
+    ratio = _chars_per_token(language)
+    return max(1, int(chars / ratio)) if chars > 0 else 0
+
+
 def _block_char_size(block: Block) -> int:
     return sum(len(text) for _, text in _source_segments(block))
 
 
+def _block_token_size(block: Block, language: str) -> int:
+    return _estimate_tokens(_block_char_size(block), language)
+
+
 def _chunks(
-    blocks: list[Block], limit: int = DEFAULT_CHUNK_CHARS, max_fields: int = DEFAULT_CHUNK_FIELDS,
-    *, languages: dict[str, str] | None = None,
+    blocks: list[Block], limit: int = DEFAULT_CHUNK_TOKENS, max_fields: int = DEFAULT_CHUNK_FIELDS,
+    *, languages: dict[str, str] | None = None, language: str = "en",
 ) -> list[list[Block]]:
-    """按字符/字段预算把 block 切成分块；不跨章节/语言边界，超大单块独占一块。"""
+    """按估算 token/字段预算把 block 切成分块；不跨章节/语言边界，超大单块独占一块。"""
     chunks: list[list[Block]] = []
     current: list[Block] = []
     size = 0
@@ -631,7 +683,7 @@ def _chunks(
 
     for block in blocks:
         segments = _unit_segments(block)
-        block_size = sum(len(text) for _, text in segments)
+        block_size = _block_token_size(block, language)
         block_fields = len(segments)
         # 章节边界：标题开启新章，不与上一章正文混在同一个请求。
         chapter_break = bool(current) and block.type == "title"
@@ -670,12 +722,13 @@ def _split_units(units: list[tuple[Block, list[tuple[str, str]]]]) -> tuple[list
 
 def _batch_units(
     units: list[tuple[Block, list[tuple[str, str]]]],
-    limit: int = DEFAULT_CHUNK_CHARS, max_fields: int = DEFAULT_CHUNK_FIELDS,
+    limit: int = DEFAULT_CHUNK_TOKENS, max_fields: int = DEFAULT_CHUNK_FIELDS,
+    *, language: str = "en",
 ) -> list[list[tuple[Block, list[tuple[str, str]]]]]:
-    """把一批单元按字符/字段预算真正拆成多个请求。
+    """把一批单元按 token/字段预算真正拆成多个请求。
 
     与 ``_chunks`` 不同：``_chunks`` 只在 block 之间分组（超大单块独占一块，整块仍在一个请求里），
-    本函数在**子段级**打包，因此 10000 字符的单字段会被拆成多次 HTTP，而不是只加多个协议标签。
+    本函数在**子段级**打包，因此超长单字段会被拆成多次 HTTP，而不是只加多个协议标签。
     同一个 block 的子段可以跨多个请求；调用方聚合完整子段证据后再拼回稳定字段。
     """
     batches: list[list[tuple[Block, list[tuple[str, str]]]]] = []
@@ -684,7 +737,7 @@ def _batch_units(
     fields = 0
     for block, segments in units:
         for key, text in segments:
-            segment_size = len(text)
+            segment_size = _estimate_tokens(len(text), language)
             if current and (fields + 1 > max_fields or size + segment_size > limit):
                 batches.append(current)
                 current, size, fields = [], 0, 0
@@ -807,8 +860,9 @@ def estimate_translation(
     prompt_chars = 0
     output_chars = 0
     chunk_count = 0
+    source_language = document.source_language
     for blocks, pass_refine in passes:
-        for chunk in _chunks(blocks, languages=block_languages):
+        for chunk in _chunks(blocks, languages=block_languages, language=source_language):
             units: list[tuple[Block, list[tuple[str, str]]]] = []
             for block in chunk:
                 entry = layer.entries.get(block.block_id)
@@ -822,15 +876,15 @@ def estimate_translation(
                 continue
             context_before, context_after = _chunk_context(document, positions, chunk, languages=block_languages)
             # 与真实执行一致：超预算的单元会被 _batch_units 真正拆成多次请求。
-            batched = _batch_units(units)
+            batched = _batch_units(units, language=source_language)
             chunk_count += len(batched)
             for batch in batched:
-                batch_text = "\n".join(text for _, segs in batch for _, text in segs)
-                active_glossary = _filter_glossary(dict(glossary or {}), batch_text)
-                system = _system_prompt(document.source_language, locale, refine=pass_refine, instructions=instructions)
+                # 与真实执行一致：术语表稳定注入 system prompt（不再按块过滤），
+                # 预估的 prompt 字符数含同一份 system 前缀。
+                system = _system_prompt(source_language, locale, refine=pass_refine, instructions=instructions, glossary=glossary)
                 user = _user_prompt(
                     batch, context_before=context_before, context_after=context_after,
-                    previous_translation="", glossary=active_glossary,
+                    previous_translation="",
                 )
                 prompt_chars += len(system) + len(user)
                 output_chars += sum(len(text) for _, segs in batch for _, text in segs)
@@ -906,6 +960,8 @@ class _ChunkOutcome:
     resolved: dict[str, dict[str, str]] = field(default_factory=dict)
     # 预算不足导致本块中止：已解析的子段作为本任务中间证据落盘，恢复只补剩余子段。
     budget_paused: bool = False
+    # 本块的任一子请求收到 429（限流）：调度层据此 AIMD 减半并发。
+    rate_limited: bool = False
 
     @property
     def fully_failed(self) -> bool:
@@ -1595,7 +1651,7 @@ class TranslationService:
         # 当前阶段（初译/润色）：用量 scope 与中间子段证据都要按 pass 区分。
         self._active_refine = bool(refine)
         self._active_scope = "refine" if refine else "translate"
-        chunks = _chunks(blocks, languages=block_languages)
+        chunks = _chunks(blocks, languages=block_languages, language=document.source_language)
         total_chunks = len(chunks)
         positions = {block.block_id: index for index, block in enumerate(document.blocks)}
         context_map = {index: _chunk_context(document, positions, chunk, languages=block_languages) for index, chunk in enumerate(chunks)}
@@ -1615,6 +1671,11 @@ class TranslationService:
         previous_translation = ""
         previous_chunk_language: str | None = None
         submit_index = 0
+        # AIMD 并发自适应：effective_workers 只会在 [1, workers] 内波动。
+        # 429 → 减半（退避由 provider 内部重试 + 协调层冷却叠加完成）；
+        # 连续成功 → +1 探测回升。用户设定的 workers 是上限，不额外放大。
+        effective_workers = workers
+        aimd_success_streak = 0
 
         # 小块并发会产生很多分块；每块都整层重写 translation.json 会变成 O(n²)。
         # 这里按块数/时间节流，崩溃时最多损失几块进度，但大幅减少磁盘写入。
@@ -1638,7 +1699,7 @@ class TranslationService:
             running: dict[Future, tuple[int, float]] = {}
             reserved = 0.0
             while submit_index < total_chunks or running:
-                while submit_index < total_chunks and len(running) < workers and stop_reason is None:
+                while submit_index < total_chunks and len(running) < effective_workers and stop_reason is None:
                     if should_pause and should_pause():
                         stop_reason = "paused"
                         break
@@ -1709,13 +1770,31 @@ class TranslationService:
                     success_blocks += sum(1 for block in chunk if block.block_id in outcome.segments)
                     failed_block_ids.update(outcome.failed.keys())
                     failed_reasons.update(outcome.failed)
-                    if outcome.fully_failed:
+                    if outcome.rate_limited:
+                        # 429 是临时限流：无论该块是否同时完全失败，都只做 AIMD 减半，
+                        # 不计入全局熔断——服务很快恢复时不能把剩余整本书误判为失败。
+                        # 退避由 provider 内部重试与协调层冷却叠加完成。
+                        effective_workers = max(1, effective_workers // 2)
+                        aimd_success_streak = 0
+                        provider_error_streak = 0
+                        if outcome.fully_failed and first_error is None:
+                            first_error = outcome.error or ProviderError("模型请求被限流（429），该分块待重试。")
+                    elif outcome.fully_failed:
                         if first_error is None:
                             first_error = outcome.error or ProviderError("模型输出缺少该分块的译文。")
                         if isinstance(outcome.error, ProviderError) or outcome.error is None:
                             provider_error_streak += 1
+                        aimd_success_streak = 0
                     else:
                         provider_error_streak = 0
+                        # AIMD：连续成功后 +1 探测回升（不超过用户设定的上限）。
+                        if effective_workers < workers:
+                            aimd_success_streak += 1
+                            if aimd_success_streak >= AIMD_PROBE_SUCCESS_STREAK:
+                                effective_workers += 1
+                                aimd_success_streak = 0
+                        else:
+                            aimd_success_streak = 0
                     # 顺序模式下把上一块末段译文带进下一块，保证跨块语气衔接。
                     if workers == 1 and outcome.segments:
                         last_block = chunk[-1]
@@ -1896,8 +1975,8 @@ class TranslationService:
         context_before: str, context_after: str, previous_translation: str,
         partial_map: dict[str, dict[str, str]] | None = None,
     ) -> _ChunkOutcome:
-        chunk_text = "\n".join(text for _, segments in units for _, text in segments)
-        active_glossary = _filter_glossary(glossary, chunk_text)
+        # 术语表整份稳定注入 system prompt（prefix caching 友好，见 _system_prompt）；
+        # 不再按块过滤：前缀逐字节一致才能命中缓存，且代词指代处也能拿到正确译法。
         languages = {block_languages.get(block.block_id) for block in chunk}
         source_language = next(iter(languages)) if len(languages) == 1 else "原文（可能混合多种语言）"
         usages: list[ProviderResponse] = []
@@ -1922,16 +2001,22 @@ class TranslationService:
             remaining = [(key, text) for key, text in segments if _seg_id(block.block_id, key) not in known]
             if remaining:
                 send_units.append((block, remaining))
-        # 请求级预拆：超过字符/字段预算时拆成多个 HTTP，而不是把整块压在首个请求里。
+        # 请求级预拆：超过 token/字段预算时拆成多个 HTTP，而不是把整块压在首个请求里。
         reasons: dict[str, str] = {}
         run_id = ""
         budget_paused = False
-        for batch in _batch_units(send_units):
+        rate_limited = False
+        chunk_error: ProviderError | None = None
+        # 切分子批里的异常被 _translate_units_isolated 吞掉转成 reasons；
+        # 429 状态码通过 error_sink 上浮，否则子批限流不会触发 AIMD 减半。
+        error_sink: list[ProviderError] = []
+        for batch in _batch_units(send_units, language=source_language or "en"):
             try:
                 batch_resolved, batch_reasons, batch_run_id = self._translate_units(
                     batch, refine=refine, instructions=instructions, locale=locale, source_language=source_language or "",
-                    glossary=active_glossary, context_before=context_before, context_after=context_after,
+                    glossary=glossary, context_before=context_before, context_after=context_after,
                     previous_translation=previous_translation, depth=0, usages=usages,
+                    error_sink=error_sink,
                 )
             except BudgetExhausted:
                 # 预算不足：已解析的子段随 outcome 返回并落为中间证据，不能让它们被重发。
@@ -1942,9 +2027,10 @@ class TranslationService:
                 # 小批生成更快，超时概率骤降；单 segment 仍超时才真正失败。
                 batch_resolved, batch_reasons = self._retry_batch_after_timeout(
                     batch, error, refine=refine, instructions=instructions, locale=locale,
-                    source_language=source_language or "", glossary=active_glossary,
+                    source_language=source_language or "", glossary=glossary,
                     context_before=context_before, context_after=context_after,
                     previous_translation=previous_translation, usages=usages,
+                    error_sink=error_sink,
                 )
                 batch_run_id = ""
             except ProviderError as error:
@@ -1955,6 +2041,13 @@ class TranslationService:
                 batch_resolved = {}
                 batch_reasons = {block.block_id: str(error) for block, _ in batch}
                 batch_run_id = ""
+                rate_limited = rate_limited or getattr(error, "status_code", 0) == 429
+                chunk_error = chunk_error or error
+            # 子批内（切分/超时重试）捕获的 429 也算：AIMD 据此减半并发。
+            if any(getattr(error, "status_code", 0) == 429 for error in error_sink):
+                rate_limited = True
+            if chunk_error is None and error_sink:
+                chunk_error = error_sink[0]
             resolved = _merge_segment_maps(resolved, batch_resolved)
             reasons.update(batch_reasons)
             run_id = run_id or batch_run_id
@@ -1975,13 +2068,13 @@ class TranslationService:
                 segments[block.block_id] = {segment_id: got[segment_id] for segment_id in expected}
             else:
                 failed[block.block_id] = reasons.get(block.block_id, "模型输出缺少该段译文")
-        return _ChunkOutcome(segments, failed, usages, None, run_id, resolved=resolved, budget_paused=budget_paused)
+        return _ChunkOutcome(segments, failed, usages, chunk_error, run_id, resolved=resolved, budget_paused=budget_paused, rate_limited=rate_limited)
 
     def _retry_batch_after_timeout(
         self, batch: list[tuple[Block, list[tuple[str, str]]]], error: ProviderTimeoutError,
         *, refine: bool, instructions: str, locale: str, source_language: str, glossary: dict[str, str],
         context_before: str, context_after: str, previous_translation: str,
-        usages: list[ProviderResponse], depth: int = 0,
+        usages: list[ProviderResponse], depth: int = 0, error_sink: list[ProviderError] | None = None,
     ) -> tuple[dict[str, dict[str, str]], dict[str, str]]:
         """超时后的降级重试：把批次沿 segment 中点切半，两半分别隔离重试。
 
@@ -2000,20 +2093,24 @@ class TranslationService:
             glossary=glossary, context_before=context_before, context_after=context_after,
             previous_translation=previous_translation, usages=usages,
         )
+        sink: list[ProviderError] = []
         resolved: dict[str, dict[str, str]] = {}
         reasons: dict[str, str] = {}
         for half in (left, right):
             try:
-                half_resolved, half_reasons, _run_id = self._translate_units(half, depth=0, **kwargs)
+                half_resolved, half_reasons, _run_id = self._translate_units(half, depth=0, error_sink=sink, **kwargs)
             except ProviderTimeoutError as sub_error:
-                half_resolved, half_reasons = self._retry_batch_after_timeout(half, sub_error, depth=depth + 1, **kwargs)
+                half_resolved, half_reasons = self._retry_batch_after_timeout(half, sub_error, depth=depth + 1, error_sink=sink, **kwargs)
             except ProviderError as sub_error:
                 response = getattr(sub_error, "response", None)
                 if isinstance(response, ProviderResponse):
                     usages.append(response)
                 half_resolved, half_reasons = {}, {block.block_id: str(sub_error) for block, _ in half}
+                sink.append(sub_error)
             resolved = _merge_segment_maps(resolved, half_resolved)
             reasons.update(half_reasons)
+        if error_sink is not None:
+            error_sink.extend(sink)
         return resolved, reasons
 
     def _units_for(self, blocks: list[Block], layer: TranslationLayer, *, refine: bool) -> list[tuple[Block, list[tuple[str, str]]]]:
@@ -2035,6 +2132,7 @@ class TranslationService:
         self, units: list[tuple[Block, list[tuple[str, str]]]], *, refine: bool, instructions: str, locale: str,
         source_language: str, glossary: dict[str, str], context_before: str, context_after: str,
         previous_translation: str, depth: int, usages: list[ProviderResponse],
+        error_sink: list[ProviderError] | None = None,
     ) -> tuple[dict[str, dict[str, str]], dict[str, str], str]:
         """返回 (已解析的字段级结果, 仍未完整的块与原因, run_id)。
 
@@ -2042,10 +2140,10 @@ class TranslationService:
         """
         prompt = _user_prompt(
             units, context_before=context_before, context_after=context_after,
-            previous_translation=previous_translation, glossary=glossary,
+            previous_translation=previous_translation,
         )
         response = self._complete(
-            _system_prompt(source_language, locale, refine=refine, instructions=instructions), prompt,
+            _system_prompt(source_language, locale, refine=refine, instructions=instructions, glossary=glossary), prompt,
         )
         usages.append(response)
         parsed = _parse_segments(response.content)
@@ -2082,16 +2180,22 @@ class TranslationService:
             left, right = _split_units(incomplete)
             if left and right:
                 # 子请求异常必须隔离：一侧超时/报错不能作废父请求和兄弟批里已解析出的字段。
+                # 被吞掉的 ProviderError 通过 error_sink 上浮（429 触发 AIMD，见 _run_chunk）。
+                sink: list[ProviderError] = []
                 left_resolved, left_reasons = self._translate_units_isolated(
                     left, refine=refine, instructions=instructions, locale=locale, source_language=source_language,
                     glossary=glossary, context_before=context_before, context_after=context_after,
                     previous_translation=previous_translation, depth=depth + 1, usages=usages,
+                    error_sink=sink,
                 )
                 right_resolved, right_reasons = self._translate_units_isolated(
                     right, refine=refine, instructions=instructions, locale=locale, source_language=source_language,
                     glossary=glossary, context_before=context_before, context_after=context_after,
                     previous_translation=previous_translation, depth=depth + 1, usages=usages,
+                    error_sink=sink,
                 )
+                if error_sink is not None:
+                    error_sink.extend(sink)
                 # 按 segment id 深合并，不能让后到的一半整块覆盖前一半已成功的字段（F02）。
                 return (
                     _merge_segment_maps(resolved, left_resolved, right_resolved),
@@ -2115,8 +2219,10 @@ class TranslationService:
     ) -> tuple[dict[str, dict[str, str]], dict[str, str]]:
         """子批翻译的异常隔离：把 ProviderError 转成该子批的失败原因，不拖垮兄弟批。
 
-        错误响应若已带 usage（例如只返回思考内容），把它登记进 usages，避免漏记账。
+        错误响应若已带 usage（例如只返回思考内容），把它登记进 usages，避免漏记账；
+        错误本身追加进 ``error_sink``（若调用方提供），供调度层识别 429 限流。
         """
+        error_sink = kwargs.get("error_sink")
         try:
             resolved, reasons, _run_id = self._translate_units(units, **kwargs)
             return resolved, reasons
@@ -2125,6 +2231,8 @@ class TranslationService:
             usages = kwargs.get("usages")
             if isinstance(response, ProviderResponse) and isinstance(usages, list):
                 usages.append(response)
+            if isinstance(error_sink, list):
+                error_sink.append(error)
             return {}, {block.block_id: str(error) for block, _ in units}
 
     def _assign_fields(self, block: Block, segments: dict[str, str]) -> dict[str, Any]:

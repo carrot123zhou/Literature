@@ -71,6 +71,21 @@ class RequestCoordinator:
             self._service_limits[service_id] = max(1, int(limit))
             self._semaphores.pop(service_id, None)  # 下次按新上限重建
 
+    def service_limit(self, service_id: str) -> int:
+        with self._lock:
+            return int(self._service_limits.get(service_id, self.default_service_limit))
+
+    def raise_service_limit(self, service_id: str, limit: int) -> int:
+        """只在需要更大额度时上调服务级并发上限；只升不降，避免压到运行中作业的额度。"""
+        limit = max(1, int(limit))
+        with self._lock:
+            current = int(self._service_limits.get(service_id, self.default_service_limit))
+            if limit <= current:
+                return current
+            self._service_limits[service_id] = limit
+            self._semaphores.pop(service_id, None)  # 下次按新上限重建
+            return limit
+
     def _semaphore(self, service_id: str) -> threading.BoundedSemaphore:
         with self._lock:
             semaphore = self._semaphores.get(service_id)

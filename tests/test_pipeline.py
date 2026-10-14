@@ -68,6 +68,20 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(self.store.verify_raw(self.project_id), [])
         source_markdown = (self.store.project_path(self.project_id) / "document" / "source.md").read_text(encoding="utf-8")
         self.assertIn("# Introduction", source_markdown)
+        # source.md 是投影，不是事实来源；但它会被导入/补丁/撤销三处重写，
+        # 所以必须像 document.json 一样原子写入：不留下临时文件。
+        self.assertEqual(list((self.store.project_path(self.project_id) / "document").glob(".source.md-*")), [])
+
+    def test_source_markdown_is_written_atomically_and_matches_the_document(self):
+        from literature.mineru import render_source_markdown, write_source_markdown
+        document = self.import_document()
+        document.blocks[0].source_text = "Rewritten heading"
+        self.store.save_document(document)
+        write_source_markdown(self.store.project_path(self.project_id), document)
+        path = self.store.project_path(self.project_id) / "document" / "source.md"
+        self.assertEqual(path.read_text(encoding="utf-8"), render_source_markdown(document))
+        self.assertIn("Rewritten heading", path.read_text(encoding="utf-8"))
+        self.assertEqual(list(path.parent.glob(".source.md-*")), [])
 
     def test_table_rowspan_and_colspan_occupancy(self):
         from literature.mineru import _table_cells

@@ -1,0 +1,343 @@
+{
+  "experiment": "structure-context-and-review-scope",
+  "date": "2026-10-14",
+  "mode": "offline read-only replay + input-overhead analysis (no model calls)",
+  "projects": {
+    "white_lotus": {
+      "project": "white_lotus",
+      "snapshot": "/var/folders/2p/40xwg96s5634qgkjmhd4w7r40000gn/T/literature-structure-lead-8s_e7tiv",
+      "candidates": 348,
+      "toc_entries": 65,
+      "matched": 64,
+      "unlisted_titles": 5,
+      "unresolved_toc": 1,
+      "candidate_identity": {
+        "current": 348,
+        "historical_outline": 348,
+        "historical_proofread": 348,
+        "outline_match": true,
+        "proofread_match": true,
+        "symmetric_diff": 0
+      },
+      "historical_job": {
+        "job_id": "17e682665d914a0d82948c3594c18141",
+        "created_at": "2026-10-13T17:32:14.680208+00:00",
+        "outline_requests": 6,
+        "proofread_requests": 9,
+        "status": "completed"
+      },
+      "reconstruction": {
+        "plan_nodes": 348,
+        "plan_invalid_rows": 0,
+        "plan_unparsed": 0,
+        "proof_decisions": 348,
+        "proof_unparsed": 0,
+        "proof_conflicts": []
+      },
+      "selection": {
+        "baseline": {
+          "reused": 87,
+          "review": 261,
+          "batches": 7,
+          "stats": {
+            "reused": 87,
+            "review": 261,
+            "promotions": 0,
+            "demotions": 0,
+            "conflicts": 0,
+            "missing_plan": 0,
+            "invalid_plan": 0,
+            "tree_conflicts": 2,
+            "local_heading": 241
+          }
+        },
+        "variant2_anomaly_only": {
+          "reused": 328,
+          "review": 20,
+          "batches": 1,
+          "stats": {
+            "reused": 328,
+            "review": 20,
+            "promotions": 0,
+            "demotions": 0,
+            "conflicts": 0,
+            "missing_plan": 0,
+            "invalid_plan": 0,
+            "tree_conflicts": 2,
+            "local_heading": 0
+          }
+        }
+      },
+      "overhead": {
+        "full_review_reference": {
+          "requests": 15,
+          "chars": 409603,
+          "bytes": 423193,
+          "per_stage": {
+            "structure_outline": {
+              "requests": 6,
+              "chars": 183923,
+              "bytes": 188444
+            },
+            "structure_proofread": {
+              "requests": 9,
+              "chars": 225680,
+              "bytes": 234749
+            }
+          }
+        },
+        "baseline": {
+          "requests": 13,
+          "chars": 363728,
+          "bytes": 375115,
+          "per_stage": {
+            "structure_outline": {
+              "requests": 6,
+              "chars": 183923,
+              "bytes": 188444
+            },
+            "structure_proofread": {
+              "requests": 7,
+              "chars": 179805,
+              "bytes": 186671
+            }
+          }
+        },
+        "variant1_compact_context": {
+          "requests": 13,
+          "chars": 279275,
+          "bytes": 289973,
+          "per_stage": {
+            "structure_outline": {
+              "requests": 6,
+              "chars": 107609,
+              "bytes": 112117
+            },
+            "structure_proofread": {
+              "requests": 7,
+              "chars": 171666,
+              "bytes": 177856
+            }
+          }
+        },
+        "variant2_compact_anomaly_only": {
+          "requests": 7,
+          "chars": 146177,
+          "bytes": 151901,
+          "per_stage": {
+            "structure_outline": {
+              "requests": 6,
+              "chars": 107609,
+              "bytes": 112117
+            },
+            "structure_proofread": {
+              "requests": 1,
+              "chars": 38568,
+              "bytes": 39784
+            }
+          }
+        },
+        "full_review_reference_vs_baseline": {
+          "requests": -2,
+          "chars_pct": -12.61,
+          "bytes_pct": -12.82
+        },
+        "variant1_compact_context_vs_baseline": {
+          "requests": 0,
+          "chars_pct": 23.22,
+          "bytes_pct": 22.7
+        },
+        "variant2_compact_anomaly_only_vs_baseline": {
+          "requests": 6,
+          "chars_pct": 59.81,
+          "bytes_pct": 59.51
+        }
+      },
+      "disagreement": {
+        "candidates_with_plan": 348,
+        "candidates_with_proof": 348,
+        "both": 348,
+        "role_changed": 0,
+        "level_changed": 0,
+        "parent_changed": 0,
+        "body_to_heading": 0,
+        "heading_to_body": 0,
+        "unlisted_heading": 5,
+        "omitted": 241,
+        "omitted_disagree": 0,
+        "omitted_body_to_heading": 0,
+        "omitted_heading_to_body": 0,
+        "omitted_unlisted_heading": 0,
+        "omitted_level_changed": 0,
+        "omitted_parent_changed": 0,
+        "notable_omitted": [],
+        "omitted_composition": {
+          "by_type": {
+            "paragraph": 238,
+            "footnote": 3
+          },
+          "by_plan_role": {
+            "body": 232,
+            "furniture": 6,
+            "footnote": 3
+          },
+          "local_heading_shape": 4,
+          "not_prose_like": 240,
+          "heading_score_ge_0_3": 0,
+          "plan_heading": 0
+        }
+      },
+      "tree": {
+        "plan": {
+          "checked": 66,
+          "issues": 2,
+          "issue_ids": [
+            "blk-00000048",
+            "blk-00000110"
+          ]
+        },
+        "proof": {
+          "checked": 66,
+          "issues": 2,
+          "issue_ids": [
+            "blk-00000048",
+            "blk-00000110"
+          ]
+        }
+      },
+      "suggestion_sets": {
+        "baseline_suggestions": 0,
+        "variant2_suggestions": 0,
+        "missing_in_variant2": [],
+        "extra_in_variant2": []
+      },
+      "human_adoption": {
+        "suggestions": 43,
+        "adopted_in_omitted_set": [
+          "blk-p000348-0043",
+          "blk-p000356-0032"
+        ],
+        "adopted_disagreements": []
+      },
+      "historical_usage_reference_only": {
+        "outline": {
+          "requests": 6,
+          "input_tokens": 95606,
+          "output_tokens": 59602,
+          "reasoning_tokens": 40309
+        },
+        "proofread": {
+          "requests": 9,
+          "input_tokens": 109177,
+          "output_tokens": 61124,
+          "reasoning_tokens": 33064
+        },
+        "note": "历史真实 usage，仅供参考；新请求 token 未用 tokenizer，报告中为字符/字节与估算。"
+      }
+    },
+    "journal": {
+      "project": "journal",
+      "snapshot": "/var/folders/2p/40xwg96s5634qgkjmhd4w7r40000gn/T/literature-structure-lead-8s_e7tiv/journal",
+      "candidates": 228,
+      "toc_entries": 14,
+      "matched": 13,
+      "unlisted_titles": 63,
+      "unresolved_toc": 1,
+      "available_jobs": [
+        {
+          "job_id": "e6a172aba0cd45869ab7a6f7159961e7",
+          "created_at": "2026-10-03T14:40:01.178085+00:00",
+          "outline": 0,
+          "proofread": 4
+        },
+        {
+          "job_id": "c046df4747b64930aa6ddc4647c8aec6",
+          "created_at": "2026-10-03T16:57:42.622892+00:00",
+          "outline": 4,
+          "proofread": 6
+        }
+      ],
+      "replay_status": "no matching historical job (candidate logic version differs); input-overhead only",
+      "outline_overhead": {
+        "baseline": {
+          "requests": 4,
+          "chars": 101352,
+          "bytes": 104344,
+          "per_stage": {
+            "structure_outline": {
+              "requests": 4,
+              "chars": 101352,
+              "bytes": 104344
+            }
+          }
+        },
+        "variant1_compact_context": {
+          "requests": 4,
+          "chars": 68691,
+          "bytes": 71660,
+          "per_stage": {
+            "structure_outline": {
+              "requests": 4,
+              "chars": 68691,
+              "bytes": 71660
+            }
+          }
+        },
+        "variant1_saving": {
+          "chars_pct": 32.23,
+          "bytes_pct": 31.32
+        }
+      },
+      "note": "当前快照候选集与历史作业候选集不一致（候选召回逻辑版本不同），故不做历史两遍回放；仅做规划阶段的输入开销分析。"
+    },
+    "authentic": {
+      "project": "authentic",
+      "snapshot": "/var/folders/2p/40xwg96s5634qgkjmhd4w7r40000gn/T/literature-structure-lead-8s_e7tiv/authentic",
+      "candidates": 58,
+      "toc_entries": 11,
+      "matched": 10,
+      "unlisted_titles": 12,
+      "unresolved_toc": 1,
+      "available_jobs": [
+        {
+          "job_id": "db688670fd29449fadeb5001d567951e",
+          "created_at": "2026-10-12T05:15:27.931031+00:00",
+          "outline": 1,
+          "proofread": 2
+        }
+      ],
+      "replay_status": "no matching historical job (candidate logic version differs); input-overhead only",
+      "outline_overhead": {
+        "baseline": {
+          "requests": 1,
+          "chars": 15080,
+          "bytes": 15827,
+          "per_stage": {
+            "structure_outline": {
+              "requests": 1,
+              "chars": 15080,
+              "bytes": 15827
+            }
+          }
+        },
+        "variant1_compact_context": {
+          "requests": 1,
+          "chars": 15080,
+          "bytes": 15827,
+          "per_stage": {
+            "structure_outline": {
+              "requests": 1,
+              "chars": 15080,
+              "bytes": 15827
+            }
+          }
+        },
+        "variant1_saving": {
+          "chars_pct": 0.0,
+          "bytes_pct": 0.0
+        }
+      },
+      "note": "当前快照候选集与历史作业候选集不一致（候选召回逻辑版本不同），故不做历史两遍回放；仅做规划阶段的输入开销分析。"
+    }
+  }
+}

@@ -2,6 +2,175 @@
 
 > 本日志记录可验证事实、架构决策和仍需外部条件完成的验收。更新代码时应同步更新本文，避免把“已编码”“已测试”和“已用真实服务验证”混为一谈。
 
+## 2026-10-14（第二十三轮）：重新打包并安装客户端（用户授权安装，未启动、未 commit）
+
+把前两轮的结构校对提速 + 项目列表轮询提速 + 资源清理一起打进可交付的 macOS 客户端并安装。本轮**只做了构建与安装验证**，未启动客户端、未调真实 MinerU/provider、未提交 Git。
+
+### 环境与构建输入
+
+- 本机 PATH 里**没有 node/npm/pnpm**（只有 cargo/rustc），且 `frontend/node_modules` 处于 pnpm 虚拟店完整但**链接不全**的状态：`@tauri-apps/cli` 在 `frontend/node_modules/@tauri-apps/cli/node_modules/` 下没有指向 `@tauri-apps/cli-darwin-arm64` 的链接，`require` 直接失败（`frontend/node_modules/.pnpm/...` 里的 `cli.darwin-arm64.node` 实体是在的）。用 CLI 自己的 `NAPI_RS_NATIVE_LIBRARY_PATH` 指向该 `.node` 绕过，未重装依赖。处置步骤与验收要点已写进 `docs/PACKAGING.md` 的“环境回退”。
+- 借用 agent 运行时自带的 node `v24.19.0`（`~/.cache/codex-runtimes/.../dependencies/node/bin/node`，不在仓库内、不入包）。
+- 冻结 revision：`literature/runtime_revision.py::source_revision()` = **`f01105482311f04ce692`**（构建前后一致）。
+
+### 验证（均为安装前可复核的事实）
+
+- 全量 `pytest` **470 passed**（合并前两轮：结构校对默认路径瘦身 + 项目列表轮询/`source.md`）。
+- `tsc --noEmit` **通过**（exit 0）——上一轮因本机无 node 未能执行，本轮补上。
+- Vite 生产构建通过：`frontend/dist/assets/index-44088ZuV.js`（818.97 kB / gzip 247.52 kB）、`index-DwNVqgKi.css`（82.10 kB）、`pdf.worker.min-iDqQPrd3.mjs`。
+- PyInstaller sidecar：`src-tauri/binaries/literature-sidecar-aarch64-apple-darwin`，sha256 **`b05922f76a9dcd62c62a0e839ef9d1d8cb44b307ba907c0fc74cd09162e6c4eb`**，size **42937856**，均与 `src-tauri/binaries/manifest.json` 一致；`dist/sidecar/literature-sidecar`、`src-tauri/binaries/…`、`.app/Contents/MacOS/literature-sidecar` **三处逐字节相同**。
+- Tauri 打包：`src-tauri/target/release/bundle/macos/Literature.app`（**54.56 MiB**）；`codesign --force --deep --sign -` 后 `codesign --verify --deep --strict` 通过（adhoc，无 Developer ID）。
+- **冻结 sidecar 隔离冒烟**（临时 `LITERATURE_LIBRARY`/`LITERATURE_RUNTIME`、自带 session token、不触真实库）：`/health` 返回 `runtime_revision: f01105482311f04ce692`（与 manifest 逐字符一致）；把 `On Being Authentic` 的**副本**放进临时库后 `/projects` 返回 `review=partial`、`translate=done 615/615`，与改造前该项目的 pipeline 输出一致；`project_state` 缓存表在**既有数据库**上自动补建并回填（旧库迁移路径验证）。
+- 安装：`scripts/setup_macos_launcher.sh --app-only`。安装前用与脚本相同的判据（`ps -axo command=` 匹配 `launcher/Literature.app/Contents/MacOS/`）确认目标客户端/后端未运行；旧版（sidecar `dc682466…` / revision `5368566b3b43788b28ba`）备份到 `launcher/.rollback-Literature-dc682466.app`（已验证含旧 sidecar，不提交）。安装后：内置 sidecar 与 manifest 及 `src-tauri/binaries` 一致、与构建包 `diff -rq` **完全一致**、`codesign --verify --deep --strict` 通过。
+- 前端版本确认：Tauri v2 把前端资源**压缩后编进 `Contents/MacOS/literature`**，中文文案无法 grep；用 `strings -a` 取出的资源名为 **`assets/index-44088ZuV.js`**，与本轮 `frontend/dist/assets/` 的文件名一致，证明安装包内是本轮前端产物（而不是旧 dist）。
+
+### 未验收 / 未做（不混写）
+
+- **未启动客户端**，所以未经原生窗口点击/交互验收；未做真实浏览器端到端（本轮前端只改了选项下拉与结果栏文案，已过 `tsc` 与构建）。
+- 未调真实 MinerU、未调真实付费模型；未验证新默（`proofread_mode=sample`、`toc_extraction=auto`、结构关思考）在真实模型上的准确率——这一点仍是上两轮遗留的核心未验收项。
+- 无 Developer ID 签名、无公证、无 Intel/通用包，不能把本地 adhoc 包当作对外发行包。
+- 观察到但未处理：PID 4098 有一个早期会话留下的开发态 sidecar（`.venv/bin/python -m literature.sidecar`，`/tmp/lit-smoke` 库，端口 41731）仍在运行。它不使用 `launcher/Literature.app` 下的二进制，不阻塞安装，与已安装客户端互不影响；本轮未动它。
+
+## 2026-10-14（第二十二轮）：结构校对默认路径瘦身 + 导出时代暂存副本清理（已编码/自动测试/离线基准，未真实模型 A/B、未重打包客户端）
+
+起因：对同一本 `On Being Authentic` 做“库内真实作业”与“人工 agent 直接校对”的对照——真实作业 288.5 s / 99,006 token（其中 `structure_proofread` 两次共 184 s），人工 agent 1 分 19 秒 / 约 1.2 万 token。逐项定位到三处可确定的浪费：第二遍全量复核（64% 墙钟、历史两遍零分歧）、模型被要求“每个候选都必须返回一次角色判断”、以及本地目录检测失败后降级到模型提取目录。本轮落地其中的确定性部分，并额外提供了目录页负样本闸门与离线基准。
+
+### 已实现
+
+- **复核模式 `proofread_mode`（`sample` 默认 / `full` / `off`）**（`structure_reasoning.py`、`structure.py`、`api.py`）：`select_review_targets` 新增 `review_mode` 参数（默认 `full`，历史行为逐位不变）。`sample`/`off` 下安全规则（漏标提升、标题降级、目录冲突、无锚点改层级、本地仍像标题/非散文短块、父子关系问题、置信度不足）不再阻止采纳，只写入该决定的 `review_flags` 供人工确认时查看；第二遍只剩两类候选：**硬阻塞**（规划缺失/角色非法/置信度非法，上限 `MAX_MUST_REVIEW_CANDIDATES=80`，超出部分保持原状并计入 `needs_review`）与**抽查**（`QA_REASON` 标记，按 `block_id` 的 SHA-256 排序取固定比例，确定性可复现）。抽查结果只经 `compare_qa_sample` 生成 `review_selection.qa` 一致性指标，**强制不进 decisions/suggestions**（回归：抽查故意全部反着答，仍零建议、零补丁）。`proofread_full=true` 仍是 `full` 的兼容入口，`proofread_mode` 优先。
+- **抽查用极简输出契约**（`QA_PROOFREAD_INSTRUCTION`）：抽查批只要求 `block_id/role/parent_id/confidence`，明确禁止 `reason`；`batch["review_purpose"]="qa"` 触发，`_proofread_batch(..., purpose=)` 透传，二分拆批保持目的。审计 `batch_tag` 由 `proofread-N` 改为 `{purpose}-N`，`apply_batch_audit` 同步。
+- **印刷目录检测：补充正样本、新增两类负样本**（`structure_signals.py`）：`TOC_MARKER_RE` 增加单数 `content`（真实书常见 `Content`）；新增 `TOC_ENTRY_MAX_TITLE=100` + `_toc_entry_shape`（长度、句读结尾、书目引用）作为页级 `TOC_ENTRY_SHAPE_RATIO=0.6` 闸门；新增 `_page_looks_like_index`（注释引用 `\d+[a-z]` 密度 ≥0.25 或 `See/See also` 密度 ≥0.15）排除索引页。实测分辨度：真实目录页形态比 0.97–1.00，尾注页 0.18–0.30，参考书目页 0.36，索引页 0.92（由索引闸门拦下）。
+- **本地目录直接采信 `toc_extraction`（`auto`/`local`/`model`，默认 `auto`）**（`structure.py`）：`signals.toc_marker_pages` 抽为独立函数；有显式目录标记页、本地能解析出 ≥2 条时不再发 `structure_extract` 请求，`proposed_toc` 带 `level_source="local"`，结论仍只是待确认草稿。无标记/解析为空/显式 `model` 时保持原路径。结果新增 `toc_extraction` 与 `local_toc_marker_pages`，`baseline_source` 在本地采信时为 `local`。
+- **结构路径默认关思考**（`structure.py`）：`run_structure_job` 在 `with_read_timeout` 后调用 `with_thinking_disabled()`；语义与翻译路径一致（只改已声明协议的字段，显式 `on`/`high` 时尊重用户配置）。
+- **前端**（`OutlinePane.tsx`、`ReviewWorkspace.tsx`）：`StructureOptions.proofreadFull` 换成 `reviewMode` + `tocExtraction`，新增两个下拉；结果栏文案改为“第一遍规划定案 / 第二遍必须定案 / 抽查一致性”，并在地目录被采信时提示层级来源；帮助文案与审计口径同步。
+- **导出时代暂存副本清理**（新增 `scripts/prune_mineru_workflow_staging.py`）：2026-10-13 移除导出/TBL 后，旧项目仍留着封存前的下载目录 `exports/.mineru-workflow_mineru_job/slices/**`，与 `ocr/raw/mineru/**` 逐字节相同。脚本默认只预览，`--apply` 才删；只删 sha256 命中 `ocr/raw/manifest.json` 已封存哈希的文件，任何不匹配文件（如记录原始作业路径的 `job.json`）与空目录清理分开处理。执行结果：6 个项目共 **474 个文件 / 181.4 MiB**；`library` **594 MB → 416 MB**；`verify_raw` 全部通过；用户 EPUB、raw、document、translations、`library/.trash` 未动。
+- **离线基准**（新增 `tests/manual/structure_review_mode_benchmark.py`）：只读真实库，把 document 复制到临时 `ProjectStore`，用 mock provider 跑**真实代码路径** `run_structure_job`，不调用模型、不写真实库。指标为请求数、输入字符数、模型必须逐条作答的条数（均为代理指标）。
+
+### 与既有工作的关系
+
+- 与本轮前两轮的关系：`d7a0cbd` 已做“本地过滤 + 选择性复核 + 有界并发”，本轮在其上把“选择性复核”从“安全规则决定哪些候选要再问一遍”改为“第一遍定案 + 有界抽查”，并把“目录核对”从“总是问模型”改为“有标记就本地采信”。工作树里既有的 `compact_context`（上下文压缩 V1）仍保持默认关闭、未被本轮启用。
+- 未动：`structure_adaptive.py`（自适应分支规划，仍为可选试用、默认 `global`）、`apply_automatic` 的本地 0.97 阈值与全部补丁/撤销路径。
+
+### 验证
+
+- 全量 `pytest` **463 passed**（本轮前 439）。新增两个测试文件：`tests/test_structure_toc_detection.py`（6 项：单数 `Content` 标记、尾注页、参考书目长 run 不压过真目录、索引页、真目录通过索引闸门、长条目标题不被误杀）、`tests/test_structure_review_modes.py`（17 项：模式解析与兼容入口、抽查尺寸/确定性、`sample`/`off` 标注语义、硬阻塞仍必须定案、抽查与硬阻塞不重叠、`compare_qa_sample` 不改输入、端到端“抽查全部反着答也不产生建议”、`off` 不发第二遍请求）。
+- **改写 4 处旧断言以反映新默认**（不是“测试通过即兼容”）：`test_structure_reasoning.py` 重试用例 4→3 次调用（默认 `sample`）、续跑用例 3→2 次调用与 usage 40→30；`test_structure_speed.py` 三个并发用例显式传 `proofread_mode="full"`（它们验证的是多批并发机器本身）；`test_model_services.py` 后台作业用例显式传 `toc_extraction="model"` 以继续覆盖模型核对目录路径；`test_structure_calibration.py` 把“可解析的目录仍须由 AI 核对”改为“有显式标记时本地直接采信”，并保留“无标记时仍走模型”的覆盖。
+- 离线基准（5 份真实文档，改造前 `full`+`model` → 改造后 `sample`+`auto`）：
+
+| 文档 | 候选 | 请求 | 输入字符 | 逐条作答 |
+|---|---:|---:|---:|---:|
+| White Lotus Teachings | 348 | 16 → 7 (-56%) | 443,113 → 247,200 (-44%) | 761 → 366 (-52%) |
+| Metropolitan Journal | 230 | 11 → 5 (-55%) | 267,628 → 143,468 (-46%) | 474 → 242 (-49%) |
+| On Being Authentic | 58 | 4 → 2 (-50%) | 56,766 → 27,043 (-52%) | 127 → 66 (-48%) |
+| Writing and Authority | 529 | 24 → 10 (-58%) | 654,865 → 375,232 (-43%) | 1,114 → 556 (-50%) |
+| Making Transcendents | 489 | 22 → 9 (-59%) | 539,340 → 277,662 (-49%) | 991 → 514 (-48%) |
+
+  报告：`docs/verification/structure-review-mode-2026-10-14.md`；原始 JSON：`docs/verification/structure-review-mode-2026-10-14.json`。
+- 本地目录检测在 7 个真实项目上的前后对照：`On Being Authentic` p97–104（尾注，80 条垃圾）→ **p5（11 条，与印刷目录逐条一致）**；`Once upon a future time` 参考书目 p314–326（13 页 run）→ **真目录 p7–9（91 条）**；White Lotus p6–7、Making Transcendents p8、MetJournal p3、Writing and Authority p2–3 不变；White Lotus War 仍为空（无目录）。
+- 资源清理后 `verify_raw` 对全部 7 个项目无错；`library` 594 MB→416 MB。
+
+### 未验收 / 未做
+
+- **质量未证**：离线基准用 mock provider，第一遍规划由文档自身标题层级派生，只度量请求形状；**不能**声称准确率、真实耗时或真实费用等价。抽查只回答“两遍是否分歧”，不回答“谁对”。
+- 未用真实模型跑同书 A/B（`full` vs `sample`，人工比对采纳率）；建议在留出文档上补做后再决定是否把 `sample` 长期作为默认。
+- 未重打包/安装客户端（本轮只改 Python 与前端源码）；本机**无 Node/npm/pnpm**，`tsc --noEmit` 与 Vite 构建**本轮未执行**，前端改动只经过人工审读。
+- 未改真实库的 raw、document、translations；未调用付费服务；未提交 Git。
+- 已知但本轮未处理：`structure_adaptive.py` 的 `planning_mode=adaptive` 仍未做真实 A/B；`compact_context`（上下文压缩 V1）仍默认关闭。
+
+### 追加：项目列表轮询与 `source.md`（同日追写）
+
+上一条里列为“已知但未处理”的两项已逐一定量并处理。
+
+- **`/projects` 聚合的热点不是 manifest，而是两处“为了一个字段解码整份文件”**（实测 7 项目共 175 ms，前端每 3 秒轮询）：
+  - `structure_review_summary` 调 `load_document` 只是为了比一个 `updated_at`，实测该项 **131 ms**，其中 **122 ms** 是 JSON 解码（`document.json` 单份 1.4–8.2 MB，整库约 28 MB）。新增 `ProjectStore.document_updated_at()`：以 `(size, mtime_ns)` 为缓存键存在新增的 `project_state` 表（`CREATE TABLE IF NOT EXISTS`，随 `_init_database` 对旧库自动补建），命中直接返回，未命中才读一次文件并回填；`save_document` 写完后顺手刷新缓存。缓存键取自真实文件，**不存在“缓存说未变、文件其实已变”的假有效**，且不受写入顺序影响（崩在两次写之间时签名不匹配→重新读）。单项目（8.2 MB 文档）**57.5 ms → 1.8 ms**；整库 7 项目 **164.5 ms → 6.3 ms**。
+  - `project_pipeline` 在列表路径上默认调 `list_jobs`（`SELECT *` + 解码 `result_json`/`activity_json` 审计，单项目可达 1 MB+），实测 **42 ms**。改为默认 `list_job_summaries`（只投影状态字段）；`translate_stage` 只用到 `kind`/`status`，语义不变。`GET /projects/{id}` 仍传完整 jobs（它本来就要审计）。
+  - 回归：新增 `tests/test_document_state_cache.py` 6 项（值与 `load_document` 一致且每次 save 后跟随、外部写入使缓存失效、文件缺失返回空、`project_state` 表存在、确认状态机 `todo→done→partial` 不变、绕过 store 的外部写入仍使确认失效）。
+- **`document/source.md` 量下来不值得删，但它确实是“非原子写”**：实测渲染 + 写入仅 **0.0–1.9 ms**、全库合计约 6 MB，且 `tests/test_pipeline.py` 与 `docs/ARCHITECTURE.md` 都把它当可读投影，所以**不删**。但它原本用 `write_text` 直接覆盖（与 `document.json` 的原子写入不一致，崩溃或并发会读到被截断的 Markdown），已改为新增 `mineru.write_source_markdown()` + `storage.atomic_text()`（临时文件 + `os.replace`），4 处写入全部收口。回归：`tests/test_pipeline.py` 新增 1 项（写入后内容与 `render_source_markdown` 一致且不残留临时文件），原导入用例也断言无临时文件残留。
+
+**验证（追加）**：全量 `pytest` **470 passed**；两项均在真实库上量了前后耗时（只读，未改真实库业务数据；`project_state` 是派生缓存，可重建）。**未验收（不混写）**：未重新打包/安装客户端；本机无 Node，前端本轮无改动也未重跑 `tsc`；未跑真实浏览器端到端。
+
+## 2026-10-14（第二十一轮）：翻译提速四项（对齐 TBL 策略，已编码/自动测试，未真实验收）
+
+承接与 TranslateBooksWithLLMs 的比对结论（token 计量分块、AIMD 并发、prefix caching、思考控制），四项全部落在翻译主链路。未调用真实模型、未重打包客户端、未改库。
+
+### 已实现
+
+- **翻译任务默认关思考**（`providers.py` + `api.py`）：新增 `OpenAICompatibleProvider.with_thinking_disabled()`——已声明协议时按协议改写（`qwen_thinking`/`glm_thinking` → 开关 `off`，`openai_effort` → `minimal`），整本书翻译、单块译审与即时翻译三条链路默认调用；用户显式要求开思考（开关 `on` / effort `high`）时不覆盖，未声明协议的服务不发送未知字段（显式协议原则不变，此类服务需在模型服务设置里选协议才能关）。依据：实测 `qwen3.8-flash-next` reasoning 占输出 85–90%，对译文质量近零贡献。
+- **AIMD 并发自适应 + 上限 8→16**（`translation.py` + `request_coordinator.py` + `api.py`）：`MAX_PARALLEL_WORKERS=16`、`TranslationJobInput.parallel_workers le=16`，前端范围弹窗增加 12/16 档；`_process_blocks` 内滑窗提交门改用 `effective_workers`，块级 `rate_limited`（新增 `_ChunkOutcome.rate_limited`，`ProviderError` 新增 `status_code`）触发并发减半，连续 3 块成功后 +1 探测回升，不超过用户设定上限。同时修复隐性瓶颈：`RequestCoordinator.default_service_limit=4` 从未被调高，workers>4 时在途请求仍被压到 4——新增 `raise_service_limit()`（只升不降，避免重建信号量伤及运行中作业），翻译作业启动时上调到 `max(现值, workers)`。
+- **AIMD 限流修复（评审盲区补齐，同日）**：评审复现「整块因 429 完全失败」走 `fully_failed` 分支——既不减并发又计入全局熔断（3 次后服务已恢复仍熔断，12 块误败 8 块）。修复：`rate_limited` 提到 `fully_failed` 之前判断，429 减半并发且 `provider_error_streak` 归零（不计熔断）；`_run_chunk` 把捕获的 `ProviderError` 传入 `_ChunkOutcome.error`；切分子批被 `_translate_units_isolated` 吞掉的异常经新增 `error_sink` 上传 429 状态（含超时切分路径）。修复后复现：串行 10/12 译完、并发 4 下 9/12 译完，失败仅限真正撞上限流的块，无「已中止」误报（`tmp/aimd_repro.py`）。
+- **Prefix caching 友好布局**（prompt 契约 `translation-v3`）：术语表从“按块过滤后插 user prompt”改为整份按源词稳定排序注入 system prompt 尾部（新增 `_stable_glossary`，上限 `GLOSSARY_MAX_ENTRIES=80` 不变）；同一任务内所有请求的 system 前缀逐字节一致，可命中 DeepSeek/Qwen/OpenAI 兼容服务的自动前缀缓存；user prompt 只留跨块变化部分。代价是不再按块过滤（未出现术语也注入），但缓存命中后这部分输入接近免费，且代词指代处也能拿到正确译法。
+- **分块预算从字符改 token**（`translation.py`）：新增 `_chars_per_token`（en/fr/de/es/it/pt≈4.0、zh/ja≈1.6、ko≈2.2、ru≈3.2）与 `_estimate_tokens`；`DEFAULT_CHUNK_TOKENS=900` 取代 `DEFAULT_CHUNK_CHARS=2400`，`_chunks`/`_batch_units`/`estimate_translation` 共用同一计量（预估与真实执行仍同规则）。效果：英文块变大（减少请求数）、中文块变小（降低 `finish_reason=length` 截断与切分重试往返）。
+
+### 已验证
+
+- Python 全套 `433 passed`（含评审后修复与回归）。新增/更新：token 分块按语言差异、`with_thinking_disabled` 七种配置矩阵（含不修改原对象、未声明协议原样返回）、AIMD 单次 429 后继续提交、AIMD 限流突发（连续 3 次 429 后恢复）不触发全局熔断（并发 4 下 ≥9/12 译完、失败 ≤3、无「已中止」）、术语表稳定 system 前缀契约（排序、user 无术语表）；更新两处旧契约断言（英文批上限 3200→3700、冻结术语表断言改到 system）。评审独立复检 432 passed + 本轮修复后全量重跑通过。
+- `tsc --noEmit` 与 Vite 生产构建通过（Node v22.11.0，仓库 `.tools/node`）。
+
+### 尚未验收
+
+- 未用真实 provider 验证：关思考后 `reasoning_tokens` 应降至≈0（中转站可能剥掉 `enable_thinking` 字段，需用 usage 账本核实）；prefix caching 命中率（`cached_tokens`）与实际提速幅度；AIMD 在真实 429 下的降速/回升曲线。
+- 未重建冻结 sidecar 与 Tauri 包，已安装客户端仍是旧引擎；`polish`/串行衔接等旧行为回归未逐项手测。
+- prompt 契约升为 `translation-v3`：恢复 v2 冻结任务会打 warning 并沿用冻结语义（现有逻辑，未新增迁移）。
+
+## 2026-10-14（第二十一轮）：在最新完整版本上安装自适应结构校对更新（用户授权安装，未 commit）
+
+用户明确授权“在最新版本的程序之上安装这个更新”，要求不得用旧包覆盖其他模块的新改动。本轮未调真实模型/MinerU、未改真实库/raw、未启动客户端、未 commit/push。
+
+### 安装前核实（只读）
+
+- HEAD `b40b9ae`（源 revision `4c4ffbcfb83f0c774fc7`）；工作树 revision `5368566b3b43788b28ba`。
+- 已安装旧版 `launcher/Literature.app`：sidecar sha `a5a99eba…` / size 42892592 / manifest revision `d383569f0222a29435f1`，02:58 构建、03:02 安装（`.rollback-Literature-7aec1108.app` 是它替换掉的我的 7aec1108 版本）。它早于当前工作树，不是更晚/不同来源，工作树包含其他模块的最新未提交改动（`translation.py` +196、`providers.py` +36、`request_coordinator.py` +15、`ReadingPanels.tsx` +4 等），因此在其基础上重建不会丢失新模块。
+- 无 Literature / sidecar 进程运行；最近 5 小时无源码改动（冻结可建）。
+
+### 冻结、测试与构建
+
+- 构建前 `source_revision()` = `5368566b…`；前端 dist `index-VaYJ_Nxx.js` sha256 `2bf3bffc…`。
+- 全量 `pytest` **433 passed**；`tsc --noEmit` 与 Vite 生产构建通过。
+- 重建 sidecar：revision `5368566b3b43788b28ba`、sha256 `dc682466f982ad0d846a491640fa227efb928b6cff3002c19497c71a6d663f46`、size 42927360。
+- 重建 Tauri：`src-tauri/target/release/bundle/macos/Literature.app` 54.55 MiB；包内 sidecar 与 `src-tauri/binaries`、`dist/sidecar` 逐字节一致；`codesign --verify --deep --strict` 通过（adhoc）。
+- 构建后 `source_revision()` 仍为 `5368566b…`（无构建期源码变化）。
+
+### 备份与安装
+
+- 备份旧版到 `launcher/.rollback-Literature-a5a99eba.app`（sidecar 仍 `a5a99eba…`，codesign 验证通过；不提交）。
+- `scripts/setup_macos_launcher.sh --app-only` 安装到 `launcher/Literature.app`。
+- 安装后：内置 sidecar 与构建包/binaries 逐字节一致（`dc682466…` / 42927360）；`Contents` 与构建包 `diff -rq` 完全一致；`codesign --verify --deep --strict` 通过；客户端仍未运行。
+
+### 包含模块与未验收
+
+- 包含：自适应分支结构规划（可选试用，global 默认不变，未因安装默认启用）+ 其他 agent 的 translation SSE/超时切分/读超时可配、providers/request_coordinator、ReadingPanels 等最新改动；sidecar revision 覆盖全部 `literature/*.py`，前端 dist 含 `planning_mode`/`自适应分支`。
+- **未验收**（不混写）：真实模型 A/B、真实 MinerU/付费 provider、原生窗口逐项点击、公证与干净机安装均未做；本轮仅安装授权，未 commit/push。
+
+## 2026-10-14（第二十轮）：自适应分支结构规划（可选试用，已实现/离线验收/未部署）
+
+用户授权优化并实现由简到繁的分支校对策略。新增 `literature/structure_adaptive.py`，作为**明确可选试用模式**（`planning_mode="adaptive"`）；生产默认仍是整体串行 + 选择性复核，不静默替换。未调用模型、未安装/启动、未 commit/push、未改真实库/raw。
+
+### 分支规则与数据契约
+
+- 数据仍只用 `structure_model_payload` 的候选/目录/对账字段；规划输出与整体规划同形（`profile/nodes/issues/planned`），下游选择性复核、`validate_hierarchy`、建议、人工确认与撤销全部复用。
+- 可靠锚点：正文匹配 ≥0.92、唯一领先 ≥0.06、目录无重名、正文层级（现有层级或编号前缀 ±1）佐证、`level_source∈{confirmed,model,vision}`、阅读顺序 LIS 一致；印刷页码仅辅助（≥3 锚点单调才算一致）。AI 自报置信度/单一模糊匹配/单个页码不能独自授权边界。
+- 区域与预检门控：最浅层可靠锚点定章；章内候选按 `REGION_WINDOW=64` 切；发送前先构造全部请求并计算成本代理（请求数/字符/串行关键路径/上下文），若自适应请求数超全局则先做小区域装箱合并（`MERGED_MAX_PRIMARY=128`，保留各章 anchors 与边界标记）；门控要求 请求≤全局 且 字符<全局 且 轮数≤全局，否则精确回退。每请求都带精简 `root_convention`（章锚点层级+一行约定），`overview` 仅首个请求；可靠区域默认 `MAX_PARALLEL_REGIONS=2` 有界并行，头部/重名/歧义区域串行。
+- 合并只接受主候选，重叠只读；每个候选（含未收录小节、疑似漏标短块）恰好一次主判断；目录不覆盖正文标题文字。
+- 升级/回退：局部升级触发覆盖遗漏/uncertain/非法角色、与最终标题树冲突、与已确认目录层级矛盾（不只“不在 nodes 里”）；局部升级（扩到 `REGION_CONTEXT×2`）与全局补查各限一轮且合计受 `MAX_ADDITIONAL_PLANNING_REQUESTS=4` 硬上限，超限/仍异常留第二遍复核 + `validate_hierarchy` + 人工；框架 `unreliable`、候选 <`ADAPTIVE_MIN_CANDIDATES=120` 或预检门控不通过回退整体串行；`proofread_full` 全量复核仍可选。
+
+### 集成与 UI
+
+- `select_review_targets` 的 `strict_local` 保留为默认 True 的可选参数；默认调用与显式 True 逐位一致（White Lotus 87/261），新增等价单测。
+- 新增 `StructureJobInput/StructureAIAnalyze/StructurePlanInput.planning_mode`；前端“校对选项”新增「规划策略」，结果栏显示实际路径（自适应分支的框架状态/可靠/歧义区域/局部升级/遗漏，或回退原因）。
+
+### 离线验收（无模型调用）
+
+- 脚本 `tests/manual/experiments/structure_adaptive_replay.py`，输出 `docs/verification/structure-adaptive-replay.json`。
+- White Lotus（历史规划回放，候选 ID 逐一致）：348/348 覆盖不变、遗漏 0、fallback 否；规划 6 请求/183,923 字符 → 6 请求/97,443（**-47.0%**，小区域合并生效）；端到端（规划+未改的 strict_local 第二遍）13/363,728 → 13/273,138（**-24.9%**），可见第二遍复核限制了端到端收益。
+- Journal（机械覆盖）：主 4 请求但机械计划的人工 `parent=None` 触发 3 次局部升级，总 7 请求/108,740（只问可疑 ID）；端到端 8/191,924 → 11/201,846（**更差**）；真实模型未验证，**不宣称 Journal 有收益**。
+- Authentic（机械覆盖）：58 候选 <120 → **回退整体串行**（输出与全局等价），覆盖不变。
+- 说明：字符/请求为精确测量；这不是新模型准确率/耗时证明，也不使用历史 usage 当作新请求用量。
+
+### 测试 / 构建 / 未验收
+
+- 结构相关 `pytest` **38 项自适应回归**（`tests/test_structure_adaptive.py`：框架有效/部分/无效/无目录、跨章/跨批、重名、页码偏移、错误目录层级、未收录无编号小节、升降级、遗漏/非法响应、`_apply_rows` 严格校验〔unhashable/重复 ID 整项拒绝/非法或后置父标题/未知 ID〕、root_convention、预检门控与合并、局部升级只问可疑 ID、补查按阅读顺序 ≤`ADAPTIVE_SECONDARY_WINDOW=64` 切批且受 `MAX_ADDITIONAL_PLANNING_REQUESTS=4`、failure/BudgetExhausted 停止新请求、模式隔离与缓存、小样本回退）。当前工作树全量 `pytest` **432 passed**（含并行未提交的翻译/SSE 改动；本轮结构改动未触碰 translation/providers/request_coordinator）。
+- `tsc --noEmit` 与 Vite 生产构建通过；隔离真实浏览器 `tests/manual/structure_ui_browser_check.py` **21/21 PASS、0 脚本错误**（新增 `planning_mode=adaptive` POST 与路径/边界显示）；原 `parse_ui_browser_check.py` 全流程仍通过。
+- **未验收**：无真实模型 A/B，阈值（0.92/0.06/0.6/120/64/6/2）未用真实样本校准；不能声称准确率/漏标率/真实总耗时已改善；未安装/未提交 Git/未改真实库/raw。
+
 ## 2026-10-14（离线实验，未部署）：结构校对上下文压缩与复核范围收紧
 
 目标：回应用户“现有方案准确率高但耗时/token 多、拒绝仅按目录校准导致未收录小节被忽视”。以 `d7a0cbd` 选择性第二遍为 baseline（不是早期全量双遍），测两个变体：V1 仅压缩重复上下文（复核选择不变）；V2 压缩上下文 + 仅异常/高风险补查。只读真实库/历史审计，用 Lead 只读快照，未调模型、未安装/启动、未改真实库/raw、未提交。

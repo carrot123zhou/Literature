@@ -4,7 +4,7 @@ import type { DocumentGraph, Job, ModelService, StructurePatch, StructureSuggest
 import { flattenToc, formatTocDraft, parseTocDraft } from "./projection";
 
 export type TocCandidate = { page_index: number; page_number: number; confidence: number; reasons: string[] };
-export type StructureOptions = { extractToc: boolean; proofread: boolean; autoApply: boolean; useVision: boolean; requestTimeoutSeconds: number; proofreadFull: boolean; proofreadConcurrency: number };
+export type StructureOptions = { extractToc: boolean; proofread: boolean; autoApply: boolean; useVision: boolean; requestTimeoutSeconds: number; reviewMode: "sample" | "full" | "off"; tocExtraction: "auto" | "local" | "model"; proofreadConcurrency: number; planningMode: "global" | "adaptive" };
 export type StructureAnalysis = { job: Job | null; running: boolean; options: StructureOptions; proposedToc: StructureTocEntry[] | null };
 type Props = {
   document: DocumentGraph; tocText: string; onTocText: (value: string) => void;
@@ -72,10 +72,15 @@ export default memo(function OutlinePane(props: Props) {
   const reconciliation = (job?.result as { reconciliation?: Record<string, number> } | undefined)?.reconciliation;
   const skippedModel = (job?.result as { audit?: { skipped_model_suggestions?: number } } | undefined)?.audit?.skipped_model_suggestions ?? 0;
   const coverage = (job?.result as { review_coverage?: { reviewed: number; candidates: number; needs_review: number; reused?: number; second_pass?: number } } | undefined)?.review_coverage;
-  const auditRequests = (job?.result as { audit?: { requests?: Array<{ scope?: string; status?: string; started_at?: string }> } } | undefined)?.audit?.requests ?? [];
+  const reviewSelection = (job?.result as { review_selection?: { review_mode?: string; qa?: { checked: number; agree: number; disagree: number; agreement?: number | null } | null } } | undefined)?.review_selection;
+  const qa = reviewSelection?.qa || null;
+  const tocExtraction = (job?.result as { toc_extraction?: string } | undefined)?.toc_extraction;
+  const jobAudit = (job?.result as { audit?: { requests?: Array<{ scope?: string; status?: string; started_at?: string }>; planning?: { mode?: string; fallback?: boolean; fallback_reason?: string; framework?: { state?: string }; reliable_regions?: number; ambiguous_regions?: number; requests?: number; local_upgrades?: number; missing?: number; overlap_ignored?: number } } } | undefined)?.audit;
+  const planning = jobAudit?.planning;
+  const requests = jobAudit?.requests ?? [];
   const createdMs = job?.created_at ? Date.parse(job.created_at) : NaN;
   const totalElapsed = running && Number.isFinite(createdMs) ? Math.max(0, Math.round((clock - createdMs) / 1000)) : null;
-  const inFlight = [...auditRequests].reverse().find(item => item.status === "started" && item.started_at);
+  const inFlight = [...requests].reverse().find(item => item.status === "started" && item.started_at);
   const inFlightMs = inFlight?.started_at ? Date.parse(inFlight.started_at) : NaN;
   const inFlightElapsed = running && Number.isFinite(inFlightMs) ? Math.max(0, Math.round((clock - inFlightMs) / 1000)) : null;
   const hierarchy = (job?.result as { hierarchy_review?: { checked: number; headings: number }; hierarchy_plan?: { profile?: { toc_scope?: string; root_convention?: string } } } | undefined);
@@ -109,7 +114,10 @@ export default memo(function OutlinePane(props: Props) {
             ? <p role="alert" className="review-error">{job.error || job.message}</p>
             : <p>{job.message}</p>}
           {job.status === "failed" && <small>再次校准时，已完成且文档、模型与输入一致的请求会复用。</small>}
-          {coverage && <p>候选 {coverage.candidates} 个 · 第一遍复用 {coverage.reused ?? 0} 个 · 第二遍复核 {coverage.second_pass ?? 0} 个{coverage.needs_review > 0 ? `，${coverage.needs_review} 个仍需核对` : ""}；复用按角色、父子关系与目录一致性检查，冲突项一律复核。</p>}
+          {coverage && <p>候选 {coverage.candidates} 个 · 第一遍规划定案 {coverage.reused ?? 0} 个 · 第二遍必须定案 {coverage.second_pass ?? 0} 个{coverage.needs_review > 0 ? `，${coverage.needs_review} 个仍需核对` : ""}{qa && `，抽查 ${qa.checked} 项一致性 ${qa.agree}/${qa.checked}`}；默认第一遍定案 + 固定比例抽查，抽查结论只做指标、不产生建议。</p>}
+          {tocExtraction === "local" && <p className="review-hint">目录来自本地解析（有显式目录标记页），层级按编号与标题词推断，可在目录草稿里直接改。</p>}
+          {planning?.mode === "adaptive" && <p className="review-hint">规划路径：{planning.fallback ? `回退整体串行（${planning.fallback_reason || "框架不可靠"}）` : `自适应分支 · 框架 ${planning.framework?.state ?? "?"} · 可靠区域 ${planning.reliable_regions ?? 0} · 歧义区域 ${planning.ambiguous_regions ?? 0} · 局部升级 ${planning.local_upgrades ?? 0} · 遗漏 ${planning.missing ?? 0} · 重叠只读 ${planning.overlap_ignored ?? 0}`}</p>}
+          {planning?.mode === "global" && <p className="review-hint">规划路径：整体串行。</p>}
           {hierarchy?.hierarchy_review?.headings !== undefined && <p>父子关系检查通过 {hierarchy.hierarchy_review.checked}/{hierarchy.hierarchy_review.headings} 个标题；未通过的层级修改不进入建议。</p>}
           {hierarchy?.hierarchy_plan?.profile?.toc_scope && <p className="review-hint">目录范围：{hierarchy.hierarchy_plan.profile.toc_scope}<br/>层级约定：{hierarchy.hierarchy_plan.profile.root_convention}</p>}
           {reconciliation && <p className="reconciliation-summary">目录 {reconciliation.toc_entries ?? 0} · 已定位 {reconciliation.matched ?? 0} · 层级修正 {reconciliation.level_corrections ?? 0} · 疑似漏标 {reconciliation.promotions ?? 0} · 未定位 {reconciliation.missing ?? 0} · 未收录标题 {reconciliation.unlisted_titles ?? 0}</p>}
@@ -124,13 +132,15 @@ export default memo(function OutlinePane(props: Props) {
             <label>限定目录页（留空自动识别）<input aria-label="源文件目录页" value={pageText} disabled={blocked} onChange={event => onPageText(event.target.value)} placeholder="例如 3-5, 7"/></label>
             <button className="link-button" disabled={blocked} onClick={onFindTocPages}>查找目录页</button>
             {tocCandidates.length > 0 && <div className="toc-candidates">{tocCandidates.slice(0, 8).map(candidate => <button key={candidate.page_index} disabled={blocked} title={candidate.reasons.join(" · ")} onClick={() => onJumpPage(candidate.page_number)}>查看第 {candidate.page_number} 页</button>)}</div>}
-            <small>自动定位后由 AI 核对源目录，区分作者、标题和收录范围。最多 6 页。</small>
+            <small>自动定位后有显式目录标记页就直接采信本地解析（省一次模型请求）；也可在下方强制让模型核对。</small>
           </div>}
           <label className="structure-option"><input type="checkbox" checked={options.useVision} disabled={blocked} onChange={() => onOptions({ useVision: !options.useVision })}/>对照原页图片 <small>需视觉模型</small></label>
           <label className="structure-option"><input type="checkbox" checked={options.autoApply} disabled={blocked} onChange={() => onOptions({ autoApply: !options.autoApply })}/>自动采用高置信修正</label>
-          <label className="structure-option"><input type="checkbox" checked={options.proofreadFull} disabled={blocked} onChange={() => onOptions({ proofreadFull: !options.proofreadFull })}/>全量复核每个候选（更慢，回退用）</label>
+          <label>复核模式<select aria-label="复核模式" value={options.reviewMode} disabled={blocked} onChange={event => onOptions({ reviewMode: event.target.value === "full" ? "full" : event.target.value === "off" ? "off" : "sample" })}><option value="sample">定案 + 抽查（默认）</option><option value="full">全量双遍（更慢）</option><option value="off">只跑第一遍</option></select></label>
+          <label>目录来源<select aria-label="目录来源" value={options.tocExtraction} disabled={blocked} onChange={event => onOptions({ tocExtraction: event.target.value === "model" ? "model" : event.target.value === "local" ? "local" : "auto" })}><option value="auto">有目录标记时用本地（默认）</option><option value="local">总是用本地解析</option><option value="model">总是让模型核对</option></select></label>
+          <label>规划策略<select aria-label="规划策略" value={options.planningMode} disabled={blocked} onChange={event => onOptions({ planningMode: event.target.value === "adaptive" ? "adaptive" : "global" })}><option value="global">整体串行（默认）</option><option value="adaptive">自适应分支（试用）</option></select></label>
           <label>复核并发（1–4 路）<input aria-label="复核并发" type="number" min={1} max={4} value={options.proofreadConcurrency} disabled={blocked} onChange={event => onOptions({ proofreadConcurrency: Math.max(1, Math.min(4, Number(event.target.value) || 1)) })}/></label>
-          <small>默认只复核第一遍规划中缺失、不确定、冲突或证据不足的候选；全量复核会重新判断每个候选，仅作回退。自动采用仅用于本地校准，AI 整体推理的修改均待确认。</small>
+          <small>默认复核模式：第一遍规划直接定案（安全规则命中只作待确认标注），第二遍只抽查固定比例做一致性指标、不产生建议；“全量双遍”是历史行为，仅作回退。目录来源选“有目录标记时用本地”时，有显式目录标记页且能解析出条目的书省掉一次模型请求。自适应分支先验证目录/正文锚点框架，再按可靠区域并行规划，歧义区域串行、整份目录不可靠时回退整体串行；该模式质量未经真实 A/B，属试用。自动采用仅用于本地校准，AI 整体推理的修改均待确认。</small>
           <button className="block-button" onClick={onAnalyze} disabled={blocked}>只做本地校准 · 无模型费用</button>
           <button className="link-button block-button" onClick={onPreviewAudit} disabled={blocked}>预览启动输入</button>
         </details>

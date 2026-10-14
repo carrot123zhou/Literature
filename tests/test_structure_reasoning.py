@@ -131,8 +131,12 @@ class StructureReasoningTests(unittest.TestCase):
             retry = store.create_job(project, "structure_ai", {}, {})
             provider = Provider()
             result = run_structure_job(store, project, retry, {**options, "reuse_job_id": job}, provider)
-            self.assertEqual(len(provider.calls), 4)
+            # 默认 sample 复核：2 个规划窗口 + 1 批抽查（70 候选→抽查 8 条）= 3 次。
+            self.assertEqual(len(provider.calls), 3)
             self.assertEqual(result["audit"]["reused_requests"], 0)
+            self.assertEqual(result["review_coverage"]["second_pass"], 0)
+            self.assertEqual(result["review_selection"]["review_mode"], "sample")
+            self.assertEqual(result["review_selection"]["qa"]["checked"], 8)
 
     def test_retry_reuses_successes_across_failures_without_duplicate_usage(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -149,11 +153,14 @@ class StructureReasoningTests(unittest.TestCase):
             resumed = store.create_job(project, "structure_ai", {}, options)
             provider = Provider()
             result = run_structure_job(store, project, resumed, options, provider)
-            self.assertEqual(len(provider.calls), 3)  # 第二规划窗口 + 两批复核
+            # 第二规划窗口 + 一批抽查（第一窗口复用）
+            self.assertEqual(len(provider.calls), 2)
             self.assertEqual(result["audit"]["reused_requests"], 1)
             self.assertEqual(result["hierarchy_review"]["checked"], 70)
             self.assertEqual(store.load_document(project).to_dict(), document_before)
-            self.assertEqual(sum(row["input_tokens"] for row in store.usage_records(project)), 40)
+            # 只有真正发出并返回的 3 次请求计数（各 10）：首轮窗口 1、续跑窗口 2、抽查 1 批；
+            # 复用与超时未返回的请求不重复计 usage。
+            self.assertEqual(sum(row["input_tokens"] for row in store.usage_records(project)), 30)
 
     def test_retry_never_reuses_changed_document_model_or_input(self):
         for changed in ("document", "model", "input"):

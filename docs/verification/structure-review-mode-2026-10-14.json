@@ -1,0 +1,522 @@
+[
+  {
+    "label": "WhiteLotus",
+    "mode": "full",
+    "extract_toc": true,
+    "toc_entries": 0,
+    "candidates": 348,
+    "requests": 16,
+    "input_chars": 443113,
+    "rows_to_answer": 761,
+    "by_purpose": {
+      "outline": 6,
+      "review": 9,
+      "toc-extract": 1
+    },
+    "toc_extraction": "model",
+    "suggestions": 0,
+    "qa": null
+  },
+  {
+    "label": "WhiteLotus",
+    "mode": "sample",
+    "extract_toc": true,
+    "toc_entries": 0,
+    "candidates": 348,
+    "requests": 7,
+    "input_chars": 247200,
+    "rows_to_answer": 366,
+    "by_purpose": {
+      "outline": 6,
+      "qa": 1
+    },
+    "toc_extraction": "local",
+    "suggestions": 0,
+    "qa": {
+      "checked": 18,
+      "agree": 18,
+      "disagree": 0,
+      "agreement": 1.0,
+      "disagreements": []
+    }
+  },
+  {
+    "label": "WhiteLotus",
+    "mode": "sample",
+    "extract_toc": false,
+    "toc_entries": 0,
+    "candidates": 96,
+    "requests": 3,
+    "input_chars": 95879,
+    "rows_to_answer": 104,
+    "by_purpose": {
+      "outline": 2,
+      "qa": 1
+    },
+    "toc_extraction": "skipped",
+    "suggestions": 0,
+    "qa": {
+      "checked": 8,
+      "agree": 8,
+      "disagree": 0,
+      "agreement": 1.0,
+      "disagreements": []
+    }
+  },
+  {
+    "label": "WhiteLotus",
+    "mode": "off",
+    "extract_toc": false,
+    "toc_entries": 0,
+    "candidates": 96,
+    "requests": 2,
+    "input_chars": 62221,
+    "rows_to_answer": 96,
+    "by_purpose": {
+      "outline": 2
+    },
+    "toc_extraction": "skipped",
+    "suggestions": 0,
+    "qa": null
+  },
+  {
+    "label": "WhiteLotus",
+    "mode": "sample",
+    "extract_toc": true,
+    "toc_entries": 0,
+    "candidates": 348,
+    "requests": 8,
+    "input_chars": 257968,
+    "rows_to_answer": 431,
+    "by_purpose": {
+      "outline": 6,
+      "qa": 1,
+      "toc-extract": 1
+    },
+    "toc_extraction": "model",
+    "suggestions": 0,
+    "qa": {
+      "checked": 18,
+      "agree": 18,
+      "disagree": 0,
+      "agreement": 1.0,
+      "disagreements": []
+    }
+  },
+  {
+    "label": "MetJournal",
+    "mode": "full",
+    "extract_toc": true,
+    "toc_entries": 14,
+    "candidates": 230,
+    "requests": 11,
+    "input_chars": 267628,
+    "rows_to_answer": 474,
+    "by_purpose": {
+      "outline": 4,
+      "review": 6,
+      "toc-extract": 1
+    },
+    "toc_extraction": "model",
+    "suggestions": 0,
+    "qa": null
+  },
+  {
+    "label": "MetJournal",
+    "mode": "sample",
+    "extract_toc": true,
+    "toc_entries": 14,
+    "candidates": 230,
+    "requests": 5,
+    "input_chars": 143468,
+    "rows_to_answer": 242,
+    "by_purpose": {
+      "outline": 4,
+      "qa": 1
+    },
+    "toc_extraction": "local",
+    "suggestions": 0,
+    "qa": {
+      "checked": 12,
+      "agree": 12,
+      "disagree": 0,
+      "agreement": 1.0,
+      "disagreements": []
+    }
+  },
+  {
+    "label": "MetJournal",
+    "mode": "sample",
+    "extract_toc": false,
+    "toc_entries": 14,
+    "candidates": 230,
+    "requests": 5,
+    "input_chars": 140143,
+    "rows_to_answer": 242,
+    "by_purpose": {
+      "outline": 4,
+      "qa": 1
+    },
+    "toc_extraction": "skipped",
+    "suggestions": 0,
+    "qa": {
+      "checked": 12,
+      "agree": 12,
+      "disagree": 0,
+      "agreement": 1.0,
+      "disagreements": []
+    }
+  },
+  {
+    "label": "MetJournal",
+    "mode": "off",
+    "extract_toc": false,
+    "toc_entries": 14,
+    "candidates": 230,
+    "requests": 4,
+    "input_chars": 110560,
+    "rows_to_answer": 230,
+    "by_purpose": {
+      "outline": 4
+    },
+    "toc_extraction": "skipped",
+    "suggestions": 0,
+    "qa": null
+  },
+  {
+    "label": "MetJournal",
+    "mode": "sample",
+    "extract_toc": true,
+    "toc_entries": 14,
+    "candidates": 230,
+    "requests": 6,
+    "input_chars": 148891,
+    "rows_to_answer": 256,
+    "by_purpose": {
+      "outline": 4,
+      "qa": 1,
+      "toc-extract": 1
+    },
+    "toc_extraction": "model",
+    "suggestions": 0,
+    "qa": {
+      "checked": 12,
+      "agree": 12,
+      "disagree": 0,
+      "agreement": 1.0,
+      "disagreements": []
+    }
+  },
+  {
+    "label": "Authentic",
+    "mode": "full",
+    "extract_toc": true,
+    "toc_entries": 11,
+    "candidates": 58,
+    "requests": 4,
+    "input_chars": 56766,
+    "rows_to_answer": 127,
+    "by_purpose": {
+      "outline": 1,
+      "review": 2,
+      "toc-extract": 1
+    },
+    "toc_extraction": "model",
+    "suggestions": 0,
+    "qa": null
+  },
+  {
+    "label": "Authentic",
+    "mode": "sample",
+    "extract_toc": true,
+    "toc_entries": 11,
+    "candidates": 58,
+    "requests": 2,
+    "input_chars": 27043,
+    "rows_to_answer": 66,
+    "by_purpose": {
+      "outline": 1,
+      "qa": 1
+    },
+    "toc_extraction": "local",
+    "suggestions": 0,
+    "qa": {
+      "checked": 8,
+      "agree": 8,
+      "disagree": 0,
+      "agreement": 1.0,
+      "disagreements": []
+    }
+  },
+  {
+    "label": "Authentic",
+    "mode": "sample",
+    "extract_toc": false,
+    "toc_entries": 11,
+    "candidates": 59,
+    "requests": 2,
+    "input_chars": 26632,
+    "rows_to_answer": 67,
+    "by_purpose": {
+      "outline": 1,
+      "qa": 1
+    },
+    "toc_extraction": "skipped",
+    "suggestions": 0,
+    "qa": {
+      "checked": 8,
+      "agree": 8,
+      "disagree": 0,
+      "agreement": 1.0,
+      "disagreements": []
+    }
+  },
+  {
+    "label": "Authentic",
+    "mode": "off",
+    "extract_toc": false,
+    "toc_entries": 11,
+    "candidates": 59,
+    "requests": 1,
+    "input_chars": 14947,
+    "rows_to_answer": 59,
+    "by_purpose": {
+      "outline": 1
+    },
+    "toc_extraction": "skipped",
+    "suggestions": 0,
+    "qa": null
+  },
+  {
+    "label": "Authentic",
+    "mode": "sample",
+    "extract_toc": true,
+    "toc_entries": 11,
+    "candidates": 58,
+    "requests": 3,
+    "input_chars": 29464,
+    "rows_to_answer": 77,
+    "by_purpose": {
+      "outline": 1,
+      "qa": 1,
+      "toc-extract": 1
+    },
+    "toc_extraction": "model",
+    "suggestions": 0,
+    "qa": {
+      "checked": 8,
+      "agree": 8,
+      "disagree": 0,
+      "agreement": 1.0,
+      "disagreements": []
+    }
+  },
+  {
+    "label": "WritingAuth",
+    "mode": "full",
+    "extract_toc": true,
+    "toc_entries": 0,
+    "candidates": 529,
+    "requests": 24,
+    "input_chars": 654865,
+    "rows_to_answer": 1114,
+    "by_purpose": {
+      "outline": 9,
+      "review": 14,
+      "toc-extract": 1
+    },
+    "toc_extraction": "model",
+    "suggestions": 0,
+    "qa": null
+  },
+  {
+    "label": "WritingAuth",
+    "mode": "sample",
+    "extract_toc": true,
+    "toc_entries": 0,
+    "candidates": 529,
+    "requests": 10,
+    "input_chars": 375232,
+    "rows_to_answer": 556,
+    "by_purpose": {
+      "outline": 9,
+      "qa": 1
+    },
+    "toc_extraction": "local",
+    "suggestions": 0,
+    "qa": {
+      "checked": 27,
+      "agree": 27,
+      "disagree": 0,
+      "agreement": 1.0,
+      "disagreements": []
+    }
+  },
+  {
+    "label": "WritingAuth",
+    "mode": "sample",
+    "extract_toc": false,
+    "toc_entries": 0,
+    "candidates": 179,
+    "requests": 4,
+    "input_chars": 156155,
+    "rows_to_answer": 188,
+    "by_purpose": {
+      "outline": 3,
+      "qa": 1
+    },
+    "toc_extraction": "skipped",
+    "suggestions": 0,
+    "qa": {
+      "checked": 9,
+      "agree": 9,
+      "disagree": 0,
+      "agreement": 1.0,
+      "disagreements": []
+    }
+  },
+  {
+    "label": "WritingAuth",
+    "mode": "off",
+    "extract_toc": false,
+    "toc_entries": 0,
+    "candidates": 179,
+    "requests": 3,
+    "input_chars": 100792,
+    "rows_to_answer": 179,
+    "by_purpose": {
+      "outline": 3
+    },
+    "toc_extraction": "skipped",
+    "suggestions": 0,
+    "qa": null
+  },
+  {
+    "label": "WritingAuth",
+    "mode": "sample",
+    "extract_toc": true,
+    "toc_entries": 0,
+    "candidates": 529,
+    "requests": 11,
+    "input_chars": 383020,
+    "rows_to_answer": 612,
+    "by_purpose": {
+      "outline": 9,
+      "qa": 1,
+      "toc-extract": 1
+    },
+    "toc_extraction": "model",
+    "suggestions": 0,
+    "qa": {
+      "checked": 27,
+      "agree": 27,
+      "disagree": 0,
+      "agreement": 1.0,
+      "disagreements": []
+    }
+  },
+  {
+    "label": "Transcendents",
+    "mode": "full",
+    "extract_toc": true,
+    "toc_entries": 13,
+    "candidates": 489,
+    "requests": 22,
+    "input_chars": 539340,
+    "rows_to_answer": 991,
+    "by_purpose": {
+      "outline": 8,
+      "review": 13,
+      "toc-extract": 1
+    },
+    "toc_extraction": "model",
+    "suggestions": 0,
+    "qa": null
+  },
+  {
+    "label": "Transcendents",
+    "mode": "sample",
+    "extract_toc": true,
+    "toc_entries": 13,
+    "candidates": 489,
+    "requests": 9,
+    "input_chars": 277662,
+    "rows_to_answer": 514,
+    "by_purpose": {
+      "outline": 8,
+      "qa": 1
+    },
+    "toc_extraction": "local",
+    "suggestions": 0,
+    "qa": {
+      "checked": 25,
+      "agree": 25,
+      "disagree": 0,
+      "agreement": 1.0,
+      "disagreements": []
+    }
+  },
+  {
+    "label": "Transcendents",
+    "mode": "sample",
+    "extract_toc": false,
+    "toc_entries": 13,
+    "candidates": 225,
+    "requests": 5,
+    "input_chars": 141972,
+    "rows_to_answer": 237,
+    "by_purpose": {
+      "outline": 4,
+      "qa": 1
+    },
+    "toc_extraction": "skipped",
+    "suggestions": 0,
+    "qa": {
+      "checked": 12,
+      "agree": 12,
+      "disagree": 0,
+      "agreement": 1.0,
+      "disagreements": []
+    }
+  },
+  {
+    "label": "Transcendents",
+    "mode": "off",
+    "extract_toc": false,
+    "toc_entries": 13,
+    "candidates": 225,
+    "requests": 4,
+    "input_chars": 112905,
+    "rows_to_answer": 225,
+    "by_purpose": {
+      "outline": 4
+    },
+    "toc_extraction": "skipped",
+    "suggestions": 0,
+    "qa": null
+  },
+  {
+    "label": "Transcendents",
+    "mode": "sample",
+    "extract_toc": true,
+    "toc_entries": 13,
+    "candidates": 489,
+    "requests": 10,
+    "input_chars": 281252,
+    "rows_to_answer": 527,
+    "by_purpose": {
+      "outline": 8,
+      "qa": 1,
+      "toc-extract": 1
+    },
+    "toc_extraction": "model",
+    "suggestions": 0,
+    "qa": {
+      "checked": 25,
+      "agree": 25,
+      "disagree": 0,
+      "agreement": 1.0,
+      "disagreements": []
+    }
+  }
+]

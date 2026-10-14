@@ -32,6 +32,33 @@ pnpm --dir frontend install --frozen-lockfile
 - `@tauri-apps/cli/tauri.js` 靠 `process.argv[0]` 的 basename 判断调用方式；node 副本名不是 `node` 时会把 node 路径当成子命令。用 `node scripts/tauri-run.cjs build ...` 代替 `tauri build`。
 - 前端产物已先行构建时，可用 `--config '{"build":{"beforeBuildCommand":""}}'` 跳过 Tauri 内的 pnpm 构建步骤（需与 `src-tauri/tauri.bundle.conf.json` 一并传入）。
 
+#### Tauri CLI 的 native 模块找不到时（实测 2026-10-14）
+
+`frontend/node_modules` 可能处于 **pnpm 虚拟店完整但链接不全** 的状态：`@tauri-apps/cli-darwin-arm64` 的实体在
+`frontend/node_modules/.pnpm/@tauri-apps+cli-darwin-arm64@<ver>/node_modules/@tauri-apps/cli-darwin-arm64/cli.darwin-arm64.node`，
+但 `frontend/node_modules/@tauri-apps/cli/node_modules/` 下没有指向它的链接，于是 `require('@tauri-apps/cli-darwin-arm64')` 直接失败。
+
+不必重装依赖：`@tauri-apps/cli/index.js` 首先读取 `NAPI_RS_NATIVE_LIBRARY_PATH`，把它指向该 `.node` 的**绝对路径**即可。
+
+没有 `pnpm`/`npm` 时，完整构建可以只用 node + 仓库自带的 .venv：
+
+```bash
+NODE_BIN=<任意可用的 node bin 目录>
+export NAPI_RS_NATIVE_LIBRARY_PATH="$PWD/frontend/node_modules/.pnpm/@tauri-apps+cli-darwin-arm64@2.12.1/node_modules/@tauri-apps/cli-darwin-arm64/cli.darwin-arm64.node"
+"$NODE_BIN/node" frontend/node_modules/typescript/bin/tsc --noEmit            # 类型检查
+(cd frontend && "$NODE_BIN/node" node_modules/vite/bin/vite.js build)         # 前端产物
+.venv/bin/python scripts/build_sidecar.py                                   # PyInstaller sidecar
+"$NODE_BIN/node" scripts/tauri-run.cjs build \
+  --config src-tauri/tauri.bundle.conf.json \
+  --config '{"build":{"beforeBuildCommand":""}}'                          # 打包 .app
+/usr/bin/codesign --force --deep --sign - src-tauri/target/release/bundle/macos/Literature.app
+./scripts/setup_macos_launcher.sh --app-only
+```
+
+验收要点（两处都能在安装前查）：`.app/Contents/MacOS/literature-sidecar` 的 sha256/大小须与 `src-tauri/binaries/manifest.json` 一致；
+Tauri v2 把前端资源**压缩后编进 `Contents/MacOS/literature`**，所以不能靠 grep 中文文案确认版本，
+用 `strings -a <app 二进制> | grep -oE 'assets/index-[A-Za-z0-9_-]+\.js'` 对比 `frontend/dist/assets/` 的文件名。
+
 ## 运行契约
 
 - 随机 loopback 端口和会话令牌由 Rust 传给内置后端；前端通过受限 IPC 取得连接信息，并核对能力及鉴权。

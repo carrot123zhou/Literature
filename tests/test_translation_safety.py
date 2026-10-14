@@ -474,7 +474,9 @@ class TranslationSafetyTests(unittest.TestCase):
         self.assertGreater(len(prompts), 1)
         for prompt in prompts:
             source_chars = sum(len(value) for value in _re.findall(r'<src[^>]*>(.*?)</src>', prompt, flags=_re.S))
-            self.assertLessEqual(source_chars, 3200, prompts)
+            # v3 起 _batch_units 按估算 token（900 token ≈ 英文 3600 字符）计量，
+            # 英文批次从旧字符预算的 3200 变宽是预期行为。
+            self.assertLessEqual(source_chars, 3700, prompts)
         # 所有子段都拼回同一稳定字段。
         self.assertGreaterEqual(entry.text.count("译："), 5)
         self.assertNotIn("~", entry.text)
@@ -1878,8 +1880,10 @@ class TranslationSafetyTests(unittest.TestCase):
         self.assertEqual(after.config.model, "model-before")
         self.assertIsNotNone(after.last)
         _system, user = after.last  # type: ignore[misc]
-        self.assertIn("OLD", user)
-        self.assertNotIn("NEW", user)
+        # v3 契约：术语表注入 system prompt 稳定前缀（冻结为 OLD），不在 user prompt。
+        self.assertIn("OLD", _system)
+        self.assertNotIn("NEW", _system)
+        self.assertNotIn("word → OLD", user)
         self.assertNotIn("ignored-new", _system)
 
     def test_local_quality_warnings_flag_missing_numbers_and_urls(self):
@@ -1998,6 +2002,63 @@ class TranslationSafetyTests(unittest.TestCase):
         self.assertEqual(layer.entries["b2"].status, "refined")
         counts = store.get_job(project_id, job_id)["result"]["counts"]
         self.assertEqual(counts["translate"]["completed"], 2)
+
+    def test_aimd_keeps_submitting_after_rate_limit(self):
+        """AIMD：首块收到 429 后并发减半，但后续分块仍继续提交，不会整作业空转。"""
+        blocks = [block(f"p{i}", "paragraph", f"Paragraph number {i}. " + "word " * 400) for i in range(6)]
+        store, project_id = make_project(self.root, blocks)
+
+        class RateLimitedOnce(MockProvider):
+            def __init__(self) -> None:
+                super().__init__()
+                self.calls = 0
+
+            def complete(self, *, system: str, user: str) -> ProviderResponse:
+                self.calls += 1
+                if self.calls == 1:
+                    raise ProviderError("模型请求失败：429 Too Many Requests", status_code=429)
+                return super().complete(system=system, user=user)
+
+        provider = RateLimitedOnce()
+        job = TranslationService(store, provider).run(project_id, force=True, parallel_workers=2)
+        # 429 只影响命中的那块（标 failed），后续分块照常翻译，不触发连续失败熔断。
+        self.assertEqual(provider.calls > 2, True)
+        self.assertIn(job["status"], {"partial_failed", "completed"})
+        layer = store.load_translation(project_id)
+        translated = sum(1 for entry in layer.entries.values() if entry.status in {"translated", "refined"})
+        self.assertGreaterEqual(translated, 3)
+
+    def test_aimd_rate_limit_burst_does_not_trip_circuit_breaker(self):
+        """限流突发（连续 429 后服务恢复）：并发减半但绝不能触发全局熔断。
+
+        旧缺陷：整块因 429 完全失败时走 fully_failed 分支，既不减并发又计入
+        provider_error_streak，连续 3 次后服务已恢复仍被熔断，剩余整本书误判失败。
+        """
+        blocks = [block(f"p{i}", "paragraph", f"Paragraph {i}. " + "word " * 400) for i in range(12)]
+        store, project_id = make_project(self.root, blocks)
+
+        class RateLimitedBurst(MockProvider):
+            def __init__(self) -> None:
+                super().__init__()
+                self.calls = 0
+
+            def complete(self, *, system: str, user: str) -> ProviderResponse:
+                self.calls += 1
+                if self.calls <= 3:
+                    raise ProviderError("模型请求失败：429 Too Many Requests", status_code=429)
+                return super().complete(system=system, user=user)
+
+        provider = RateLimitedBurst()
+        job = TranslationService(store, provider).run(project_id, force=True, parallel_workers=4)
+        layer = store.load_translation(project_id)
+        translated = sum(1 for entry in layer.entries.values() if entry.status in {"translated", "refined"})
+        failed = sum(1 for entry in layer.entries.values() if entry.status == "failed")
+        # 服务第 4 次调用起已恢复：只有真正撞上限流的前 3 块失败，其余全部译完。
+        self.assertEqual(job["status"], "partial_failed", job["error"])
+        self.assertGreaterEqual(translated, 9)
+        self.assertLessEqual(failed, 3)
+        self.assertGreater(provider.calls, 4)
+        self.assertNotIn("连续失败", job.get("error") or "")
 
 
 if __name__ == "__main__":

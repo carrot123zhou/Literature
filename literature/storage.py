@@ -40,17 +40,21 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def atomic_json(path: Path, value: Any) -> None:
+def atomic_text(path: Path, text: str) -> None:
+    """原子写入文本：临时文件 + ``os.replace``，读者永远看不到半文件。"""
     path.parent.mkdir(parents=True, exist_ok=True)
     handle, temporary = tempfile.mkstemp(prefix=f".{path.name}-", dir=path.parent)
     try:
         with os.fdopen(handle, "w", encoding="utf-8") as output:
-            json.dump(value, output, ensure_ascii=False, indent=2)
-            output.write("\n")
+            output.write(text)
         os.replace(temporary, path)
     except Exception:
         Path(temporary).unlink(missing_ok=True)
         raise
+
+
+def atomic_json(path: Path, value: Any) -> None:
+    atomic_text(path, json.dumps(value, ensure_ascii=False, indent=2) + "\n")
 
 
 class ProjectStore:
@@ -353,7 +357,74 @@ class ProjectStore:
     def save_document(self, document: Document) -> None:
         project = self.project_path(document.project_id)
         document.updated_at = utc_now()
-        atomic_json(project / "document" / "document.json", document.to_dict())
+        path = project / "document" / "document.json"
+        atomic_json(path, document.to_dict())
+        # 顺手把“文档时间戳”的快速读取缓存刷新掉：缓存以真实文件签名为键，
+        # 就算这一步失败，下次读取也会因为签名不匹配而重新读文件（不会假命中）。
+        try:
+            info = path.stat()
+            self._remember_document_state(document.project_id, document.updated_at, f"{info.st_size}:{info.st_mtime_ns}")
+        except OSError:
+            pass
+
+    DOCUMENT_STATE_KEY = "document"
+
+    @staticmethod
+    def _read_state(connection: sqlite3.Connection, key: str) -> dict[str, Any]:
+        try:
+            row = connection.execute("SELECT value_json FROM project_state WHERE key=?", (key,)).fetchone()
+        except sqlite3.OperationalError:
+            return {}
+        if row is None:
+            return {}
+        try:
+            value = json.loads(row[0] or "{}")
+        except (ValueError, TypeError):
+            return {}
+        return value if isinstance(value, dict) else {}
+
+    @staticmethod
+    def _write_state(connection: sqlite3.Connection, key: str, value: dict[str, Any]) -> None:
+        connection.execute(
+            "INSERT INTO project_state (key, value_json) VALUES (?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json",
+            (key, json.dumps(value, ensure_ascii=False)),
+        )
+
+    def _remember_document_state(self, project_id: str, updated_at: str, signature: str) -> None:
+        database = self.project_database(project_id)
+        with self._connect(database) as connection:
+            self._write_state(connection, self.DOCUMENT_STATE_KEY,
+                              {"signature": signature, "updated_at": updated_at})
+
+    def document_updated_at(self, project_id: str) -> str:
+        """只取规范文档的 ``updated_at``，不解码整份 ``document.json``。
+
+        ``document.json`` 单份可达 8 MB，而项目列表/状态接口只需要一个时间戳字符串：
+        实测每 3 秒轮询时为整库多花约 130 ms 在 JSON 解码上。这里以
+        ``(size, mtime_ns)`` 作为缓存键存在项目库的 ``project_state``：
+        命中直接返回；未命中（新项目、文档刚改、旧库首次升级）才读一次文件并回填。
+
+        缓存键取自真实文件，所以不存在“缓存说未变、文件其实已变”的假有效；
+        读不到文件时返回空串（与“尚无规范文档”语义一致）。
+        """
+        path = self.project_path(project_id) / "document" / "document.json"
+        try:
+            info = path.stat()
+        except OSError:
+            return ""
+        signature = f"{info.st_size}:{info.st_mtime_ns}"
+        database = self.project_database(project_id)
+        with self._connect(database) as connection:
+            cached = self._read_state(connection, self.DOCUMENT_STATE_KEY)
+        if cached.get("signature") == signature and isinstance(cached.get("updated_at"), str):
+            return str(cached["updated_at"])
+        try:
+            document = self.load_document(project_id)
+        except StorageError:
+            return ""
+        self._remember_document_state(project_id, document.updated_at, signature)
+        return document.updated_at
 
     def load_structure_baseline(self, project_id: str) -> dict[str, Any]:
         """已确认的目录基准随项目保存，迁移客户端或清空 WebView 偏好后仍可复用。"""
@@ -897,10 +968,8 @@ class ProjectStore:
             ).fetchone()[0])
             patches = int(connection.execute("SELECT COUNT(*) FROM structure_patches").fetchone()[0])
         confirmation = self.structure_review_confirmation(project_id)
-        try:
-            document_updated_at = self.load_document(project_id).updated_at
-        except StorageError:
-            document_updated_at = ""
+        # 只取时间戳，不解码整份 document.json（本函数在项目列表轮询里被逐项目调用）。
+        document_updated_at = self.document_updated_at(project_id)
         confirmation_valid = bool(confirmation) and confirmation.get("document_updated_at") == document_updated_at
         if pending:
             state = "confirm"
@@ -997,6 +1066,9 @@ class ProjectStore:
                   created_at TEXT NOT NULL, decided_at TEXT
                 );
                 CREATE INDEX IF NOT EXISTS idx_structure_suggestions_project ON structure_suggestions(project_id, decision);
+                CREATE TABLE IF NOT EXISTS project_state (
+                  key TEXT PRIMARY KEY, value_json TEXT NOT NULL
+                );
                 """
             )
         ProjectStore._migrate_database(path)

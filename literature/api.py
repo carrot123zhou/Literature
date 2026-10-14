@@ -199,15 +199,21 @@ class StructureAIAnalyze(BaseModel):
     provider: ProviderInput | None = None
     service_id: str = ""
     auto_apply: bool = False
-    # 兼容旧入口：默认选择性复核，可显式回退全量。
+    # 复核模式：sample=第一遍定案 + 固定比例抽查（默认）；full=全量双遍；off=不抽查。
+    # proofread_full=True 是 full 的兼容入口。
+    proofread_mode: Literal["full", "sample", "off"] | None = None
     proofread_full: bool = False
     proofread_concurrency: int = Field(default=2, ge=1, le=4)
+    planning_mode: Literal["global", "adaptive"] = "global"
 
 
 class StructureJobInput(BaseModel):
     service_id: str = ""
     toc: list[dict[str, Any]] = Field(default_factory=list)
     extract_toc: bool = True
+    # 目录来源：auto=有显式目录标记页且本地可解析时直接采信（默认，省一次模型请求）；
+    # local=总是采信本地；model=总是让模型核对目录页文本。
+    toc_extraction: Literal["auto", "local", "model"] = "auto"
     proofread: bool = True
     auto_apply: bool = False
     toc_page_limit: int = Field(default=6, ge=1, le=6)
@@ -215,9 +221,14 @@ class StructureJobInput(BaseModel):
     use_vision: bool = False
     request_timeout_seconds: int = Field(default=600, ge=30, le=1800)
     reuse_job_id: str = ""
-    # 第二遍复核：默认选择性（第一遍规划通过一致性检查后复用），可回退全量。
+    # 复核模式：sample=第一遍规划定案 + 固定比例抽查（默认，最多 1 批抽查请求）；
+    # full=全量双遍（历史行为，最贵）；off=只跑第一遍，不抽查。
+    # proofread_full=True 是 full 的兼容入口；两者同时给出以 proofread_mode 为准。
+    proofread_mode: Literal["full", "sample", "off"] | None = None
     proofread_full: bool = False
     proofread_concurrency: int = Field(default=2, ge=1, le=4)
+    # 规划策略：global=整体串行（默认，质量已用过）；adaptive=框架验证后的分支规划（试用，未真实 A/B）。
+    planning_mode: Literal["global", "adaptive"] = "global"
 
 
 class StructurePlanInput(BaseModel):
@@ -227,6 +238,7 @@ class StructurePlanInput(BaseModel):
     toc_page_limit: int = Field(default=6, ge=1, le=6)
     toc_page_indexes: list[int] | None = None
     use_vision: bool = False
+    planning_mode: Literal["global", "adaptive"] = "global"
 
 
 class ModelServiceInput(BaseModel):
@@ -260,8 +272,9 @@ class TranslationJobInput(BaseModel):
     instructions: str = Field(default="", max_length=8000)
     # 翻译后是否自动再做一遍文学润色（两遍制，质量更高但更慢，默认关闭）。
     polish: bool = False
-    # 同一作业内并发请求数。小块 + 并发是整本书提速的主要来源。
-    parallel_workers: int = Field(default=4, ge=1, le=8)
+    # 同一作业内并发请求数。小块 + 并发是整本书提速的主要来源；
+    # AIMD 自适应会在 429 时自动降速，因此上限可以开得比以前高。
+    parallel_workers: int = Field(default=4, ge=1, le=16)
     # 单次模型请求的读超时。流式下是「两个数据块之间的空闲时限」，
     # 非流式回退时才是等待整份响应的总时限；供不支持流式的中转站调大。
     request_timeout_seconds: int = Field(default=300, ge=30, le=1800)
@@ -407,7 +420,9 @@ def project_pipeline(store: ProjectStore, project: dict[str, Any], jobs: list[di
     """
     project_id = str(project.get("project_id") or "")
     if jobs is None:
-        jobs = store.list_jobs(project_id)
+        # 列表视图只需要 kind/status/progress；不要用 list_jobs 解码 result/activity 审计
+        # （单项目审计可达 1 MB+，而 /projects 每 3 秒被轮询一次）。
+        jobs = store.list_job_summaries(project_id)
     if project.get("has_document"):
         try:
             review = store.structure_review_summary(project_id)
@@ -573,8 +588,21 @@ class JobManager:
                 # 测试/自定义 provider 可能不实现该方法，缺省时保持原超时。
                 if hasattr(provider, "with_read_timeout"):
                     provider = provider.with_read_timeout(float(request.request_timeout_seconds))
+                # 翻译是确定性任务：reasoning 对译文质量近乎零贡献却占掉大部分输出延迟
+                # （实测思考型模型 reasoning 占输出 85–90%）。默认按所声明协议关思考；
+                # 用户显式要求开思考（开关=on / effort=high）时 provider 内部会尊重原配置。
+                if hasattr(provider, "with_thinking_disabled"):
+                    provider = provider.with_thinking_disabled()
                 # 用实际 resolved 的 service_id 做限流键，避免空串把多个默认服务混在一起。
                 resolved_service = request.service_id or (self.models.roles().get(ROLE_TRANSLATION, "") if self.models else "")
+                # AIMD 需要能探速到用户设定的并发上限：服务级信号量只升不降到 max(默认, workers)，
+                # 作为跨作业共享同一服务的总量上限；单次作业内部由 AIMD 自适应控制。
+                # 只升不降：避免另一本书的运行中作业额度被压小（信号量重建会让在途持有者与
+                # 新信号量脱钩，短暂超发，因此不降）。
+                try:
+                    self.coordinator.raise_service_limit(resolved_service or "default", request.parallel_workers)
+                except Exception:
+                    pass
                 service = TranslationService(
                     self.store, provider, coordinator=self.coordinator, service_id=resolved_service or "default",
                 )
@@ -1221,7 +1249,7 @@ def create_app(store: ProjectStore | None = None):
             extract_toc=request.extract_toc, proofread=request.proofread,
             toc_page_limit=request.toc_page_limit,
             toc_page_indexes=request.toc_page_indexes, use_vision=request.use_vision,
-            source_path=store.source_path(project_id),
+            source_path=store.source_path(project_id), planning_mode=request.planning_mode,
         )
 
     @app.get("/projects/{project_id}/structure/baseline")
@@ -1502,6 +1530,9 @@ def create_app(store: ProjectStore | None = None):
     def translation_review(project_id: str, block_id: str, request: ReviewInput):
         service_id = request.service_id or (manager.models.roles().get(ROLE_TRANSLATION, "") if manager.models else "") or "default"
         provider = manager.provider_from(request.service_id, None)
+        # 单块译审同样是翻译任务：默认按所声明协议关思考（与整本书翻译一致）。
+        if hasattr(provider, "with_thinking_disabled"):
+            provider = provider.with_thinking_disabled()
         manager.coordinator.attempt_hooks_for(
             service_id, provider, project_id=project_id,
             budget=float(store.load_manifest(project_id).get("budget_usd") or 0),
@@ -1538,6 +1569,9 @@ def create_app(store: ProjectStore | None = None):
     def translate_instant(project_id: str, request: InstantInput):
         service_id = request.service_id or (manager.models.roles().get(ROLE_TRANSLATION, "") if manager.models else "") or "default"
         provider = manager.provider_from(request.service_id, request.provider)
+        # 即时翻译同样是翻译任务：默认按所声明协议关思考。
+        if hasattr(provider, "with_thinking_disabled"):
+            provider = provider.with_thinking_disabled()
         manager.coordinator.attempt_hooks_for(
             service_id, provider, project_id=project_id,
             budget=float(store.load_manifest(project_id).get("budget_usd") or 0),

@@ -274,7 +274,9 @@ export function ScopeDialog({ projectTitle, locale, stats, selectedScopeCount, g
               <option value={2}>2</option>
               <option value={4}>4（推荐）</option>
               <option value={6}>6</option>
-              <option value={8}>8（最快）</option>
+              <option value={8}>8</option>
+              <option value={12}>12</option>
+              <option value={16}>16（最快，限流时自动降速）</option>
             </select>
           </div>
           <label className="radio" style={{ alignSelf: "end", marginBottom: 12 }}>

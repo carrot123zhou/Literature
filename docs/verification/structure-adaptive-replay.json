@@ -1,0 +1,1229 @@
+{
+  "experiment": "structure-adaptive-replay",
+  "date": "2026-10-14",
+  "mode": "offline read-only framework + region analysis and historical/mechanical replay; no model calls",
+  "projects": {
+    "white_lotus": {
+      "project": "white_lotus",
+      "candidates": 348,
+      "toc_entries": 65,
+      "matched": 64,
+      "unlisted_titles": 5,
+      "framework": {
+        "state": "reliable",
+        "anchor_count": 63,
+        "reliable_anchors": 59,
+        "reliable_anchor_details": [
+          {
+            "toc_index": 0,
+            "title": "A note on the use of Chinese characters",
+            "level": 1,
+            "block_id": "blk-00000036",
+            "score": 1.0,
+            "margin": 1.0,
+            "level_source": "confirmed",
+            "printed_page": "xi",
+            "reliable": true,
+            "reasons": []
+          },
+          {
+            "toc_index": 1,
+            "title": "Preface",
+            "level": 1,
+            "block_id": "blk-00000038",
+            "score": 1.0,
+            "margin": 1.0,
+            "level_source": "confirmed",
+            "printed_page": "xiii",
+            "reliable": true,
+            "reasons": []
+          },
+          {
+            "toc_index": 3,
+            "title": "1.1. Defining the problem",
+            "level": 2,
+            "block_id": "blk-00000048",
+            "score": 1.0,
+            "margin": 1.0,
+            "level_source": "confirmed",
+            "printed_page": "2",
+            "reliable": true,
+            "reasons": []
+          },
+          {
+            "toc_index": 4,
+            "title": "1.2. Defining some terminology",
+            "level": 2,
+            "block_id": "blk-00000110",
+            "score": 1.0,
+            "margin": 1.0,
+            "level_source": "confirmed",
+            "printed_page": "11",
+            "reliable": true,
+            "reasons": []
+          },
+          {
+            "toc_index": 5,
+            "title": "II. Lay Buddhism in the Song and Yuan",
+            "level": 1,
+            "block_id": "blk-00000124",
+            "score": 1.0,
+            "margin": 1.0,
+            "level_source": "confirmed",
+            "printed_page": "16",
+            "reliable": true,
+            "reasons": []
+          },
+          {
+            "toc_index": 6,
+            "title": "2.1. The lay Buddhist context",
+            "level": 2,
+            "block_id": "blk-00000130",
+            "score": 1.0,
+            "margin": 1.0,
+            "level_source": "confirmed",
+            "printed_page": "17",
+            "reliable": true,
+            "reasons": []
+          },
+          {
+            "toc_index": 7,
+            "title": "2.1.1. The recitation of spells, sutras and names",
+            "level": 3,
+            "block_id": "blk-00000131",
+            "score": 1.0,
+            "margin": 1.0,
+            "level_source": "confirmed",
+            "printed_page": "17",
+            "reliable": true,
+            "reasons": []
+          },
+          {
+            "toc_index": 8,
+            "title": "2.1.2. Social activities to acquire religious merit",
+            "level": 3,
+            "block_id": "blk-00000170",
+            "score": 1.0,
+            "margin": 1.0,
+            "level_source": "confirmed",
+            "printed_page": "24",
+            "reliable": true,
+            "reasons": []
+          },
+          {
+            "toc_index": 9,
+            "title": "2.1.3. Religious societies and the People of the Way",
+            "level": 3,
+            "block_id": "blk-00000195",
+            "score": 1.0,
+            "margin": 1.0,
+            "level_source": "confirmed",
+            "printed_page": "28",
+            "reliable": true,
+            "reasons": []
+          },
+          {
+            "toc_index": 10,
+            "title": "2.2. Labels and stereotypes",
+            "level": 2,
+            "block_id": "blk-p000057-0000",
+            "score": 1.0,
+            "margin": 1.0,
+            "level_source": "confirmed",
+            "printed_page": "44",
+            "reliable": true,
+            "reasons": []
+          },
+          {
+            "toc_index": 11,
+            "title": "2.2.1. Accusations of immoral behaviour",
+            "level": 3,
+            "block_id": "blk-p000057-0001",
+            "score": 1.0,
+            "margin": 1.0,
+            "level_source": "confirmed",
+            "printed_page": "44",
+            "reliable": true,
+            "reasons": []
+          },
+          {
+            "toc_index": 12,
+            "title": "2.2.2. Accusations of Manichaeism",
+            "level": 3,
+            "block_id": "blk-p000061-0002",
+            "score": 1.0,
+            "margin": 1.0,
+            "level_source": "confirmed",
+            "printed_page": "48",
+            "reliable": true,
+            "reasons": []
+          },
+          {
+            "toc_index": 13,
+            "title": "2.2.3. The practice of persecution",
+            "level": 3,
+            "block_id": "blk-p000068-0001",
+            "score": 1.0,
+            "margin": 1.0,
+            "level_source": "confirmed",
+            "printed_page": "55",
+            "reliable": true,
+            "reasons": []
+          },
+          {
+            "toc_index": 15,
+            "title": "III. The White Lotus movement",
+            "level": 1,
+            "block_id": "blk-p000077-0000",
+            "score": 1.0,
+            "margin": 1.0,
+            "level_source": "confirmed",
+            "printed_page": "64",
+            "reliable": true,
+            "reasons": []
+          },
+          {
+            "toc_index": 16,
+            "title": "3.1. The White Lotus movement during the Song",
+            "level": 2,
+            "block_id": "blk-p000078-0000",
+            "score": 1.0,
+            "margin": 1.0,
+            "level_source": "confirmed",
+            "printed_page": "65",
+            "reliable": true,
+            "reasons": []
+          },
+          {
+            "toc_index": 17,
+            "title": "3.2. The White Lotus movement during the Yuan",
+            "level": 2,
+            "block_id": "blk-p000085-0000",
+            "score": 1.0,
+            "margin": 1.0,
+            "level_source": "confirmed",
+            "printed_page": "72",
+            "reliable": true,
+            "reasons": []
+          },
+          {
+            "toc_index": 18,
+            "title": "3.2.1. The movement: a socio-religious analysis",
+            "level": 3,
+            "block_id": "blk-p000085-0001",
+            "score": 1.0,
+            "margin": 1.0,
+            "level_source": "confirmed",
+            "printed_page": "72",
+            "reliable": true,
+            "reasons": []
+          },
+          {
+            "toc_index": 19,
+            "title": "3.2.2. The literati view",
+            "level": 3,
+            "block_id": "blk-p000102-0000",
+            "score": 1.0,
+            "margin": 1.0,
+            "level_source": "confirmed",
+            "printed_page": "89",
+            "reliable": true,
+            "reasons": []
+          },
+          {
+            "toc_index": 20,
+            "title": "3.2.3. Chronology and distribution of the White Lotus movement",
+            "level": 3,
+            "block_id": "blk-p000106-0001",
+            "score": 1.0,
+            "margin": 1.0,
+            "level_source": "confirmed",
+            "printed_page": "93",
+            "reliable": true,
+            "reasons": []
+          },
+          {
+            "toc_index": 21,
+            "title": "3.3. Pudu's defense of the faith",
+            "level": 2,
+            "block_id": "blk-p000109-0001",
+            "score": 1.0,
+            "margin": 1.0,
+            "level_source": "confirmed",
+            "printed_page": "96",
+            "reliable": true,
+            "reasons": []
+          },
+          {
+            "toc_index": 23,
+            "title": "IV. New Style White Lotus Teachings?",
+            "level": 1,
+            "block_id": "blk-p000127-0000",
+            "score": 1.0,
+            "margin": 1.0,
+            "level_source": "confirmed",
+            "printed_page": "114",
+            "reliable": true,
+            "reasons": []
+          },
+          {
+            "toc_index": 24,
+            "title": "4.1. The Yuan-Ming transition",
+            "level": 2,
+            "block_id": "blk-p000128-0000",
+            "score": 1.0,
+            "margin": 1.0,
+            "level_source": "confirmed",
+            "printed_page": "115",
+            "reliable": true,
+            "reasons": []
+          },
+          {
+            "toc_index": 25,
+            "title": "4.1.1. The messianic movement of Han Shantong",
+            "level": 3,
+            "block_id": "blk-p000128-0001",
+            "score": 1.0,
+            "margin": 1.0,
+            "level_source": "confirmed",
+            "printed_page": "115",
+            "reliable": true,
+            "reasons": []
+          },
+          {
+            "toc_index": 26,
+            "title": "4.1.2. The Ming prohibition of religion",
+            "level": 3,
+            "block_id": "blk-p000136-0001",
+            "score": 1.0,
+            "margin": 1.0,
+            "level_source": "confirmed",
+            "printed_page": "123",
+            "reliable": true,
+            "reasons": []
+          },
+          {
+            "toc_index": 27,
+            "title": "4.1.3. The early Ming situation",
+            "level": 3,
+            "block_id": "blk-p000143-0001",
+            "score": 1.0,
+            "margin": 1.0,
+            "level_source": "confirmed",
+            "printed_page": "130",
+            "reliable": true,
+            "reasons": []
+          },
+          {
+            "toc_index": 28,
+            "title": "4.2. The mid Ming period",
+            "level": 2,
+            "block_id": "blk-p000152-0001",
+            "score": 1.0,
+            "margin": 1.0,
+            "level_source": "confirmed",
+            "printed_page": "139",
+            "reliable": true,
+            "reasons": []
+          },
+          {
+            "toc_index": 29,
+            "title": "4.2.1. The Shaanxi-Shanxi situation",
+            "level": 3,
+            "block_id": "blk-p000152-0002",
+            "score": 0.96,
+            "margin": 0.96,
+            "level_source": "confirmed",
+            "printed_page": "139",
+            "reliable": true,
+            "reasons": []
+          },
+          {
+            "toc_index": 30,
+            "title": "4.2.2. The mysterious Li Fuda affair",
+            "level": 3,
+            "block_id": "blk-p000168-0001",
+            "score": 1.0,
+            "margin": 1.0,
+            "level_source": "confirmed",
+            "printed_page": "155",
+            "reliable": true,
+            "reasons": []
+          },
+          {
+            "toc_index": 31,
+            "title": "4.3. A hypothesis on the origin of the label",
+            "level": 2,
+            "block_id": "blk-p000179-0000",
+            "score": 1.0,
+            "margin": 1.0,
+            "level_source": "confirmed",
+            "printed_page": "166",
+            "reliable": true,
+            "reasons": []
+          },
+          {
+            "toc_index": 32,
+            "title": "V. The collective fear of 1557",
+            "level": 1,
+            "block_id": "blk-p000186-0000",
+            "score": 1.0,
+            "margin": 1.0,
+            "level_source": "confirmed",
+            "printed_page": "173",
+            "reliable": true,
+            "reasons": []
+          },
+          {
+            "toc_index": 33,
+            "title": "5.1. Models for perception",
+            "level": 2,
+            "block_id": "blk-p000187-0000",
+            "score": 1.0,
+            "margin": 1.0,
+            "level_source": "confirmed",
+            "printed_page": "174",
+            "reliable": true,
+            "reasons": []
+          },
+          {
+            "toc_index": 34,
+            "title": "5.2. The collective fear of 1557: the rumours",
+            "level": 2,
+            "block_id": "blk-p000190-0000",
+            "score": 1.0,
+            "margin": 1.0,
+            "level_source": "confirmed",
+            "printed_page": "177",
+            "reliable": true,
+            "reasons": []
+          },
+          {
+            "toc_index": 35,
+            "title": "5.3. Literati and officials' perceptions",
+            "level": 2,
+            "block_id": "blk-p000197-0000",
+            "score": 1.0,
+            "margin": 1.0,
+            "level_source": "confirmed",
+            "printed_page": "184",
+            "reliable": true,
+            "reasons": []
+          },
+          {
+            "toc_index": 36,
+            "title": "5.3.1. General remarks",
+            "level": 3,
+            "block_id": "blk-p000197-0001",
+            "score": 1.0,
+            "margin": 1.0,
+            "level_source": "confirmed",
+            "printed_page": "184",
+            "reliable": true,
+            "reasons": []
+          },
+          {
+            "toc_index": 37,
+            "title": "5.3.2. The events",
+            "level": 3,
+            "block_id": "blk-p000201-0000",
+            "score": 1.0,
+            "margin": 1.0,
+            "level_source": "confirmed",
+            "printed_page": "188",
+            "reliable": true,
+            "reasons": []
+          },
+          {
+            "toc_index": 38,
+            "title": "5.3.3. Perceptions of the events",
+            "level": 3,
+            "block_id": "blk-p000204-0003",
+            "score": 1.0,
+            "margin": 1.0,
+            "level_source": "confirmed",
+            "printed_page": "191",
+            "reliable": true,
+            "reasons": []
+          },
+          {
+            "toc_index": 40,
+            "title": "VI. Label and pseudo-autonym",
+            "level": 1,
+            "block_id": "blk-p000209-0000",
+            "score": 1.0,
+            "margin": 1.0,
+            "level_source": "confirmed",
+            "printed_page": "196",
+            "reliable": true,
+            "reasons": []
+          },
+          {
+            "toc_index": 41,
+            "title": "6.1. The use of the label White Lotus Teachings",
+            "level": 2,
+            "block_id": "blk-p000210-0002",
+            "score": 1.0,
+            "margin": 1.0,
+            "level_source": "confirmed",
+            "printed_page": "197",
+            "reliable": true,
+            "reasons": []
+          },
+          {
+            "toc_index": 42,
+            "title": "6.1.1. The villification of lay Buddhist groups",
+            "level": 3,
+            "block_id": "blk-p000210-0003",
+            "score": 1.0,
+            "margin": 1.0,
+            "level_source": "confirmed",
+            "printed_page": "197",
+            "reliable": true,
+            "reasons": []
+          },
+          {
+            "toc_index": 43,
+            "title": "6.1.2. Labelling real and perceived rebellious groups",
+            "level": 3,
+            "block_id": "blk-p000225-0001",
+            "score": 1.0,
+            "margin": 1.0,
+            "level_source": "confirmed",
+            "printed_page": "212",
+            "reliable": true,
+            "reasons": []
+          },
+          {
+            "toc_index": 44,
+            "title": "6.2. The 1622 White Lotus uprising",
+            "level": 2,
+            "block_id": "blk-p000240-0001",
+            "score": 1.0,
+            "margin": 1.0,
+            "level_source": "confirmed",
+            "printed_page": "227",
+            "reliable": true,
+            "reasons": []
+          },
+          {
+            "toc_index": 45,
+            "title": "6.3. The personal background of the authors",
+            "level": 2,
+            "block_id": "blk-p000251-0000",
+            "score": 1.0,
+            "margin": 1.0,
+            "level_source": "confirmed",
+            "printed_page": "238",
+            "reliable": true,
+            "reasons": []
+          },
+          {
+            "toc_index": 46,
+            "title": "6.4. Some preliminary conclusions",
+            "level": 2,
+            "block_id": "blk-p000255-0001",
+            "score": 1.0,
+            "margin": 1.0,
+            "level_source": "confirmed",
+            "printed_page": "242",
+            "reliable": true,
+            "reasons": []
+          },
+          {
+            "toc_index": 47,
+            "title": "VII. Towards a history of Qing persecution",
+            "level": 1,
+            "block_id": "blk-p000260-0001",
+            "score": 1.0,
+            "margin": 1.0,
+            "level_source": "confirmed",
+            "printed_page": "247",
+            "reliable": true,
+            "reasons": []
+          },
+          {
+            "toc_index": 48,
+            "title": "7.1. The 1796–1804 uprising",
+            "level": 2,
+            "block_id": "blk-p000263-0001",
+            "score": 1.0,
+            "margin": 1.0,
+            "level_source": "confirmed",
+            "printed_page": "250",
+            "reliable": true,
+            "reasons": []
+          },
+          {
+            "toc_index": 49,
+            "title": "7.2. The collective fear of 1876",
+            "level": 2,
+            "block_id": "blk-p000276-0000",
+            "score": 1.0,
+            "margin": 1.0,
+            "level_source": "confirmed",
+            "printed_page": "263",
+            "reliable": true,
+            "reasons": []
+          },
+          {
+            "toc_index": 50,
+            "title": "7.2.1. Queue-cutting and ways of dealing with it",
+            "level": 3,
+            "block_id": "blk-p000276-0001",
+            "score": 1.0,
+            "margin": 1.0,
+            "level_source": "confirmed",
+            "printed_page": "263",
+            "reliable": true,
+            "reasons": []
+          },
+          {
+            "toc_index": 51,
+            "title": "7.2.2. Changes in the rumours: the fear of flying objects",
+            "level": 3,
+            "block_id": "blk-p000279-0003",
+            "score": 1.0,
+            "margin": 1.0,
+            "level_source": "confirmed",
+            "printed_page": "266",
+            "reliable": true,
+            "reasons": []
+          },
+          {
+            "toc_index": 52,
+            "title": "7.2.3. The victims of peoples' fears",
+            "level": 3,
+            "block_id": "blk-p000281-0002",
+            "score": 1.0,
+            "margin": 1.0,
+            "level_source": "confirmed",
+            "printed_page": "268",
+            "reliable": true,
+            "reasons": []
+          },
+          {
+            "toc_index": 53,
+            "title": "7.2.4. The victims of administrative fears",
+            "level": 3,
+            "block_id": "blk-p000285-0000",
+            "score": 1.0,
+            "margin": 1.0,
+            "level_source": "confirmed",
+            "printed_page": "272",
+            "reliable": true,
+            "reasons": []
+          },
+          {
+            "toc_index": 54,
+            "title": "7.3. The Boxers United in Righteousness",
+            "level": 2,
+            "block_id": "blk-p000294-0002",
+            "score": 1.0,
+            "margin": 1.0,
+            "level_source": "confirmed",
+            "printed_page": "281",
+            "reliable": true,
+            "reasons": []
+          },
+          {
+            "toc_index": 56,
+            "title": "VIII. Some implications",
+            "level": 1,
+            "block_id": "blk-p000302-0001",
+            "score": 1.0,
+            "margin": 1.0,
+            "level_source": "confirmed",
+            "printed_page": "289",
+            "reliable": true,
+            "reasons": []
+          },
+          {
+            "toc_index": 57,
+            "title": "8.1. The analysis of antecedents and continuities",
+            "level": 2,
+            "block_id": "blk-p000303-0002",
+            "score": 1.0,
+            "margin": 1.0,
+            "level_source": "confirmed",
+            "printed_page": "290",
+            "reliable": true,
+            "reasons": []
+          },
+          {
+            "toc_index": 58,
+            "title": "8.2. The influence of the unitary approach",
+            "level": 2,
+            "block_id": "blk-p000308-0000",
+            "score": 0.985,
+            "margin": 0.985,
+            "level_source": "confirmed",
+            "printed_page": "295",
+            "reliable": true,
+            "reasons": []
+          },
+          {
+            "toc_index": 60,
+            "title": "Appendix II: The rumours of the collective fear of 1557",
+            "level": 1,
+            "block_id": "blk-p000320-0000",
+            "score": 1.0,
+            "margin": 1.0,
+            "level_source": "confirmed",
+            "printed_page": "307",
+            "reliable": true,
+            "reasons": []
+          },
+          {
+            "toc_index": 61,
+            "title": "Bibliography",
+            "level": 1,
+            "block_id": "blk-p000322-0000",
+            "score": 1.0,
+            "margin": 1.0,
+            "level_source": "confirmed",
+            "printed_page": "309",
+            "reliable": true,
+            "reasons": []
+          },
+          {
+            "toc_index": 62,
+            "title": "Primary sources",
+            "level": 2,
+            "block_id": "blk-p000322-0001",
+            "score": 1.0,
+            "margin": 1.0,
+            "level_source": "confirmed",
+            "printed_page": "309",
+            "reliable": true,
+            "reasons": []
+          },
+          {
+            "toc_index": 63,
+            "title": "Secondary sources",
+            "level": 2,
+            "block_id": "blk-p000334-0025",
+            "score": 1.0,
+            "margin": 1.0,
+            "level_source": "confirmed",
+            "printed_page": "321",
+            "reliable": true,
+            "reasons": []
+          },
+          {
+            "toc_index": 64,
+            "title": "Index",
+            "level": 1,
+            "block_id": "blk-p000347-0000",
+            "score": 1.0,
+            "margin": 1.0,
+            "level_source": "confirmed",
+            "printed_page": "334",
+            "reliable": true,
+            "reasons": []
+          }
+        ],
+        "duplicate_titles": [
+          "2.3. Concluding remarks",
+          "3.4. Conclusions",
+          "5.4. Conclusions",
+          "7.4. Concluding remarks"
+        ],
+        "order_inversions": 0,
+        "page_mapping_consistent": true,
+        "coverage": 1.0,
+        "reasons": [
+          "目录存在 4 个重名标题，相关区域升级为串行"
+        ]
+      },
+      "regions": {
+        "total": 16,
+        "reliable": 11,
+        "serial": 5,
+        "primary_total": 348,
+        "context_total": 180
+      },
+      "global_overhead": {
+        "requests": 6,
+        "chars": 183923
+      },
+      "replay_history": {
+        "label": "historical outline responses",
+        "fallback": false,
+        "fallback_reason": "",
+        "requests": 6,
+        "chars": 97443,
+        "main_requests": 6,
+        "upgrade_requests": 0,
+        "secondary_requests": 0,
+        "gate": {
+          "adaptive_requests": 6,
+          "adaptive_chars": 97443,
+          "parallel_rounds": 4,
+          "global_requests": 6,
+          "global_chars": 183923,
+          "merged": true,
+          "passed": true
+        },
+        "estimated_chars": {
+          "adaptive": 97443,
+          "global": 183923
+        },
+        "reliable_regions": 4,
+        "ambiguous_regions": 2,
+        "local_upgrades": 0,
+        "second_round": 0,
+        "missing": 0,
+        "candidate_coverage_unchanged": true,
+        "extra_nodes": [],
+        "overlap_only_rows_ignored": 0,
+        "planned": 348,
+        "planning": {
+          "requests": 6,
+          "chars": 97443
+        },
+        "second_pass_global_plan": {
+          "reused": 87,
+          "review": 261,
+          "batches": 7,
+          "user_chars": 179805
+        },
+        "second_pass_adaptive_plan": {
+          "reused": 87,
+          "review": 261,
+          "batches": 7,
+          "user_chars": 175695
+        },
+        "end_to_end": {
+          "global": {
+            "plan_requests": 6,
+            "plan_chars": 183923,
+            "proofread_batches": 7,
+            "proofread_user_chars": 179805,
+            "review": 261,
+            "total_requests": 13,
+            "total_chars": 363728
+          },
+          "adaptive": {
+            "plan_requests": 6,
+            "plan_chars": 97443,
+            "proofread_batches": 7,
+            "proofread_user_chars": 175695,
+            "review": 261,
+            "total_requests": 13,
+            "total_chars": 273138
+          }
+        }
+      },
+      "replay_mechanical": {
+        "label": "current document levels (mechanical, not model quality)",
+        "fallback": false,
+        "fallback_reason": "",
+        "requests": 6,
+        "chars": 97443,
+        "main_requests": 6,
+        "upgrade_requests": 0,
+        "secondary_requests": 0,
+        "gate": {
+          "adaptive_requests": 6,
+          "adaptive_chars": 97443,
+          "parallel_rounds": 4,
+          "global_requests": 6,
+          "global_chars": 183923,
+          "merged": true,
+          "passed": true
+        },
+        "estimated_chars": {
+          "adaptive": 97443,
+          "global": 183923
+        },
+        "reliable_regions": 4,
+        "ambiguous_regions": 2,
+        "local_upgrades": 0,
+        "second_round": 0,
+        "missing": 0,
+        "candidate_coverage_unchanged": true,
+        "extra_nodes": [],
+        "overlap_only_rows_ignored": 0,
+        "planned": 348,
+        "planning": {
+          "requests": 6,
+          "chars": 97443
+        },
+        "second_pass_global_plan": {
+          "reused": 41,
+          "review": 307,
+          "batches": 8,
+          "user_chars": 184952
+        },
+        "second_pass_adaptive_plan": {
+          "reused": 41,
+          "review": 307,
+          "batches": 8,
+          "user_chars": 189642
+        },
+        "end_to_end": {
+          "global": {
+            "plan_requests": 6,
+            "plan_chars": 183923,
+            "proofread_batches": 8,
+            "proofread_user_chars": 184952,
+            "review": 307,
+            "total_requests": 14,
+            "total_chars": 368875
+          },
+          "adaptive": {
+            "plan_requests": 6,
+            "plan_chars": 97443,
+            "proofread_batches": 8,
+            "proofread_user_chars": 189642,
+            "review": 307,
+            "total_requests": 14,
+            "total_chars": 287085
+          }
+        }
+      }
+    },
+    "journal": {
+      "project": "journal",
+      "candidates": 228,
+      "toc_entries": 14,
+      "matched": 13,
+      "unlisted_titles": 63,
+      "framework": {
+        "state": "reliable",
+        "anchor_count": 13,
+        "reliable_anchors": 3,
+        "reliable_anchor_details": [
+          {
+            "toc_index": 1,
+            "title": "PETER JÁNOSI Hephaistos Goes Home: An Attic Black-figured Column-krater in the Metropolitan Museum",
+            "level": 2,
+            "block_id": "blk-00000295",
+            "score": 0.929,
+            "margin": 0.929,
+            "level_source": "confirmed",
+            "printed_page": "",
+            "reliable": true,
+            "reasons": []
+          },
+          {
+            "toc_index": 2,
+            "title": "MARY B. MOORE Epitome of National Disgrace: A Painting Illuminating Song–Jin Diplomatic Relations",
+            "level": 2,
+            "block_id": "blk-00000733",
+            "score": 0.935,
+            "margin": 0.935,
+            "level_source": "confirmed",
+            "printed_page": "",
+            "reliable": true,
+            "reasons": []
+          },
+          {
+            "toc_index": 3,
+            "title": "SHI-YEE LIU Sparse Trees and Pavilion, a Fan Painting by Wang Meng (ca. 1308–1385)",
+            "level": 2,
+            "block_id": "blk-00000961",
+            "score": 0.923,
+            "margin": 0.923,
+            "level_source": "confirmed",
+            "printed_page": "",
+            "reliable": true,
+            "reasons": []
+          }
+        ],
+        "duplicate_titles": [],
+        "order_inversions": 0,
+        "page_mapping_consistent": true,
+        "coverage": 1.0,
+        "reasons": []
+      },
+      "regions": {
+        "total": 6,
+        "reliable": 5,
+        "serial": 1,
+        "primary_total": 228,
+        "context_total": 60
+      },
+      "global_overhead": {
+        "requests": 4,
+        "chars": 101352
+      },
+      "replay_mechanical": {
+        "label": "current document levels (mechanical, not model quality)",
+        "fallback": false,
+        "fallback_reason": "",
+        "requests": 7,
+        "chars": 108740,
+        "main_requests": 4,
+        "upgrade_requests": 3,
+        "secondary_requests": 0,
+        "gate": {
+          "adaptive_requests": 4,
+          "adaptive_chars": 63389,
+          "parallel_rounds": 3,
+          "global_requests": 4,
+          "global_chars": 101352,
+          "merged": true,
+          "passed": true
+        },
+        "estimated_chars": {
+          "adaptive": 63389,
+          "global": 101352
+        },
+        "reliable_regions": 3,
+        "ambiguous_regions": 1,
+        "local_upgrades": 3,
+        "second_round": 0,
+        "missing": 0,
+        "candidate_coverage_unchanged": true,
+        "extra_nodes": [],
+        "overlap_only_rows_ignored": 0,
+        "planned": 228,
+        "planning": {
+          "requests": 7,
+          "chars": 108740
+        },
+        "second_pass_global_plan": {
+          "reused": 75,
+          "review": 153,
+          "batches": 4,
+          "user_chars": 90572
+        },
+        "second_pass_adaptive_plan": {
+          "reused": 75,
+          "review": 153,
+          "batches": 4,
+          "user_chars": 93106
+        },
+        "end_to_end": {
+          "global": {
+            "plan_requests": 4,
+            "plan_chars": 101352,
+            "proofread_batches": 4,
+            "proofread_user_chars": 90572,
+            "review": 153,
+            "total_requests": 8,
+            "total_chars": 191924
+          },
+          "adaptive": {
+            "plan_requests": 7,
+            "plan_chars": 108740,
+            "proofread_batches": 4,
+            "proofread_user_chars": 93106,
+            "review": 153,
+            "total_requests": 11,
+            "total_chars": 201846
+          }
+        }
+      }
+    },
+    "authentic": {
+      "project": "authentic",
+      "candidates": 58,
+      "toc_entries": 11,
+      "matched": 10,
+      "unlisted_titles": 12,
+      "framework": {
+        "state": "reliable",
+        "anchor_count": 10,
+        "reliable_anchors": 10,
+        "reliable_anchor_details": [
+          {
+            "toc_index": 1,
+            "title": "One The Culture of Authenticity",
+            "level": 1,
+            "block_id": "blk-00000048",
+            "score": 1.0,
+            "margin": 1.0,
+            "level_source": "model",
+            "printed_page": "1",
+            "reliable": true,
+            "reasons": []
+          },
+          {
+            "toc_index": 2,
+            "title": "Two The Enchanted Garden",
+            "level": 1,
+            "block_id": "blk-00000076",
+            "score": 1.0,
+            "margin": 1.0,
+            "level_source": "model",
+            "printed_page": "7",
+            "reliable": true,
+            "reasons": []
+          },
+          {
+            "toc_index": 3,
+            "title": "Three The Modern Worldview",
+            "level": 1,
+            "block_id": "blk-00000101",
+            "score": 1.0,
+            "margin": 1.0,
+            "level_source": "model",
+            "printed_page": "14",
+            "reliable": true,
+            "reasons": []
+          },
+          {
+            "toc_index": 4,
+            "title": "Four Romanticism and the Ideal of Authenticity",
+            "level": 1,
+            "block_id": "blk-00000172",
+            "score": 1.0,
+            "margin": 1.0,
+            "level_source": "model",
+            "printed_page": "26",
+            "reliable": true,
+            "reasons": []
+          },
+          {
+            "toc_index": 5,
+            "title": "Five The Heart of Darkness",
+            "level": 1,
+            "block_id": "blk-00000246",
+            "score": 1.0,
+            "margin": 1.0,
+            "level_source": "model",
+            "printed_page": "41",
+            "reliable": true,
+            "reasons": []
+          },
+          {
+            "toc_index": 6,
+            "title": "Six De-centering the Subject",
+            "level": 1,
+            "block_id": "blk-00000301",
+            "score": 1.0,
+            "margin": 1.0,
+            "level_source": "model",
+            "printed_page": "55",
+            "reliable": true,
+            "reasons": []
+          },
+          {
+            "toc_index": 7,
+            "title": "Seven Story-Shaped Selves",
+            "level": 1,
+            "block_id": "blk-00000343",
+            "score": 1.0,
+            "margin": 1.0,
+            "level_source": "model",
+            "printed_page": "65",
+            "reliable": true,
+            "reasons": []
+          },
+          {
+            "toc_index": 8,
+            "title": "Eight Authenticity in Context",
+            "level": 1,
+            "block_id": "blk-00000384",
+            "score": 1.0,
+            "margin": 1.0,
+            "level_source": "model",
+            "printed_page": "75",
+            "reliable": true,
+            "reasons": []
+          },
+          {
+            "toc_index": 9,
+            "title": "Notes",
+            "level": 1,
+            "block_id": "blk-00000424",
+            "score": 1.0,
+            "margin": 1.0,
+            "level_source": "model",
+            "printed_page": "87",
+            "reliable": true,
+            "reasons": []
+          },
+          {
+            "toc_index": 10,
+            "title": "Index",
+            "level": 1,
+            "block_id": "blk-00000599",
+            "score": 1.0,
+            "margin": 1.0,
+            "level_source": "model",
+            "printed_page": "95",
+            "reliable": true,
+            "reasons": []
+          }
+        ],
+        "duplicate_titles": [],
+        "order_inversions": 0,
+        "page_mapping_consistent": true,
+        "coverage": 1.0,
+        "reasons": []
+      },
+      "regions": {
+        "total": 11,
+        "reliable": 10,
+        "serial": 1,
+        "primary_total": 58,
+        "context_total": 117
+      },
+      "global_overhead": {
+        "requests": 1,
+        "chars": 15080
+      },
+      "replay_mechanical": {
+        "label": "current document levels (mechanical, not model quality)",
+        "fallback": true,
+        "fallback_reason": "候选数 58 少于自适应阈值 120，整体串行更省",
+        "requests": 1,
+        "chars": 15119,
+        "main_requests": null,
+        "upgrade_requests": null,
+        "secondary_requests": null,
+        "gate": null,
+        "estimated_chars": null,
+        "reliable_regions": null,
+        "ambiguous_regions": null,
+        "local_upgrades": 0,
+        "second_round": 0,
+        "missing": null,
+        "candidate_coverage_unchanged": true,
+        "extra_nodes": [],
+        "overlap_only_rows_ignored": 0,
+        "planned": 58,
+        "planning": {
+          "requests": 1,
+          "chars": 15119
+        },
+        "second_pass_global_plan": {
+          "reused": 24,
+          "review": 34,
+          "batches": 1,
+          "user_chars": 22239
+        },
+        "second_pass_adaptive_plan": {
+          "reused": 24,
+          "review": 34,
+          "batches": 1,
+          "user_chars": 22897
+        },
+        "end_to_end": {
+          "global": {
+            "plan_requests": 1,
+            "plan_chars": 15080,
+            "proofread_batches": 1,
+            "proofread_user_chars": 22239,
+            "review": 34,
+            "total_requests": 2,
+            "total_chars": 37319
+          },
+          "adaptive": {
+            "plan_requests": 1,
+            "plan_chars": 15119,
+            "proofread_batches": 1,
+            "proofread_user_chars": 22897,
+            "review": 34,
+            "total_requests": 2,
+            "total_chars": 38016
+          }
+        }
+      }
+    }
+  }
+}

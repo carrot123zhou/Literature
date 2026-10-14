@@ -41,14 +41,22 @@ async function main() {
     result: { audit: { requests: [
       { scope: "structure_outline", status: "responded", started_at: isoAt(START_MS + 5000) },
       { scope: "structure_proofread", status: "started", started_at: isoAt(INFLIGHT_MS) },
-    ] } },
+    ], planning: { mode: "adaptive", fallback: false, framework: { state: "reliable" },
+                  reliable_regions: 11, ambiguous_regions: 5, requests: 16, local_upgrades: 0,
+                  missing: 0, overlap_ignored: 3 } } },
   });
   const completedJob = () => ({
     ...runningJob(), status: "completed", progress: 1.0, message: "结构分析完成",
     result: {
       review_coverage: { candidates: 348, reviewed: 340, needs_review: 0, reused: 87, second_pass: 261 },
-      review_selection: { stats: { reused: 87, review: 261 }, reasons: {}, full_review: false },
-      audit: { requests: [] },
+      review_selection: { stats: { reused: 87, review: 279, qa: 18 }, reasons: {}, full_review: false,
+                          review_mode: "full", second_pass_ids: [], deferred: 0,
+                          qa: { checked: 18, agree: 18, disagree: 0, agreement: 1.0, disagreements: [] } },
+      toc_extraction: "local",
+      local_toc_marker_pages: [5],
+      audit: { requests: [], planning: { mode: "adaptive", fallback: false, framework: { state: "reliable" },
+                                        reliable_regions: 11, ambiguous_regions: 5, requests: 16,
+                                        local_upgrades: 0, missing: 0, overlap_ignored: 3 } },
     },
   });
 
@@ -67,11 +75,14 @@ async function main() {
   await page.waitForTimeout(2000);
   checks.push(["结构校对页可打开", (await page.innerText("body")).includes("AI 校准")]);
 
-  // 展开高级选项，改为全量复核 + 3 路并发。
+  // 展开高级选项：复核模式选全量双遍、目录来源选总是让模型核对，并发 3 路、规划自适应。
   await page.getByText("校对选项", { exact: false }).first().click();
   await page.waitForTimeout(300);
-  await page.locator('label:has-text("全量复核每个候选") input[type=checkbox]').check();
+  checks.push(["旧的“全量复核每个候选”复选框已移除", await page.locator('label:has-text("全量复核每个候选")').count() === 0]);
+  await page.locator('select[aria-label="复核模式"]').selectOption("full");
+  await page.locator('select[aria-label="目录来源"]').selectOption("model");
   await page.locator('input[aria-label="复核并发"]').fill("3");
+  await page.locator('select[aria-label="规划策略"]').selectOption("adaptive");
   await page.waitForTimeout(200);
 
   const runButton = page.getByRole("button", { name: /AI 校准结构|AI 校对标题/ }).first();
@@ -83,8 +94,10 @@ async function main() {
     return Boolean(captured);
   })();
   checks.push(["POST /structure/jobs 已发出", gotPost]);
-  checks.push(["POST 传全量复核 proofread_full=true", captured?.proofread_full === true]);
+  checks.push(["POST 传复核模式 proofread_mode=full", captured?.proofread_mode === "full"]);
+  checks.push(["POST 传目录来源 toc_extraction=model", captured?.toc_extraction === "model"]);
   checks.push(["POST 传并发 proofread_concurrency=3", captured?.proofread_concurrency === 3]);
+  checks.push(["POST 传规划策略 planning_mode=adaptive", captured?.planning_mode === "adaptive"]);
 
   // 运行中计时与当前阶段耗时（基于 created_at / audit.requests.started_at，应随真实时间递增）。
   const readElapsed = (text, anchor) => {
@@ -104,14 +117,17 @@ async function main() {
   checks.push(["总耗时真实递增", total1 !== null && total2 !== null && total2 > total1]);
   checks.push(["阶段耗时真实递增", stage1 !== null && stage2 !== null && stage2 > stage1]);
 
-  // 完成后覆盖口径：分别显示复用数与第二遍复核数，而不是 completion 比例。
+  // 完成后覆盖口径：分别显示第一遍定案数与第二遍必须定案数，而不是 completion 比例。
   mode = "completed";
   await page.waitForTimeout(2000);
   const completedText = await page.innerText("body");
   checks.push(["覆盖口径显示候选总数", completedText.includes("候选 348 个")]);
-  checks.push(["覆盖口径显示第一遍复用 87", completedText.includes("第一遍复用 87")]);
-  checks.push(["覆盖口径显示第二遍复核 261 个", completedText.includes("第二遍复核 261 个")]);
+  checks.push(["覆盖口径显示第一遍规划定案 87", completedText.includes("第一遍规划定案 87")]);
+  checks.push(["覆盖口径显示第二遍必须定案 261 个", completedText.includes("第二遍必须定案 261 个")]);
+  checks.push(["抽查一致性指标可见且声明不产生建议", completedText.includes("抽查 18 项一致性 18/18") && completedText.includes("抽查结论只做指标")]);
   checks.push(["不再显示 second_pass/candidates 比例", !completedText.includes("261/348")]);
+  checks.push(["本地目录采信时标注层级来源", completedText.includes("目录来自本地解析")]);
+  checks.push(["显示自适应规划路径与边界", completedText.includes("规划路径：自适应分支") && completedText.includes("可靠区域 11") && completedText.includes("局部升级 0")]);
 
   // 思考配置保存 + 兼容默认。
   await page.getByRole("button", { name: "配置" }).first().click();

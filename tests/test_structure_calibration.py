@@ -603,8 +603,7 @@ class StructureCalibrationTests(unittest.TestCase):
         self.assertEqual(len(values), 1)
         self.assertEqual(values[0]["operation"], "set_title")
 
-    def test_job_refines_local_toc_with_model_before_reasoning(self):
-        """可解析的目录仍须由 AI 核对作者和层级；本地草稿不能冒充答案。"""
+    def local_toc_fixture(self):
         toc_text = "\n".join(f"Chapter {i}. Title number {i} {i * 10}" for i in range(12))
         document = Document(project_id=self.project_id, title="F", source_language="en", page_count=3, blocks=[
             Block(block_id="mark", type="title", page_index=0, order=0, source_text="Contents", level=1, bbox=[100, 60, 800, 90]),
@@ -614,22 +613,67 @@ class StructureCalibrationTests(unittest.TestCase):
         ], pages=[Page(page_index=i, width=600, height=800) for i in range(3)])
         self.store.save_document(document)
 
+    def test_local_toc_with_explicit_marker_is_trusted_without_a_model_call(self):
+        """有显式目录标记页且本地能解析时直接采信，不再为“核对目录”发一次模型请求。
+
+        模型看到的是与本地完全相同的折行文本（MinerU 不保留目录缩进），转录与层级推断
+        并不比本地准；结论仍进 proposed_toc 供人确认，不直接写文档。
+        """
+        self.local_toc_fixture()
+        scopes: list[str] = []
+
+        class Provider:
+            def complete(inner, *, system, user):
+                payload = json.loads(user)
+                assert "toc_pages" not in payload, "本地目录可信时不应再发目录核对请求"
+                candidates = payload.get("candidates", payload.get("title_candidates", []))
+                rows = [{"block_id": row["block_id"], "role": "h1", "parent_id": None,
+                         "confidence": 0.9} for row in candidates]
+                scopes.append("outline" if payload.get("stage") else "review")
+                content = {"outline": rows, "profile": {}} if payload.get("stage") else {"decisions": rows}
+                return ProviderResponse(content=json.dumps(content), provider="mock", model="mock")
+
+        job_id = self.store.create_job(self.project_id, "structure_ai", {}, {})
+        result = run_structure_job(self.store, self.project_id, job_id,
+            {"toc": [], "proofread": True, "extract_toc": True, "auto_apply": False}, Provider())
+        self.assertGreaterEqual(len(result["proposed_toc"]), 10)
+        self.assertEqual(result["baseline_source"], "local")
+        self.assertEqual(result["toc_extraction"], "local")
+        self.assertNotIn("structure_extract", {item["scope"] for item in self.store.usage_records(self.project_id)})
+
+    def test_model_extraction_can_be_forced_or_used_when_no_marker_exists(self):
+        self.local_toc_fixture()
+
         class Provider:
             def complete(inner, *, system, user):
                 payload = json.loads(user)
                 if "toc_pages" in payload:
                     self.assertGreaterEqual(len(payload["local_toc_draft"]), 10)
                     return ProviderResponse(content=json.dumps({"toc": payload["local_toc_draft"]}), provider="mock", model="mock")
-                return ProviderResponse(content='{"suggestions":[]}', provider="mock", model="mock")
+                candidates = payload.get("candidates", payload.get("title_candidates", []))
+                rows = [{"block_id": row["block_id"], "role": "h1", "parent_id": None,
+                         "confidence": 0.9} for row in candidates]
+                content = {"outline": rows, "profile": {}} if payload.get("stage") else {"decisions": rows}
+                return ProviderResponse(content=json.dumps(content), provider="mock", model="mock")
 
         job_id = self.store.create_job(self.project_id, "structure_ai", {}, {})
         result = run_structure_job(self.store, self.project_id, job_id,
-            {"toc": [], "proofread": True, "extract_toc": True, "auto_apply": False}, Provider())
+            {"toc": [], "proofread": True, "extract_toc": True, "auto_apply": False,
+             "toc_extraction": "model"}, Provider())
         self.assertGreaterEqual(len(result["proposed_toc"]), 10)
-        scopes = {item["scope"] for item in self.store.usage_records(self.project_id)}
-        self.assertIn("structure_extract", scopes)
-        self.assertIn("structure_outline", scopes)
+        self.assertIn("structure_extract", {item["scope"] for item in self.store.usage_records(self.project_id)})
         self.assertEqual(result["baseline_source"], "model")
+
+        # 无显式标记（本地靠行扫描/人工指定目录页）时仍走模型核对。
+        document = self.store.load_document(self.project_id)
+        document.blocks[0].source_text = "Preface"
+        self.store.save_document(document)
+        job_id = self.store.create_job(self.project_id, "structure_ai", {}, {})
+        result = run_structure_job(self.store, self.project_id, job_id,
+            {"toc": [], "proofread": True, "extract_toc": True, "auto_apply": False,
+             "toc_page_indexes": [0], "toc_extraction": "auto"}, Provider())
+        self.assertEqual(result["toc_extraction"], "model")
+        self.assertEqual(result["local_toc_marker_pages"], [])
 
 
     def test_alignment_drives_duplicate_level_patches(self):
