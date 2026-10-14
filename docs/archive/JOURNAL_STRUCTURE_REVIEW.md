@@ -1,5 +1,8 @@
 # Journal 结构校对任务复盘
 
+> **STALE（归档于 2026-10-14）**：本文件是历史快照，仅作对照，**不要作为当前事实来源**。已被以下内容取代：`PROJECT_PLAN.md` §2.3 与 `ADAPTIVE_STRUCTURE_PLANNING.md`。归档原因与全量清单见 `docs/archive/README.md`。
+
+
 2026-10-03。本轮只读检查原项目，修改的是通用校对功能；没有重新写入 Journal 的原文、基准或修订。
 
 ## 具体任务

@@ -17,6 +17,16 @@
 .review-page-picker .toc-candidates button { display:block; }
 .review-page-picker small { display:block; margin-top:6px; }
 .review-advanced { margin-top:12px; border-top:1px solid #edf0f2; padding-top:10px; }
+/* 档位分段控件：主流 segmented control 范式，选中的档位用强调色填充。 */
+.calib-modes { display:grid; grid-template-columns:1fr 1fr; border:1px solid #d6d9de; border-radius:8px; overflow:hidden; margin:10px 0 8px; }
+.calib-modes button { border:0; border-radius:0; background:#f8fafc; padding:8px 6px; font-size:12px; font-weight:600; color:#4b5563; }
+.calib-modes button + button { border-left:1px solid #d6d9de; }
+.calib-modes button:hover { border-color:transparent; background:#eef2f6; }
+.calib-modes button.active { background:var(--mineru-accent); color:#fff; }
+.calib-modes button:disabled { opacity:.55; cursor:default; }
+.calib-mode-hint { margin:0 0 10px; font-size:11px; color:#6b7280; line-height:1.6; }
+.structure-run-panel.is-paused { box-shadow: inset 3px 0 #d97706; }
+.structure-run-panel.is-paused > strong { color:#92400e; }
 .review-advanced > summary { color:#6b7280; font-size:11px; }
 .review-advanced textarea { width:100%; box-sizing:border-box; margin-bottom:7px; }
 .review-baseline > div { max-height:180px; overflow:auto; font-size:11px; }

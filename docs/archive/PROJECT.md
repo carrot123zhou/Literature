@@ -1,5 +1,8 @@
 # Literature 项目文档
 
+> **STALE（归档于 2026-10-14）**：本文件是历史快照，仅作对照，**不要作为当前事实来源**。已被以下内容取代：`PROJECT_PLAN.md`（本文件停在 2026-09-30，仍含已移除的导出/TBL 描述）。归档原因与全量清单见 `docs/archive/README.md`。
+
+
 > 历史快照：正文整理于 2026-09-30，模块行数、默认路径、WebUI/桌面安排与验收项不再代表当前状态。2026-10-03 已切换到内置后端的 Tauri macOS 客户端；最新依据为 `PROJECT_PLAN.md`、`DEVELOPMENT_LOG.md`、`PACKAGING.md` 和 `RESOURCE_MANAGEMENT.md`。
 
 > 标准项目文档 · 面向新加入者、评审者与后续开发者

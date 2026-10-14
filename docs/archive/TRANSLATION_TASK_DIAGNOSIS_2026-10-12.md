@@ -1,5 +1,8 @@
 # 2026-10-12 最近翻译任务错误诊断
 
+> **STALE（归档于 2026-10-14）**：本文件是历史快照，仅作对照，**不要作为当前事实来源**。已被以下内容取代：`PROJECT_PLAN.md` §2.4 与 `docs/DEVELOPMENT_LOG.md` 后续条目。归档原因与全量清单见 `docs/archive/README.md`。
+
+
 > **实施状态更新（2026-10-12，Orca Worker）**：本报告的方案已部分落地，下方“未修改业务代码”描述的是诊断当时的状态，不应再视为当前状态。
 > - 3.1 失败审计/部分完成：已实现（`partial_failed`、逐块 `error`、错误栏归类、counts 计数）。
 > - 3.2 子请求异常隔离：已实现（`_translate_units_isolated`）。

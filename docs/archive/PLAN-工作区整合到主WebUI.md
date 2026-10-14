@@ -1,5 +1,8 @@
 # PLAN：结构校对 / 阅读与翻译 / 导出 并入主 WebUI 标签页
 
+> **STALE（归档于 2026-10-14）**：本文件是历史快照，仅作对照，**不要作为当前事实来源**。已被以下内容取代：已落地的统一外壳实现（现状见代码与 `docs/DEVELOPMENT_LOG.md`）。归档原因与全量清单见 `docs/archive/README.md`。
+
+
 ```yaml
 phase: 05-ui-shell-unification
 feature: 工作区成为主导航下的标签子页面

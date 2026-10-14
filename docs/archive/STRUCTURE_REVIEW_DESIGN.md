@@ -1,5 +1,8 @@
 # 结构校对：本地证据、目录基准与 AI 角色审查
 
+> **STALE（归档于 2026-10-14）**：本文件是历史快照，仅作对照，**不要作为当前事实来源**。已被以下内容取代：`PROJECT_PLAN.md` §2.3（2026-10-14 起改为目录锚定差分校准）。归档原因与全量清单见 `docs/archive/README.md`。
+
+
 2026-10-04。本文件前半部分描述前一轮角色管线；本轮当前实现以本节和 `JOURNAL_STRUCTURE_REVIEW.md` 为准。历史部分保留用于对照；历史实施和验收状态见 `DEVELOPMENT_LOG.md`，本轮样本探索见 `STRUCTURE_CALIBRATION_EXPERIMENTS.md`。
 
 ## 当前管线：AI 整体结构推理（hierarchy-v2）

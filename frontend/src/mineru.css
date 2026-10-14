@@ -442,6 +442,57 @@ body.is-resizing { cursor: col-resize; user-select: none; }
 .model-form-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 4px; }
 .model-form-actions .primary { margin-left: auto; }
 .model-form-status { margin: 0; color: #526b18; font-size: 11px; overflow-wrap: anywhere; }
+.model-advanced { display: grid; gap: 10px; border: 1px dashed #d3dcd3; border-radius: 9px; padding: 10px 12px; }
+.model-advanced > summary { color: #5f6e66; font-size: 11px; font-weight: 650; cursor: pointer; }
+
+/* 可搜索模型选择器（/v1/models 拉取结果，含元数据徽标） */
+.model-picker { display: grid; gap: 6px; margin-top: 8px; border: 1px solid #dce2dc; border-radius: 9px; padding: 8px; background: #fff; }
+.model-picker-head { display: flex; align-items: center; gap: 8px; }
+.model-picker-head strong { font-size: 12px; }
+.model-picker-head input { flex: 1; min-width: 0; border: 1px solid #cbd4cd; border-radius: 7px; padding: 6px 8px; background: #fff; }
+.model-picker-head button { flex: none; padding: 6px 10px; white-space: nowrap; color: #526159; font-size: 11px; font-weight: 650; }
+.model-picker-list { max-height: 220px; overflow: auto; display: grid; gap: 4px; align-content: start; }
+.model-picker-item { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 8px; text-align: left; padding: 7px 9px; border: 1px solid #e7eae6; border-radius: 7px; background: #fff; align-items: start; }
+.model-picker-item.selected { border-color: var(--mineru-accent); background: #fff7ed; }
+.model-picker-check { width: 16px; height: 16px; flex: none; display: grid; place-items: center; margin-top: 1px; border: 1px solid #cbd4cd; border-radius: 4px; background: #fff; color: #526b18; font-size: 11px; font-weight: 700; }
+.model-picker-item.selected .model-picker-check { border-color: var(--mineru-accent); background: #ffedd5; }
+.model-picker-main { display: grid; gap: 3px; min-width: 0; }
+.model-picker-main strong { font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.model-picker-count { margin-left: auto; color: #7a867e; font-size: 11px; }
+.model-picker-meta { display: flex; flex-wrap: wrap; gap: 4px; }
+.model-picker-meta em { font-style: normal; font-size: 10px; color: #526b18; background: #f2f6ec; border-radius: 4px; padding: 1px 5px; }
+.model-picker-foot { display: flex; justify-content: flex-end; gap: 8px; }
+.model-picker-foot .primary { padding: 6px 14px; }
+.danger-text { color: #b91c1c; }
+.danger-text:disabled { color: #d6a5a5; }
+.model-current-meta { margin-top: 6px; }
+
+/* 任务前思考水平选择（翻译 ScopeDialog / 结构校准共用） */
+.thinking-level { display: grid; gap: 8px; margin: 8px 0; }
+.thinking-model-badge { display: flex; align-items: center; gap: 8px; min-width: 0; padding: 7px 9px; border: 1px solid #dce2dc; border-radius: 8px; background: #fff; font-size: 11px; }
+.thinking-model-badge strong { font-weight: 650; flex: none; }
+.thinking-model-badge small { color: #8a948d; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.thinking-level-row { display: grid; gap: 5px; color: #5f6e66; font-size: 11px; }
+.thinking-level-row select, .thinking-level-row input { width: 100%; border: 1px solid #cbd4cd; border-radius: 7px; padding: 8px; background: #fff; }
+.thinking-level-hint { margin: 0; color: #8a948d; font-size: 11px; }
+
+/* 任务界面「服务商 → 模型」两级选择器 */
+.task-model-picker { display: grid; gap: 8px; margin: 8px 0; }
+.task-model-picker-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.task-model-picker-label { color: #5f6e66; font-size: 11px; font-weight: 650; }
+.task-model-picker-row select { width: 100%; border: 1px solid #cbd4cd; border-radius: 7px; padding: 8px; background: #fff; }
+
+/* 服务商内嵌模型列表（v3 两层） */
+.model-entry-list { display: grid; gap: 6px; }
+.model-entry { display: grid; border: 1px solid #e0e5e0; border-radius: 9px; background: #fff; overflow: hidden; }
+.model-entry.expanded { border-color: var(--mineru-accent); }
+.model-entry-row { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: 8px; padding: 8px 10px; }
+.model-entry-main { display: grid; gap: 3px; text-align: left; min-width: 0; border: 0; background: transparent; padding: 0; }
+.model-entry-main strong { font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.model-entry-thinking { display: grid; gap: 3px; color: #5f6e66; font-size: 10px; }
+.model-entry-thinking select { border: 1px solid #cbd4cd; border-radius: 7px; padding: 5px 6px; background: #fff; font-size: 11px; max-width: 170px; }
+.model-entry-editor { display: grid; gap: 10px; padding: 10px 12px; border-top: 1px dashed #e0e5e0; background: #fbfdf8; }
+.model-entry-hint { color: #8a948d; font-size: 10px; }
 
 /* 首页任务分区（PARSING_TASK_HISTORY_DESIGN.md） */
 .intake-progress-card > header > .intake-head-actions { display: flex; align-items: center; gap: 12px; }
@@ -491,3 +542,4 @@ body.is-resizing { cursor: col-resize; user-select: none; }
 .history-slices { display: grid; gap: 5px; margin-top: 8px; }
 .history-slice { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 6px 10px; border-radius: 7px; background: #f3f6f0; font-size: 12px; }
 .history-slice.slice-failed { background: #f7e2df; color: #8a2f24; }
+.model-form-status.is-error { color: #b91c1c; }

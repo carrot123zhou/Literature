@@ -1933,7 +1933,7 @@ class TranslationSafetyTests(unittest.TestCase):
         })
         app = create_app(store)
         provider = CountingProvider()
-        app.state.job_manager.provider_from = lambda service_id="", provider_input=None: provider
+        app.state.job_manager.provider_from = lambda service_id="", provider_input=None, model="": provider
         client = TestClient(app)
         headers = {"x-literature-token": app.state.session_token}
         resumed = client.post(f"/projects/{project_id}/translation/jobs/{job_id}/resume", headers=headers)
@@ -1971,7 +1971,7 @@ class TranslationSafetyTests(unittest.TestCase):
             block("b2", "paragraph", "second sample"),
         ])
         app = create_app(store)
-        app.state.job_manager.provider_from = lambda service_id="", provider_input=None: FlakyProvider()
+        app.state.job_manager.provider_from = lambda service_id="", provider_input=None, model="": FlakyProvider()
         client = TestClient(app)
         headers = {"x-literature-token": app.state.session_token}
         started = client.post(f"/projects/{project_id}/translation/jobs", headers=headers, json={
@@ -1988,7 +1988,7 @@ class TranslationSafetyTests(unittest.TestCase):
         self.assertEqual(job["status"], "partial_failed")
         self.assertTrue(job["error"])
         # 用可控 mock 恢复同一 job：先补初译 b1，再润色。
-        app.state.job_manager.provider_from = lambda service_id="", provider_input=None: MockProvider()
+        app.state.job_manager.provider_from = lambda service_id="", provider_input=None, model="": MockProvider()
         resumed = client.post(f"/projects/{project_id}/translation/jobs/{job_id}/resume", headers=headers)
         self.assertEqual(resumed.status_code, 200, resumed.text)
         job = store.get_job(project_id, job_id)

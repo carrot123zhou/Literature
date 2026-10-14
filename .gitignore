@@ -67,3 +67,9 @@ launcher/.install.*/
 # Bundled local Node runtime and end-to-end test library
 .tools/
 .e2e/
+
+# Intentionally local-only design/QA artifacts (evidence kept on disk, not tracked)
+opendesign-projects/
+docs/prototypes/
+docs/*.png
+docs/verification/*.png

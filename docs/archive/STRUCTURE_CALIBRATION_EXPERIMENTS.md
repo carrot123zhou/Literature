@@ -1,5 +1,8 @@
 # MinerU 结构校准实验：目录、局部证据与逐项角色判断
 
+> **STALE（归档于 2026-10-14）**：本文件是历史快照，仅作对照，**不要作为当前事实来源**。已被以下内容取代：`PROJECT_PLAN.md` §2.3（2026-10-14 粗校/精校差分方案）。归档原因与全量清单见 `docs/archive/README.md`。
+
+
 2026-10-03。本轮先在 Literature 之外处理真实 MinerU 的 `full.md + content_list_v2.json`，再把发现转换为产品契约。实验目录为 `/private/tmp/structure-lab-20261003`；只使用既有输出，没有重新调用 MinerU。原项目与 raw 未被修改。
 
 ## 样本与结果

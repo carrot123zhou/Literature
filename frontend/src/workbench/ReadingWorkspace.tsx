@@ -4,9 +4,10 @@ import { BlockPanel, GlossaryPanel, JobPanel, ScopeDialog, TocPanel, type ScopeC
 import { chapterOf } from "./readingModel";
 import { useVirtualWindow } from "./useVirtualWindow";
 import "./reading.css";
-import type { DocumentGraph, GlossaryVersion, Job, ModelService, TranslationEstimate, TranslationEntry, TranslationLayer, TranslationStats } from "../types";
+import type { ReasoningMode } from "./ThinkingLevelField";
+import type { DocumentGraph, GlossaryVersion, Job, ModelRoleBinding, ModelService, TranslationEstimate, TranslationEntry, TranslationLayer, TranslationStats } from "../types";
 
-type TranslateOptions = { refine?: boolean; force?: boolean; useGlossary?: boolean; instructions?: string; locale?: string; polish?: boolean; workers?: number };
+type TranslateOptions = { refine?: boolean; force?: boolean; useGlossary?: boolean; instructions?: string; locale?: string; polish?: boolean; workers?: number; serviceId?: string; model?: string; reasoningMode?: ReasoningMode; reasoningBudget?: number };
 
 type Props = {
   projectId: string;
@@ -22,7 +23,9 @@ type Props = {
   scopeBlockIds: string[];
   selected: string;
   estimate: TranslationEstimate | null;
-  translationService?: ModelService;
+  /** 翻译角色绑定的服务商与模型（用于侧栏展示与启动弹窗默认值）。 */
+  providers: ModelService[];
+  translationBinding: ModelRoleBinding;
   onSelectBlock: (id: string) => void;
   onToggle: (id: string) => void;
   onPause: (job: Job) => void;
@@ -75,7 +78,7 @@ function summarizeCandidate(value: Record<string, unknown>): string {
 export default function ReadingWorkspace(props: Props) {
   const {
     projectId, document, translation, stats, usage, jobs, glossary, glossaryVersions, locale, checked,
-    scopeBlockIds, selected, estimate, translationService,
+    scopeBlockIds, selected, estimate, providers, translationBinding,
     onSelectBlock, onToggle, onPause, onResume, onTranslate, onTranslateBlock, onEstimate,
     onFreezeGlossary, onRollbackGlossary, onUnlockBlock, onRefresh, onInstant, onOpenReview, onConfigureModel, onInvalidateEstimate,
     onReviewBlock, reviewCandidate, onAdoptReview, onRejectReview,
@@ -118,6 +121,8 @@ export default function ReadingWorkspace(props: Props) {
     />;
   };
   const [scopeOpen, setScopeOpen] = useState(false);
+  const translationProvider = providers.find(item => item.service_id === translationBinding.service_id);
+  const translationModel = translationBinding.model || translationProvider?.models[0]?.model || "";
   // 划选原文时只浮出按钮，点击后才发请求（F09）；不写 window.getSelection 无法判断的来源。
   const [selectionMenu, setSelectionMenu] = useState<{ x: number; y: number; text: string; blockId: string } | null>(null);
   const selectedBlock = document.blocks.find(block => block.block_id === selected);
@@ -128,7 +133,7 @@ export default function ReadingWorkspace(props: Props) {
 
   const confirmScope = (value: ScopeConfirm) => {
     const blockIds = value.scope === "blocks" ? scopeBlockIds : [];
-    onTranslate(value.scope, blockIds, { refine: value.refine, force: value.force, polish: value.polish, workers: value.workers, useGlossary: value.useGlossary, instructions: value.instructions, locale: value.locale });
+    onTranslate(value.scope, blockIds, { refine: value.refine, force: value.force, polish: value.polish, workers: value.workers, useGlossary: value.useGlossary, instructions: value.instructions, locale: value.locale, serviceId: value.serviceId, model: value.model, reasoningMode: value.reasoningMode, reasoningBudget: value.reasoningBudget });
     setScopeOpen(false);
   };
 
@@ -171,7 +176,7 @@ export default function ReadingWorkspace(props: Props) {
         {sideTab === "glossary" && <GlossaryPanel glossary={glossary} versions={glossaryVersions} onFreeze={onFreezeGlossary} onRollback={onRollbackGlossary}/>}
         {sideTab === "block" && <BlockPanel block={selectedBlock} entry={selected ? translation?.entries[selected] : undefined} chapter={selectedBlock ? chapterOf(document, selectedBlock.block_id) : ""} onTranslateBlock={options => selectedBlock && onTranslateBlock(selectedBlock.block_id, options)} onUnlock={() => selectedBlock && onUnlockBlock(selectedBlock.block_id)}/>}
         <div className="panel"><h4>翻译模型</h4><div className="pbody">
-          <div className="kv"><span>{translationService?.name || "未配置模型"}</span><b>{translationService?.model || "—"}</b></div>
+          <div className="kv"><span>{translationProvider?.name || "未配置模型"}</span><b>{translationModel || "—"}</b></div>
           <button className="ghost" style={{ justifySelf: "start" }} onClick={onConfigureModel}>配置模型</button>
         </div></div>
       </div>
@@ -245,6 +250,8 @@ export default function ReadingWorkspace(props: Props) {
       stats={stats}
       selectedScopeCount={scopeBlockIds.length}
       glossaryVersions={glossaryVersions}
+      providers={providers}
+      binding={translationBinding}
       estimate={estimate}
       onEstimate={scope => onEstimate(scope)}
       onInvalidateEstimate={onInvalidateEstimate}

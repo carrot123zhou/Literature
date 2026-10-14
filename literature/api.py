@@ -12,7 +12,7 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Callable, Literal
 
 from fastapi import File, UploadFile
 from pydantic import BaseModel, ConfigDict, Field
@@ -24,12 +24,12 @@ from .model_services import MODEL_ROLES, ROLE_STRUCTURE, ROLE_TRANSLATION, Model
 from .models import UsageRecord
 from .ocr import MinerUService, delete_mineru_token, get_mineru_token, save_mineru_token
 from .parse_backends import describe_backends
-from .providers import PROVIDER_PRESETS, OpenAICompatibleProvider, ProviderConfig, ProviderError, delete_api_key, get_api_key, normalize_proxy_environment, save_api_key
+from .providers import PROVIDER_PRESETS, NO_REASONING_STYLE, OpenAICompatibleProvider, ProviderConfig, ProviderError, apply_reasoning_mode, delete_api_key, disabled_reasoning_effort, get_api_key, normalize_proxy_environment, probe_thinking_off, resolve_reasoning_style, save_api_key
 from .request_coordinator import BudgetExhausted, RequestCoordinator, prompt_cost_estimator
 from .runtime_revision import RUNTIME_REVISION
 from .storage import ProjectStore, StorageError
 from .structure_signals import enrich_furniture_evidence
-from .structure import analyze_structure, apply_automatic, apply_patch, apply_patch_batch, find_toc_page_candidates, local_printed_toc, plan_structure_analysis, reconcile_toc, revert_patch, run_structure_job, structure_model_payload
+from .structure import analyze_structure, apply_automatic, apply_patch, apply_patch_batch, find_toc_page_candidates, local_printed_toc, plan_structure_analysis, reconcile_toc, revert_patch, run_structure_job, structure_mode_config, structure_model_payload
 from .translation import TranslationService, align_structure_only, draft_glossary, estimate_translation, translation_payload, translation_stats, REVISION_PROTOCOL
 from .uploads import UploadStore
 
@@ -194,10 +194,16 @@ class ProviderInput(BaseModel):
         )
 
 
+# 任务级思考档位：inherit=沿用模型服务配置；其余为本次任务的覆盖。
+ReasoningMode = Literal["inherit", "off", "low", "medium", "high"]
+
+
 class StructureAIAnalyze(BaseModel):
     toc: list[dict[str, Any]]
     provider: ProviderInput | None = None
     service_id: str = ""
+    # 服务商内的模型 ID；留空则用角色绑定/服务商默认（第一个）模型。
+    model: str = ""
     auto_apply: bool = False
     # 复核模式：sample=第一遍定案 + 固定比例抽查（默认）；full=全量双遍；off=不抽查。
     # proofread_full=True 是 full 的兼容入口。
@@ -205,11 +211,25 @@ class StructureAIAnalyze(BaseModel):
     proofread_full: bool = False
     proofread_concurrency: int = Field(default=2, ge=1, le=4)
     planning_mode: Literal["global", "adaptive"] = "global"
+    # 任务级思考档位（覆盖服务级配置）；见 ReasoningMode。
+    reasoning_mode: ReasoningMode = "inherit"
+    reasoning_budget: int = Field(default=0, ge=0, le=200000)
 
 
 class StructureJobInput(BaseModel):
     service_id: str = ""
+    # 服务商内的模型 ID；留空则用角色绑定/服务商默认（第一个）模型。
+    model: str = ""
+    # 任务级思考档位：inherit=沿用服务配置（默认）；off=本次强制关思考；
+    # low/medium/high=本次设定思考强度。budget>0 时对 qwen 思考预算生效。
+    reasoning_mode: ReasoningMode = "inherit"
+    reasoning_budget: int = Field(default=0, ge=0, le=200000)
     toc: list[dict[str, Any]] = Field(default_factory=list)
+    # 用户档位：coarse=粗校（只校准与目录相关的候选，默认）；fine=精校（额外未收录小节发现）。
+    # 设为 None 时保持旧行为（各字段显式生效），用于兼容既有调用。
+    mode: Literal["coarse", "fine"] | None = None
+    # 诊断/兼容覆盖：仅在需要时显式给出，覆盖档位预置值。
+    advanced: dict[str, Any] = Field(default_factory=dict)
     extract_toc: bool = True
     # 目录来源：auto=有显式目录标记页且本地可解析时直接采信（默认，省一次模型请求）；
     # local=总是采信本地；model=总是让模型核对目录页文本。
@@ -241,13 +261,13 @@ class StructurePlanInput(BaseModel):
     planning_mode: Literal["global", "adaptive"] = "global"
 
 
-class ModelServiceInput(BaseModel):
-    name: str = ""
-    preset: str = "custom"
-    base_url: str = ""
+class ModelEntryInput(BaseModel):
+    """服务商下的一个模型（上下文/输出上限/单价/思考配置都挂在模型上）。"""
     model: str = ""
-    temperature: float = 0.2
+    name: str = ""
+    context_window: int = 0
     max_output_tokens: int = 16384
+    temperature: float = 0.2
     input_price_per_million: float | None = None
     output_price_per_million: float | None = None
     reasoning_style: str = ""
@@ -255,14 +275,57 @@ class ModelServiceInput(BaseModel):
     reasoning_budget: int = 0
 
 
+class ModelServiceInput(BaseModel):
+    """一个服务商（Base URL + 密钥）及其模型列表。
+
+    `models` 为空时兼容旧的扁平载荷：顶层 `model`/单价/思考字段会被当作单个模型。
+    """
+    name: str = ""
+    preset: str = "custom"
+    base_url: str = ""
+    models: list[ModelEntryInput] = Field(default_factory=list)
+    # v1 兼容字段（仅在 models 为空时生效）。
+    model: str = ""
+    temperature: float = 0.2
+    max_output_tokens: int = 16384
+    context_window: int = 0
+    input_price_per_million: float | None = None
+    output_price_per_million: float | None = None
+    reasoning_style: str = ""
+    reasoning_effort: str = ""
+    reasoning_budget: int = 0
+
+
+class ModelRoleBinding(BaseModel):
+    service_id: str = ""
+    model: str = ""
+
+
 class ModelRolesInput(BaseModel):
-    structure: str | None = None
-    translation: str | None = None
+    # 新形态是 {service_id, model}；也接受纯字符串（v1 只绑服务），由存储层归一。
+    structure: ModelRoleBinding | str | None = None
+    translation: ModelRoleBinding | str | None = None
+
+
+class ModelCheckInput(BaseModel):
+    model: str = ""
+
+
+class ModelProbeInput(BaseModel):
+    """拉取远端模型列表的输入：新建服务只需 base_url + api_key，已保存服务可只给 service_id。"""
+    base_url: str = ""
+    api_key: str = ""
+    service_id: str = ""
 
 
 class TranslationJobInput(BaseModel):
     provider: ProviderInput | None = None
     service_id: str = ""
+    # 服务商内的模型 ID；留空则用角色绑定/服务商默认（第一个）模型。
+    model: str = ""
+    # 任务级思考档位（覆盖服务级配置）：见 StructureJobInput 的同名字段。
+    reasoning_mode: ReasoningMode = "inherit"
+    reasoning_budget: int = Field(default=0, ge=0, le=200000)
     scope: Literal["auto", "book", "untranslated", "stale", "failed", "blocks"] = "auto"
     block_ids: list[str] = Field(default_factory=list)
     locale: str = "zh-CN"
@@ -274,7 +337,7 @@ class TranslationJobInput(BaseModel):
     polish: bool = False
     # 同一作业内并发请求数。小块 + 并发是整本书提速的主要来源；
     # AIMD 自适应会在 429 时自动降速，因此上限可以开得比以前高。
-    parallel_workers: int = Field(default=4, ge=1, le=16)
+    parallel_workers: int = Field(default=8, ge=1, le=16)
     # 单次模型请求的读超时。流式下是「两个数据块之间的空闲时限」，
     # 非流式回退时才是等待整份响应的总时限；供不支持流式的中转站调大。
     request_timeout_seconds: int = Field(default=300, ge=30, le=1800)
@@ -283,6 +346,7 @@ class TranslationJobInput(BaseModel):
 class InstantInput(BaseModel):
     provider: ProviderInput | None = None
     service_id: str = ""
+    model: str = ""
     text: str
     locale: str = "zh-CN"
     block_id: str | None = None
@@ -291,6 +355,7 @@ class InstantInput(BaseModel):
 
 class ReviewInput(BaseModel):
     service_id: str = ""
+    model: str = ""
     locale: str = "zh-CN"
     instructions: str = ""
 
@@ -466,10 +531,13 @@ class JobManager:
                 self._start_locks[project_id] = lock
             return lock
 
-    def provider_from(self, service_id: str, provider_input: ProviderInput | None = None) -> OpenAICompatibleProvider:
-        """优先按模型服务库解析（密钥只从 Keychain 取）；否则兼容旧的随请求 ProviderInput。"""
+    def provider_from(self, service_id: str, provider_input: ProviderInput | None = None, model: str = "") -> OpenAICompatibleProvider:
+        """优先按模型服务库解析（密钥只从 Keychain 取）；否则兼容旧的随请求 ProviderInput。
+
+        `model` 是服务商内的模型 ID；留空则用该服务商的第一个模型。
+        """
         if service_id:
-            return self.models.config_for(service_id)
+            return self.models.config_for(service_id, model)
         if provider_input is not None:
             return OpenAICompatibleProvider(provider_input.config())
         raise ProviderError("尚未选择模型服务，请先在当前模块配置模型。")
@@ -479,10 +547,88 @@ class JobManager:
             return explicit
         if role not in MODEL_ROLES:
             raise ProviderError(f"未知任务角色：{role}")
-        resolved = self.models.roles().get(role, "")
+        resolved = self.models.roles().get(role, {}).get("service_id", "")
         if not resolved:
             raise ProviderError("尚未为当前模块绑定模型服务，请先配置模型。")
         return resolved
+
+    def model_for(self, role: str, service_id: str, explicit: str = "") -> str:
+        """解析角色/任务实际使用的模型：显式优先，其次角色绑定（仅当绑定同一服务商），
+        否则交给存储层回落到服务商的第一个模型。"""
+        if explicit:
+            return explicit
+        if role not in MODEL_ROLES:
+            return ""
+        binding = self.models.roles().get(role, {})
+        if binding.get("service_id") == service_id:
+            return str(binding.get("model") or "")
+        return ""
+
+    @staticmethod
+    def _apply_task_reasoning(provider: Any, mode: str, budget: int) -> Any:
+        """把任务级思考档位落到 provider 配置上；必须在 apply_thinking_policy 之前调用
+        （后者会根据最终 effort 决定是否探测“关思考”字段写法）。inherit 时零改动。"""
+        config = getattr(provider, "config", None)
+        if config is None:
+            return provider
+        updated = apply_reasoning_mode(config, mode, budget)
+        if updated is not config:
+            provider.config = updated
+        return provider
+
+    def apply_thinking_policy(
+        self, provider: Any, service_id: str, *, allow_probe: bool = False,
+        on_probe: Callable[[], None] | None = None,
+    ) -> Any:
+        """把“确定性任务关思考”落到 provider 上，返回可能被替换的 provider。
+
+        三步（顺序有含义）：
+        1. `with_thinking_disabled()` 决定 style/effort——用户显式开思考时它直接返回原对象。
+        2. 仅当最终处于“关思考”状态时才查/写“哪个字段写法真的生效”的缓存。
+        3. `allow_probe` 为真且无缓存时，用一次极小请求探测（见 providers.probe_thinking_off）；
+           结果按 服务+模型 持久化，后续作业零额外开销。`on_probe` 用于在探测前把
+           “正在探测”写进任务面板，避免作业在排队状态里静默几百毫秒到数十秒。
+
+        未声明协议且模型名推断不出的服务保持原样（不发送任何未声明字段）。
+        """
+        if hasattr(provider, "with_thinking_disabled"):
+            provider = provider.with_thinking_disabled()
+        config = getattr(provider, "config", None)
+        if config is None or not service_id:
+            # 没有服务标识（例如随请求传入的临时 provider）：不做缓存/探测，只用推断出的默认字段。
+            return provider
+        style = resolve_reasoning_style(config)
+        effort = str(getattr(config, "reasoning_effort", "") or "")
+        if not style or effort != disabled_reasoning_effort(style):
+            return provider  # 推断不出协议，或用户显式要求不关思考：维持原样。
+        model = str(getattr(config, "model", "") or "")
+        cached = self.models.thinking_policy(service_id, model)
+        if cached is None:
+            if not allow_probe or not hasattr(provider, "with_reasoning"):
+                return provider
+            if on_probe is not None:
+                try:
+                    on_probe()
+                except Exception:
+                    logger.exception("探测提示写入失败（不影响探测）")
+            probed = probe_thinking_off(provider)
+            if probed is None:
+                # 探测被临时故障打断：不写缓存，保持默认字段，下次作业再试。
+                logger.info("关思考探测未完成（临时故障）：service=%s model=%s", service_id, model)
+                return provider
+            cached = self.models.remember_thinking_policy(service_id, model, probed)
+            logger.info(
+                "关思考探测：service=%s model=%s variant=%s",
+                service_id, model, cached.get("variant") or "(无可用字段)",
+            )
+        variant = str(cached.get("variant") or "")
+        if variant and hasattr(provider, "with_reasoning"):
+            return provider.with_reasoning(style=style, effort=effort, variant=variant)
+        if cached.get("probed_at") and hasattr(provider, "with_reasoning"):
+            # 已探测且没有任何写法生效：明确不发思考字段（NO_REASONING_STYLE，不会因模型名
+            # 再被推断回去）。继续发默认字段只会让严格服务在每个新作业实例上白付一次 400。
+            return provider.with_reasoning(style=NO_REASONING_STYLE, effort="", variant="")
+        return provider
 
     def start_structure(self, project_id: str, request: "StructureJobInput") -> str:
         # 与翻译启动同理：检查活动任务与创建/提交必须在同一临界区内完成，否则并发/双击
@@ -495,8 +641,8 @@ class JobManager:
             raise ProviderError("至少需要勾选“提取目录”或“校对标题”中的一项。")
         if request.reuse_job_id:
             previous = self.store.get_job(project_id, request.reuse_job_id)
-            if previous["kind"] != "structure_ai" or previous["status"] != "failed":
-                raise StorageError("只能复用当前项目中失败的结构校对任务。")
+            if previous["kind"] != "structure_ai" or previous["status"] not in {"failed", "paused"}:
+                raise StorageError("只能复用当前项目中失败或已暂停的结构校对任务。")
         active_structure = [
             job for job in self.store.list_jobs(project_id)
             if job.get("kind") == "structure_ai" and job.get("status") in {"queued", "running"}
@@ -504,20 +650,55 @@ class JobManager:
         if active_structure:
             raise StorageError("已有结构校对任务正在运行；请等待完成后再启动新的校对。")
         service_id = self.service_id_for(ROLE_STRUCTURE, request.service_id)
-        provider = self.provider_from(service_id)
+        model = self.model_for(ROLE_STRUCTURE, service_id, request.model)
+        provider = self.provider_from(service_id, model=model)
+        # 任务级思考档位优先于服务配置；在 apply_thinking_policy 之前落到 provider 上。
+        provider = self._apply_task_reasoning(provider, request.reasoning_mode, request.reasoning_budget)
         service = self.models.get(service_id)
         config_value = request.model_dump()
+        config_value.pop("advanced", None)
+        config_value["model"] = model
+        # 显式字段 = 调用方真正给出的字段（pydantic ``model_fields_set``）+ ``advanced`` 容器；
+        # 只有这些才覆盖档位预设，其余一律由 ``mode`` 派生。
+        explicit = {key: getattr(request, key) for key in request.model_fields_set
+                    if key not in {"service_id", "mode", "advanced", "reasoning_mode", "reasoning_budget", "model"}}
+        explicit.update({key: value for key, value in request.advanced.items() if value is not None})
+        if request.mode:
+            # 界面档位：由服务端展开内部参数，用户不需要选择复核模式/规划策略/视觉等。
+            config_value = structure_mode_config(request.mode, explicit, base=config_value)
+            # 项目已确认的目录基准就是“原书目录”：主流程只传 mode 时，后端自动采用它，
+            # 不再重跑目录提取；用户显式给了 toc/extract_toc 时不覆盖。
+            if not config_value.get("toc") and "toc" not in explicit and "extract_toc" not in explicit:
+                stored = self.store.load_structure_baseline(project_id)
+                stored_toc = stored.get("toc") if isinstance(stored, dict) else None
+                if stored_toc:
+                    config_value["toc"] = stored_toc
+                    config_value["extract_toc"] = False
+        else:
+            config_value.update(explicit)
+            config_value.pop("mode", None)
         config_value["service_id"] = service_id
         scope = {
             "toc_entries": len(request.toc),
-            "extract_toc": request.extract_toc,
-            "proofread": request.proofread,
+            "extract_toc": bool(config_value.get("extract_toc", request.extract_toc)),
+            "proofread": bool(config_value.get("proofread", request.proofread)),
             "body_text_included": False,
-            "toc_page_text_included": request.extract_toc,
-            "model": service.get("model", ""),
+            "toc_page_text_included": bool(config_value.get("extract_toc", request.extract_toc)),
+            "mode": request.mode or "",
+            "model": model,
             "service_name": service.get("name", ""),
         }
         job_id = self.store.create_job(project_id, "structure_ai", scope, config_value)
+        # 结构校对同样默认关思考（reasoning 对“按几何/目录证据定层级”贡献有限）。
+        # 这里也允许探测：只用结构校对的用户不会先跑翻译，若只读缓存就永远预热不了，
+        # 会一直发被合法拒收的默认字段、靠安全网摘掉→思考始终开着（真实网关就是这种）。
+        provider = self.apply_thinking_policy(
+            provider, service_id, allow_probe=True,
+            on_probe=lambda: self.store.update_job(
+                project_id, job_id, status="running",
+                message="正在探测该服务的关思考字段（只做一次，之后走缓存）…",
+            ),
+        )
         # 结构请求同样进入公共协调层（服务并发/退避 + 项目预算，按每次 attempt 预留）。
         structure_budget = float(self.store.load_manifest(project_id).get("budget_usd") or 0)
         self.coordinator.attempt_hooks_for(
@@ -531,12 +712,17 @@ class JobManager:
         except Exception:
             pass
 
+        # 暂停事件：结构作业在模型请求边界响应暂停，已完成的响应写入审计可在继续时复用。
+        pause = threading.Event()
+        self.pause_events[job_id] = pause
+
         def run() -> None:
             try:
-                run_structure_job(self.store, project_id, job_id, config_value, provider)
+                run_structure_job(self.store, project_id, job_id, config_value, provider, should_pause=pause.is_set)
             except Exception:
                 logger.exception("Structure job %s failed", job_id)
             finally:
+                self.pause_events.pop(job_id, None)
                 try:
                     provider.close()
                 except Exception:
@@ -583,18 +769,27 @@ class JobManager:
         def run() -> None:
             provider = None
             try:
-                provider = self.provider_from(request.service_id, request.provider)
+                # 角色绑定给出默认服务商+模型；任务可用 service_id/model 显式覆盖。
+                binding = self.models.roles().get(ROLE_TRANSLATION, {}) if self.models else {}
+                resolved_service = request.service_id or str(binding.get("service_id") or "")
+                resolved_model = request.model or (str(binding.get("model") or "") if binding.get("service_id") == resolved_service else "")
+                provider = self.provider_from(resolved_service, request.provider, model=resolved_model)
                 # 翻译请求的读超时可按作业配置（冻结快照不含超时，恢复沿用创建时的值）。
                 # 测试/自定义 provider 可能不实现该方法，缺省时保持原超时。
                 if hasattr(provider, "with_read_timeout"):
                     provider = provider.with_read_timeout(float(request.request_timeout_seconds))
+                # 任务级思考档位优先于服务配置；在 apply_thinking_policy 之前落到 provider 上。
+                provider = self._apply_task_reasoning(provider, request.reasoning_mode, request.reasoning_budget)
                 # 翻译是确定性任务：reasoning 对译文质量近乎零贡献却占掉大部分输出延迟
-                # （实测思考型模型 reasoning 占输出 85–90%）。默认按所声明协议关思考；
-                # 用户显式要求开思考（开关=on / effort=high）时 provider 内部会尊重原配置。
-                if hasattr(provider, "with_thinking_disabled"):
-                    provider = provider.with_thinking_disabled()
-                # 用实际 resolved 的 service_id 做限流键，避免空串把多个默认服务混在一起。
-                resolved_service = request.service_id or (self.models.roles().get(ROLE_TRANSLATION, "") if self.models else "")
+                # （本机实测 reasoning 占输出 93.7%，单请求平均 152 秒）。默认关思考，
+                # 并在首次任务时探测该服务真正接受的字段写法（结果按 服务+模型 缓存）。
+                provider = self.apply_thinking_policy(
+                    provider, resolved_service, allow_probe=True,
+                    on_probe=lambda: self.store.update_job(
+                        project_id, job_id, status="running",
+                        message="正在探测该服务的关思考字段（只做一次，之后走缓存）…",
+                    ),
+                )
                 # AIMD 需要能探速到用户设定的并发上限：服务级信号量只升不降到 max(默认, workers)，
                 # 作为跨作业共享同一服务的总量上限；单次作业内部由 AIMD 自适应控制。
                 # 只升不降：避免另一本书的运行中作业额度被压小（信号量重建会让在途持有者与
@@ -789,7 +984,7 @@ def create_app(store: ProjectStore | None = None):
             "status": "ok",
             "version": "0.1.0",
             "runtime_revision": RUNTIME_REVISION,
-            "capabilities": ["intake_items_v1", "structure_review_v2", "model_services_v1", "structure_job_v1", "structure_vision_v1", "desktop_resources_v1", "translation_module_v1", "translation_engine_v2", "resource_pipeline_v1", "translation_safety_v1", "parse_lifecycle_v1", "task_history_v1", "parse_backends_v1"],
+            "capabilities": ["intake_items_v1", "structure_review_v2", "model_services_v1", "model_services_v2", "model_services_v3", "structure_job_v1", "structure_modes_v1", "structure_pause_v1", "structure_vision_v1", "desktop_resources_v1", "translation_module_v1", "translation_engine_v2", "resource_pipeline_v1", "translation_safety_v1", "parse_lifecycle_v1", "task_history_v1", "parse_backends_v1"],
         }
 
     @app.get("/parse/backends")
@@ -1307,13 +1502,39 @@ def create_app(store: ProjectStore | None = None):
     def structure_job_get(project_id: str, job_id: str):
         return store.get_job(project_id, job_id)
 
+    @app.post("/projects/{project_id}/structure/jobs/{job_id}/pause")
+    def structure_job_pause(project_id: str, job_id: str):
+        job = store.get_job(project_id, job_id)
+        if job.get("kind") != "structure_ai":
+            raise StorageError("该任务不是结构校对任务。")
+        manager.pause(job_id)
+        return {"job_id": job_id, "state": "pause_requested"}
+
+    @app.post("/projects/{project_id}/structure/jobs/{job_id}/resume")
+    def structure_job_resume(project_id: str, job_id: str):
+        # 继续 = 用已暂停/失败作业的审计做请求级复用，只补剩余部分（新建作业指向旧作业）。
+        job = store.get_job(project_id, job_id)
+        if job.get("kind") != "structure_ai" or job.get("status") not in {"paused", "failed"}:
+            raise StorageError("只能继续已暂停或失败的结构校对任务。")
+        config = dict(job.get("config") or {})
+        config["reuse_job_id"] = job_id
+        request = StructureJobInput.model_validate(config)
+        new_job_id = manager.start_structure(project_id, request)
+        return store.get_job(project_id, new_job_id)
+
     @app.post("/projects/{project_id}/structure/analyze-ai")
     def structure_analyze_ai(project_id: str, request: StructureAIAnalyze):
         scope = {"toc_entries": len(request.toc), "body_text_included": False}
         job_id = store.create_job(project_id, "structure_ai", scope, request.model_dump())
         store.update_job(project_id, job_id, status="running")
         try:
-            provider = manager.provider_from(request.service_id, request.provider)
+            binding = manager.models.roles().get(ROLE_STRUCTURE, {}) if manager.models else {}
+            resolved = request.service_id or str(binding.get("service_id") or "")
+            model = request.model or (str(binding.get("model") or "") if binding.get("service_id") == resolved else "")
+            provider = manager.provider_from(resolved, request.provider, model=model)
+            # 与主结构作业路径一致：默认关思考（走已有探测缓存，不在这里探测）。
+            # 临时 ProviderInput（无 service_id）不查缓存，避免写到角色服务的键上。
+            provider = manager.apply_thinking_policy(provider, resolved or "")
             result = run_structure_job(store, project_id, job_id,
                 {**request.model_dump(), "extract_toc": False, "proofread": True}, provider)
             return {**result, "job_id": job_id}
@@ -1445,7 +1666,13 @@ def create_app(store: ProjectStore | None = None):
     def model_service_key(service_id: str, request: SecretInput):
         models.get(service_id)  # 校验存在
         save_service_key(service_id, request.value)
+        # 换密钥后重新探测：上一次探测可能是因认证失败而中断，不该留下旧结论。
+        models.forget_thinking_policy(service_id)
         return {"configured": True}
+
+    @app.post("/model-services/models")
+    def model_service_probe_models(request: ModelProbeInput):
+        return {"models": models.probe_models(base_url=request.base_url, api_key=request.api_key, service_id=request.service_id)}
 
     @app.post("/model-services/{service_id}/models")
     def model_service_models(service_id: str):
@@ -1453,10 +1680,10 @@ def create_app(store: ProjectStore | None = None):
         return {"models": models.list_models(service_id)}
 
     @app.post("/model-services/{service_id}/check")
-    def model_service_check(service_id: str):
+    def model_service_check(service_id: str, request: ModelCheckInput | None = None):
         import time as _time
         started = _time.perf_counter()
-        provider = models.config_for(service_id, timeout=30.0)
+        provider = models.config_for(service_id, request.model if request else "", timeout=30.0)
         response = provider.complete(
             system="你是连接性探测助手。只返回 JSON {\"ok\":true}。",
             user="ping",
@@ -1528,11 +1755,13 @@ def create_app(store: ProjectStore | None = None):
 
     @app.post("/projects/{project_id}/translations/{block_id}/review")
     def translation_review(project_id: str, block_id: str, request: ReviewInput):
-        service_id = request.service_id or (manager.models.roles().get(ROLE_TRANSLATION, "") if manager.models else "") or "default"
-        provider = manager.provider_from(request.service_id, None)
-        # 单块译审同样是翻译任务：默认按所声明协议关思考（与整本书翻译一致）。
-        if hasattr(provider, "with_thinking_disabled"):
-            provider = provider.with_thinking_disabled()
+        binding = manager.models.roles().get(ROLE_TRANSLATION, {}) if manager.models else {}
+        resolved = request.service_id or str(binding.get("service_id") or "")
+        model = request.model or (str(binding.get("model") or "") if binding.get("service_id") == resolved else "")
+        service_id = resolved or "default"
+        provider = manager.provider_from(resolved, None, model=model)
+        # 单块译审同样是翻译任务：默认关思考，走已有探测缓存（不在这里再探测，避免交互延迟）。
+        provider = manager.apply_thinking_policy(provider, service_id)
         manager.coordinator.attempt_hooks_for(
             service_id, provider, project_id=project_id,
             budget=float(store.load_manifest(project_id).get("budget_usd") or 0),
@@ -1567,11 +1796,15 @@ def create_app(store: ProjectStore | None = None):
 
     @app.post("/projects/{project_id}/translate/instant")
     def translate_instant(project_id: str, request: InstantInput):
-        service_id = request.service_id or (manager.models.roles().get(ROLE_TRANSLATION, "") if manager.models else "") or "default"
-        provider = manager.provider_from(request.service_id, request.provider)
-        # 即时翻译同样是翻译任务：默认按所声明协议关思考。
-        if hasattr(provider, "with_thinking_disabled"):
-            provider = provider.with_thinking_disabled()
+        binding = manager.models.roles().get(ROLE_TRANSLATION, {}) if manager.models else {}
+        resolved = request.service_id or str(binding.get("service_id") or "")
+        model = request.model or (str(binding.get("model") or "") if binding.get("service_id") == resolved else "")
+        service_id = resolved or "default"
+        provider = manager.provider_from(resolved, request.provider, model=model)
+        # 即时翻译同样是翻译任务：默认关思考，只读缓存不探测（划选要即时响应）。
+        # 走临时 ProviderInput（无 service_id）时不查缓存：它的键属于角色绑定的服务，会串味。
+        policy_key = "" if (request.provider is not None and not request.service_id) else service_id
+        provider = manager.apply_thinking_policy(provider, policy_key)
         manager.coordinator.attempt_hooks_for(
             service_id, provider, project_id=project_id,
             budget=float(store.load_manifest(project_id).get("budget_usd") or 0),

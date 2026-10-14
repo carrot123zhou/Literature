@@ -9,6 +9,7 @@ import { flattenToc } from "./review/projection";
 import { useModelServices } from "./modelServices";
 import { InstantPanel, ModelServicesDialog, ReadingWorkspace, Settings, TaskPicker } from "./workbench";
 import type { ScopeConfirm } from "./workbench/ReadingPanels";
+import type { ReasoningMode } from "./workbench/ThinkingLevelField";
 import { isWorkView, readLastProject, useHashRoute, writeLastProject } from "./viewState";
 import type { DocumentGraph, GlossaryVersion, Job, ModelRole, Project, StructurePatch, StructureSuggestion, TranslationEstimate, TranslationLayer, TranslationStats, UsageRecord } from "./types";
 
@@ -187,11 +188,13 @@ export default function App() {
   };
   // 文件资源卡片可以就地启动翻译：范围与目标语言来自弹窗，不依赖当前已打开的任务。
   const translateProject = async (projectId: string, options: { scope: string; locale: string }) => {
-    if (!models.roles.translation) { setModelRole("translation"); setMessage("请先配置翻译模型"); return false; }
+    if (!models.roles.translation.service_id) { setModelRole("translation"); setMessage("请先配置翻译模型"); return false; }
+    const binding = models.roles.translation;
     try {
       await api(`/projects/${projectId}/translation/jobs`, { method: "POST", body: JSON.stringify({
-        service_id: models.roles.translation, scope: options.scope, block_ids: [], locale: options.locale,
-        refine: false, force: false, polish: false, parallel_workers: 4,
+        service_id: binding.service_id, model: binding.model, scope: options.scope, block_ids: [], locale: options.locale,
+        refine: false, force: false, polish: false, parallel_workers: 8,
+        reasoning_mode: "inherit", reasoning_budget: 0,
       }) });
       if (options.locale !== locale) setLocale(options.locale);
       setMessage("翻译任务已进入本地队列");
@@ -211,17 +214,25 @@ export default function App() {
 
   const selectBlock = (id: string) => setSelected(id);
   const toggle = (id: string) => setChecked(previous => { const next = new Set(previous); next.has(id) ? next.delete(id) : next.add(id); return next; });
-  const translate = async (taskScope: string, blockIds: string[] = [], options: { refine?: boolean; force?: boolean; polish?: boolean; workers?: number; useGlossary?: boolean; instructions?: string; locale?: string } = {}) => {
-    if (!models.roles.translation) { setModelRole("translation"); setMessage("请先配置翻译模型"); return; }
+  const translate = async (taskScope: string, blockIds: string[] = [], options: { refine?: boolean; force?: boolean; polish?: boolean; workers?: number; useGlossary?: boolean; instructions?: string; locale?: string; serviceId?: string; model?: string; reasoningMode?: ReasoningMode; reasoningBudget?: number } = {}) => {
+    const binding = models.roles.translation;
+    // 弹窗里可以直接选服务商/模型：守卫按“实际将使用的 service_id”判断，而不是只看角色绑定。
+    const effectiveServiceId = options.serviceId || binding.service_id;
+    if (!effectiveServiceId) { setModelRole("translation"); setMessage("请先配置翻译模型"); return; }
     if (taskScope === "blocks" && !blockIds.length) { setMessage("请先在目录中勾选要翻译的章节或段落"); return; }
     const targetLocale = options.locale || locale;
     if (options.locale && options.locale !== locale) setLocale(options.locale);
     const payload = {
-      service_id: models.roles.translation, scope: taskScope, block_ids: blockIds, locale: targetLocale,
+      service_id: effectiveServiceId,
+      model: options.model || binding.model,
+      scope: taskScope, block_ids: blockIds, locale: targetLocale,
       glossary: options.useGlossary === false ? {} : glossary,
       refine: options.refine || false, force: options.force || false,
-      polish: options.polish || false, parallel_workers: options.workers ?? 4,
+      polish: options.polish || false, parallel_workers: options.workers ?? 8,
       instructions: options.instructions ?? instructions,
+      // 契约：budget>0 仅在低/中/高档生效；inherit 时必须归零，避免陈旧预算覆盖服务配置。
+      reasoning_mode: options.reasoningMode ?? "inherit",
+      reasoning_budget: options.reasoningMode && options.reasoningMode !== "inherit" ? options.reasoningBudget ?? 0 : 0,
     };
     try {
       await api(`/projects/${activeProjectId}/translation/jobs`, { method: "POST", body: JSON.stringify(payload) });
@@ -238,7 +249,7 @@ export default function App() {
     const value = await api<TranslationEstimate>(`/projects/${activeProjectId}/translation/estimate`, {
       method: "POST",
       body: JSON.stringify({
-        service_id: models.roles.translation, scope: options.scope, block_ids: blockIds,
+        service_id: options.serviceId || models.roles.translation.service_id, model: options.model || models.roles.translation.model, scope: options.scope, block_ids: blockIds,
         locale: options.locale || locale, refine: options.refine, force: options.force,
         polish: options.polish, glossary: options.useGlossary === false ? {} : glossary,
         instructions: options.instructions ?? instructions,
@@ -267,13 +278,13 @@ export default function App() {
     setMessage(`术语表已回滚为 v${version} 的内容（新版本 v${value.version}）`);
   };
   const reviewBlock = async (blockId: string) => {
-    if (!models.roles.translation) { setModelRole("translation"); setMessage("请先配置翻译模型"); return; }
+    if (!models.roles.translation.service_id) { setModelRole("translation"); setMessage("请先配置翻译模型"); return; }
     const projectId = activeProjectId;
     const requestedLocale = locale;
     const seq = ++reviewSeqRef.current;
     try {
       const value = await api<any>(`/projects/${projectId}/translations/${blockId}/review`, {
-        method: "POST", body: JSON.stringify({ service_id: models.roles.translation, locale: requestedLocale, instructions }),
+        method: "POST", body: JSON.stringify({ service_id: models.roles.translation.service_id, model: models.roles.translation.model, locale: requestedLocale, instructions }),
       });
       // 迟到响应：项目/语言/代次不一致就不回写。
       if (seq !== reviewSeqRef.current || activeProjectRef.current !== projectId) return;
@@ -306,9 +317,9 @@ export default function App() {
   const instant = async (text: string, blockId: string) => {
     const selection = text.trim();
     if (!selection) return;
-    if (!models.roles.translation) { setModelRole("translation"); setMessage("请先配置翻译模型"); return; }
+    if (!models.roles.translation.service_id) { setModelRole("translation"); setMessage("请先配置翻译模型"); return; }
     try {
-      const value = await api<any>(`/projects/${activeProjectId}/translate/instant`, { method: "POST", body: JSON.stringify({ service_id: models.roles.translation, text: selection, locale, block_id: blockId || null }) });
+      const value = await api<any>(`/projects/${activeProjectId}/translate/instant`, { method: "POST", body: JSON.stringify({ service_id: models.roles.translation.service_id, model: models.roles.translation.model, text: selection, locale, block_id: blockId || null }) });
       setInstantResult({ source: selection, text: value.text, blockId });
     } catch (error) {
       setMessage(error instanceof Error ? error.message : String(error));
@@ -365,6 +376,8 @@ export default function App() {
           refresh={() => refreshProject(activeProjectId)}
           setMessage={setMessage}
           modelService={models.serviceFor("structure")}
+          boundModel={models.roles.structure?.model || ""}
+          providers={models.services}
           onConfigureModel={() => setModelRole("structure")}
         />
       : projectPlaceholder("选择一个已完成处理的文档，进入结构校对；或去首页上传新文件。"))}
@@ -401,7 +414,8 @@ export default function App() {
           onRefresh={() => refreshProject(activeProjectId)}
           onInstant={instant}
           onOpenReview={() => navigate("review", activeProjectId)}
-          translationService={models.serviceFor("translation")}
+          providers={models.services}
+          translationBinding={models.roles.translation}
           onConfigureModel={() => setModelRole("translation")}
         />
       : projectPlaceholder("选择一个已完成处理的文档，进入阅读与翻译；或去首页上传新文件。"))}

@@ -1,5 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
-import type { Block, GlossaryVersion, Job, TocNode, TranslationEntry, TranslationEstimate, TranslationStats, UsageRecord } from "../types";
+import type { Block, GlossaryVersion, Job, ModelRoleBinding, ModelService, TocNode, TranslationEntry, TranslationEstimate, TranslationStats, UsageRecord } from "../types";
+import TaskModelPicker, { type TaskModelPatch } from "./TaskModelPicker";
+import type { ReasoningMode } from "./ThinkingLevelField";
 import { STATE_META, TYPE_LABEL, blockKind, entryText } from "./readingModel";
 
 /* ----------------------------- 目录 ----------------------------- */
@@ -189,14 +191,18 @@ export function BlockPanel({ block, entry, chapter, onTranslateBlock, onUnlock }
 /* ----------------------------- 范围弹窗 ----------------------------- */
 
 export type ScopeKey = "book" | "untranslated" | "stale" | "failed" | "blocks";
-export type ScopeConfirm = { scope: ScopeKey; useGlossary: boolean; instructions: string; refine: boolean; force: boolean; polish: boolean; workers: number; locale: string };
+export type ScopeConfirm = { scope: ScopeKey; useGlossary: boolean; instructions: string; refine: boolean; force: boolean; polish: boolean; workers: number; locale: string; serviceId: string; model: string; reasoningMode: ReasoningMode; reasoningBudget: number };
 
-export function ScopeDialog({ projectTitle, locale, stats, selectedScopeCount, glossaryVersions, estimate, onEstimate, onInvalidateEstimate, onClose, onConfirm }: {
+export function ScopeDialog({ projectTitle, locale, stats, selectedScopeCount, glossaryVersions, providers, binding, estimate, onEstimate, onInvalidateEstimate, onClose, onConfirm }: {
   projectTitle: string;
   locale: string;
   stats: TranslationStats;
   selectedScopeCount: number;
   glossaryVersions: GlossaryVersion[];
+  /** 全部服务商（含模型列表），供「服务商 → 模型」两级选择。 */
+  providers: ModelService[];
+  /** 默认绑定 = 翻译角色当前绑定。 */
+  binding: ModelRoleBinding;
   estimate: TranslationEstimate | null;
   onEstimate: (value: ScopeConfirm) => void;
   onInvalidateEstimate: () => void;
@@ -210,12 +216,15 @@ export function ScopeDialog({ projectTitle, locale, stats, selectedScopeCount, g
   const [refine, setRefine] = useState(false);
   const [force, setForce] = useState(false);
   const [polish, setPolish] = useState(false);
-  const [workers, setWorkers] = useState(4);
+  const [workers, setWorkers] = useState(8);
+  const [modelValue, setModelValue] = useState<ModelRoleBinding>(binding);
+  const [reasoningMode, setReasoningMode] = useState<ReasoningMode>("inherit");
+  const [reasoningBudget, setReasoningBudget] = useState(0);
   const frozen = glossaryVersions.length ? glossaryVersions[glossaryVersions.length - 1].version : 0;
   // 选项变化立即失效旧估算（不需要再点一次预估）；迟到响应由 App 的代次校验丢弃。
   useEffect(() => {
     onInvalidateEstimate();
-  }, [scope, target, glossaryMode, instructions, refine, force, polish, workers, onInvalidateEstimate]);
+  }, [scope, target, glossaryMode, instructions, refine, force, polish, workers, modelValue.service_id, modelValue.model, reasoningMode, onInvalidateEstimate]);
   // 仅“原文已变且未锁定”的段落会真正重译；纯层级变化已自动对齐，不再入列（F04）。
   const retranslatableStale = stats.stale_source_unlocked ?? Math.max(0, stats.stale_source - stats.stale_locked);
   const options: { key: ScopeKey; title: string; desc: string; count: number | string; disabled?: boolean }[] = [
@@ -227,7 +236,7 @@ export function ScopeDialog({ projectTitle, locale, stats, selectedScopeCount, g
   ];
   const canGo = scope !== "blocks" || selectedScopeCount > 0;
   // 预估必须按当前弹窗选项（目标语言/术语/附加要求/refine/force/polish）计算，而不是只传 scope。
-  const confirmValue: ScopeConfirm = { scope, useGlossary: glossaryMode === "frozen", instructions, refine, force: force && !refine, polish: polish && !refine, workers, locale: target };
+  const confirmValue: ScopeConfirm = { scope, useGlossary: glossaryMode === "frozen", instructions, refine, force: force && !refine, polish: polish && !refine, workers, locale: target, serviceId: modelValue.service_id, model: modelValue.model, reasoningMode, reasoningBudget };
   return <div className="rdg-pop" onClick={event => { if (event.target === event.currentTarget) onClose(); }}>
     <div className="dialog" role="dialog" aria-modal="true" aria-label="选择翻译范围">
       <div className="dialog-head">
@@ -248,6 +257,20 @@ export function ScopeDialog({ projectTitle, locale, stats, selectedScopeCount, g
               <option value="none">不使用术语表（直接开始）</option>
             </select>
           </div>
+        </div>
+        <div className="field"><label>翻译模型与思考水平</label>
+          <TaskModelPicker
+            label="翻译模型"
+            providers={providers}
+            value={modelValue}
+            reasoningMode={reasoningMode}
+            reasoningBudget={reasoningBudget}
+            onChange={(patch: TaskModelPatch) => {
+              if (patch.serviceId !== undefined || patch.model !== undefined) setModelValue(current => ({ service_id: patch.serviceId ?? current.service_id, model: patch.model ?? current.model }));
+              if (patch.reasoningMode !== undefined) setReasoningMode(patch.reasoningMode);
+              if (patch.reasoningBudget !== undefined) setReasoningBudget(patch.reasoningBudget);
+            }}
+          />
         </div>
         <div className="field"><label>翻译范围</label>
           <div className="radio">
@@ -272,9 +295,9 @@ export function ScopeDialog({ projectTitle, locale, stats, selectedScopeCount, g
             <select value={workers} onChange={event => setWorkers(Number(event.target.value))}>
               <option value={1}>1（串行，最稳）</option>
               <option value={2}>2</option>
-              <option value={4}>4（推荐）</option>
+              <option value={4}>4</option>
               <option value={6}>6</option>
-              <option value={8}>8</option>
+              <option value={8}>8（推荐）</option>
               <option value={12}>12</option>
               <option value={16}>16（最快，限流时自动降速）</option>
             </select>

@@ -61,15 +61,34 @@ export type Job = {
   message?: string; activity?: JobActivity[]; result?: Record<string, unknown>;
   created_at?: string; updated_at?: string;
 };
+export type ModelEntry = {
+  /** 服务商内的模型 ID（唯一键，必填）。 */
+  model: string;
+  name?: string;
+  context_window?: number;
+  max_output_tokens?: number;
+  temperature?: number;
+  input_price_per_million?: number | null;
+  output_price_per_million?: number | null;
+  reasoning_style?: string;
+  reasoning_effort?: string;
+  reasoning_budget?: number;
+};
+/** v3：一个服务商（Base URL + 密钥）及其模型列表；模型嵌在服务商里。 */
 export type ModelService = {
-  service_id: string; name: string; preset: string; base_url: string; model: string;
-  temperature: number; max_output_tokens: number;
-  input_price_per_million?: number | null; output_price_per_million?: number | null;
-  reasoning_style?: string; reasoning_effort?: string; reasoning_budget?: number;
+  service_id: string; name: string; preset: string; base_url: string;
+  models: ModelEntry[];
   configured: boolean;
 };
+/** 任务角色绑定：服务商 + 该服务商内的模型 ID。 */
+export type ModelRoleBinding = { service_id: string; model: string };
 export type ModelRole = "structure" | "translation";
-export type ModelRoles = { structure: string; translation: string };
+export type ModelRoles = { structure: ModelRoleBinding; translation: ModelRoleBinding };
+/** `/v1/models` 返回的一条记录：ID + 可选的上下文窗口 / 输出上限 / 单价。 */
+export type RemoteModel = {
+  id: string; context_window: number; max_output_tokens: number;
+  input_price_per_million: number | null; output_price_per_million: number | null;
+};
 export type StructureTocEntry = { title: string; level: number };
 export type StructureSuggestion = { block_id: string; operation: "set_type" | "set_level" | "set_title"; before: unknown; after: unknown; confidence: number; reason: string; automatic: boolean; document_updated_at?: string; job_id?: string; suggestion_id?: string; parent_id?: string | null; parent_title?: string | null };
 export type StructureBaseline = { toc: StructureTocEntry[]; source: string; updated_at: string };

@@ -13,7 +13,7 @@ from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import asdict, is_dataclass
 from difflib import SequenceMatcher
 from functools import lru_cache
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 from pathlib import Path
 
 from .mineru import build_toc, write_source_markdown
@@ -71,6 +71,40 @@ MANUAL_OPERATIONS = ("set_type", "set_level", "set_title")
 TEXT_STRUCTURE_TYPES = ("paragraph", "list", "footnote")
 EDITABLE_STRUCTURE_TYPES = ("title", *TEXT_STRUCTURE_TYPES)
 CONTENT_STRUCTURE_TYPES = ("image", "table", "equation", "code")
+
+# AI 结构校对的用户档位：粗校=只校准与目录相关的候选；精校=额外做未收录小节发现。
+STRUCTURE_MODES = ("coarse", "fine")
+
+
+def structure_mode_config(mode: str, advanced: dict[str, Any] | None = None, *, base: dict[str, Any] | None = None) -> dict[str, Any]:
+    """把界面档位展开为内部执行参数；用户只选粗校/精校，其余由程序决定。
+
+    两档共同点：本地优先、默认关思考、不做第二遍逐条复核、关闭视觉、全部自动应用。
+    精校额外放开候选范围（未收录小节发现）。``advanced`` 仅作诊断/兼容覆盖。
+    """
+    normalized = str(mode or "").strip().casefold()
+    if normalized not in STRUCTURE_MODES:
+        raise StorageError(f"未知的结构校对档位：{mode!r}")
+    preset: dict[str, Any] = {
+        "extract_toc": True,
+        "toc_extraction": "auto",
+        "proofread": True,
+        "auto_apply": True,
+        "use_vision": False,
+        "proofread_mode": "off",
+        "proofread_full": False,
+        "proofread_concurrency": 2,
+        "planning_mode": "global",
+        "mode": normalized,
+    }
+    for key, value in (advanced or {}).items():
+        if value is not None:
+            preset[key] = value
+    merged = {**(base or {}), **preset}
+    merged.pop("advanced", None)
+    merged["mode"] = normalized
+    return merged
+
 
 # 供界面展示的标签，避免前端各自硬编码。
 STRUCTURE_TYPE_LABELS = {
@@ -203,6 +237,42 @@ def structure_model_payload(document: Document, authoritative_toc: Iterable[dict
         "title_candidates": candidates,
         "matched_titles": reconciliation["matched"],
     }
+
+
+def scope_calibration_candidates(payload: dict[str, Any]) -> dict[str, Any]:
+    """粗校候选收窄：只保留与目录相关或本地可疑的块。
+
+    保留：目录命中的块（核对层级）、本地建议涉及的块（误标/精确层级）、
+    目录命中但 MinerU 未标为标题的块（补齐漏标），以及形态明显可疑的未收录标题。
+    丢弃：看起来正常的未收录标题——那是精校的“未收录小节发现”。
+    """
+    matched = {item["block_id"] for item in payload.get("matched_titles") or []}
+    local_ids = {item["block_id"] for item in payload.get("local_suggestions") or []}
+    unlisted = {item["block_id"] for item in payload.get("unlisted_titles") or []}
+    kept: list[dict[str, Any]] = []
+    for candidate in payload.get("title_candidates") or []:
+        block_id = candidate["block_id"]
+        if block_id in matched or block_id in local_ids:
+            kept.append(candidate)
+            continue
+        if block_id not in unlisted:
+            continue
+        local = candidate.get("local") or {}
+        role = str(local.get("role") or "")
+        text = str(candidate.get("text") or "")
+        try:
+            heading_score = float(local.get("heading_score") or 0.0)
+        except (TypeError, ValueError):
+            heading_score = 0.0
+        if role in {"furniture", "caption", "footnote", "page_number"} or len(text) > 140 or heading_score <= 0.3:
+            kept.append(candidate)
+    scoped = {**payload, "title_candidates": kept}
+    scoped["candidate_scope"] = {
+        "mode": "toc_delta",
+        "before": len(payload.get("title_candidates") or []),
+        "after": len(kept),
+    }
+    return scoped
 
 
 DEFAULT_TOC_PAGE_LIMIT = 6
@@ -449,6 +519,10 @@ class _StructureStopped(ProviderError):
     """另一批复核失败后中止：不再发送任何新请求。"""
 
 
+class _StructurePaused(ProviderError):
+    """用户在模型请求边界暂停：不是失败，已完成的响应可在继续时复用。"""
+
+
 def _structure_json(content: str) -> dict[str, Any]:
     try:
         return extract_json(content)
@@ -528,6 +602,8 @@ def run_structure_job(
     job_id: str,
     options: dict[str, Any],
     provider: TextProvider,
+    *,
+    should_pause: Callable[[], bool] | None = None,
 ) -> dict[str, Any]:
     """异步结构分析：本地识别目录页 → （可选）模型提取目录 → 模型校对标题。
 
@@ -551,6 +627,11 @@ def run_structure_job(
     state_lock = threading.RLock()
     # 任一复核批失败即置位：阻止排队/拆批重试再发新请求（避免失败后继续付费）。
     stop_event = threading.Event()
+
+    def check_pause() -> None:
+        """在模型请求边界响应“暂停”：当前在途请求跑完即挂起，已完成响应可复用。"""
+        if should_pause is not None and should_pause():
+            raise _StructurePaused("结构校对已暂停")
 
     def emit(text: str, *, level: str = "info", progress: float | None = None) -> None:
         with state_lock:
@@ -576,6 +657,7 @@ def run_structure_job(
             return self._call(system, user, images)
 
         def _call(self, system: str, user: str, images: list[dict[str, Any]]) -> ProviderResponse:
+            check_pause()
             if stop_event.is_set():
                 raise _StructureStopped("结构复核已中止，未发送新请求")
             request = {"scope": current_scope, "system": system, "user": user, "status": "started", "started_at": utc_now(),
@@ -708,6 +790,10 @@ def run_structure_job(
     extract_toc = bool(options.get("extract_toc"))
     proofread = bool(options.get("proofread"))
     auto_apply = bool(options.get("auto_apply"))
+    mode = str(options.get("mode") or "").strip().casefold()
+    if mode not in STRUCTURE_MODES:
+        mode = ""
+    discover_unlisted = mode == "fine"
     try:
         store.update_job(project_id, job_id, status="running", progress=0.02, message="载入规范文档")
         document = signals.enrich_furniture_evidence(store.load_document(project_id), store.project_path(project_id))
@@ -720,7 +806,7 @@ def run_structure_job(
             if options.get("reuse_job_id"):
                 previous = store.get_job(project_id, options["reuse_job_id"])
                 previous_audit = previous.get("result", {}).get("audit", {})
-                if previous["kind"] == "structure_ai" and previous["status"] == "failed" and previous_audit.get("context_key") == audit["context_key"]:
+                if previous["kind"] == "structure_ai" and previous["status"] in {"failed", "paused"} and previous_audit.get("context_key") == audit["context_key"]:
                     cached_requests = {item["request_key"]: item for item in previous_audit.get("requests", [])
                         if item.get("status") in {"responded", "reused"} and item.get("cacheable") and item.get("request_key")
                         and "response_metadata" in item and "response_content" in item}
@@ -767,6 +853,7 @@ def run_structure_job(
             else:
                 payload["local_toc_draft"] = [entry.to_dict() for entry in local_entries]
                 emit(f"AI 核对源目录：第 {'、'.join(map(str, pages))} 页，共 {line_count} 个文本块；本地草稿仅作线索", level="model", progress=0.35)
+                check_pause()
                 proposed_toc, response = extract_toc_with_provider(payload, audited_provider)
                 proposed_toc = [{**item, "level_source": "model"} for item in proposed_toc]
                 emit(f"模型提取到 {len(proposed_toc)} 条目录条目", level="success", progress=0.55)
@@ -783,6 +870,7 @@ def run_structure_job(
         hierarchy_plan: dict[str, Any] = {}
         hierarchy_review: dict[str, Any] = {}
         selection_stats: dict[str, Any] = {}
+        candidate_scope: dict[str, Any] | None = None
         full_review = False
         if proofread:
             if not baseline:
@@ -799,9 +887,20 @@ def run_structure_job(
             model_payload["visual_evidence"] = visual_evidence(document, store.source_path(project_id), {
                 **model_payload, "options": payload["options"], "toc_pages": [],
             }) if options.get("use_vision") else []
+            # 粗校只校准“与目录相关或本地可疑”的候选；未收录的正常标题属于精校的
+            # “未收录小节发现”，粗校不发送，避免把全面结构推理当成默认目标。
+            if mode in STRUCTURE_MODES and baseline and not discover_unlisted:
+                model_payload = scope_calibration_candidates(model_payload)
+                candidate_scope = model_payload.get("candidate_scope")
             # AI 模式不把弱规则结果作为独立答案，避免较高的自报置信度压制语义判断。
             # 免费本地校准仍保留独立入口。模型模式下所有结构建议待确认。
             by_block: dict[str, dict[str, Any]] = {}
+            # 档位下本地证据（误标剔除/精确层级）先落为建议，模型结论再覆盖同块；
+            # 模型对“保持不变的标题”不产出建议，因此本地误标结论不会被静默丢掉。
+            if mode in STRUCTURE_MODES:
+                for value in reconciliation.get("suggestions") or []:
+                    value.setdefault("automatic", False)
+                    by_block[value["block_id"]] = value
             model_payload["decision_protocol"] = STRUCTURE_PROMPT_VERSION
             candidates = model_payload["title_candidates"]
             title_count = len(candidates)
@@ -820,6 +919,7 @@ def run_structure_job(
                 level = "warning" if kind == "adaptive_fallback" else "model"
                 emit(text, level=level, progress=0.80 if kind == "adaptive_done" else 0.70 + span)
 
+            check_pause()
             if planning_mode == "adaptive":
                 hierarchy_plan, plan_meta = adaptive.run_adaptive_planning(
                     model_payload, audited_provider, on_event=on_adaptive_event, stop_event=stop_event)
@@ -940,6 +1040,7 @@ def run_structure_job(
             proofread_started = time.monotonic()
             if chunks and concurrency <= 1:
                 for index, chunk in enumerate(chunks, start=1):
+                    check_pause()
                     emit(f"标题角色复核第 {index}/{total_batches} 批 · {len(chunk)} 个候选（串行）· 已用时 {time.monotonic() - proofread_started:.0f}s", level="model",
                          progress=0.82 + 0.10 * done_batches / total_batches)
                     _, values, batch_skipped, batch_decisions = run_batch(index, chunk)
@@ -959,6 +1060,7 @@ def run_structure_job(
                     while next_index <= total_batches or running:
                         # 有界提交：未完成的批次不超过并发上限；失败后不再提交新批次，避免继续付费。
                         while next_index <= total_batches and len(running) < concurrency:
+                            check_pause()
                             running[pool.submit(run_batch, next_index, chunks[next_index - 1])] = next_index
                             next_index += 1
                         done, _ = wait(list(running), return_when=FIRST_COMPLETED)
@@ -1031,12 +1133,22 @@ def run_structure_job(
             value["document_updated_at"] = document.updated_at
         # 持久化建议与决策，关闭应用后未处理项仍可恢复。
         store.save_structure_suggestions(project_id, job_id, suggestions, document.updated_at)
-        applied = [asdict(value) for value in apply_automatic(store, project_id, suggestions)] if auto_apply else []
+        if auto_apply and mode in STRUCTURE_MODES:
+            # 用户档位下“全部自动应用”：粗校/精校都直接落地，安全网是可逆补丁 + 修订历史。
+            applied_patches = apply_all_suggestions(store, project_id, suggestions)
+        elif auto_apply:
+            applied_patches = apply_automatic(store, project_id, suggestions)
+        else:
+            applied_patches = []
+        applied = [asdict(value) for value in applied_patches]
         applied_ids = {item["block_id"] for item in applied}
         for value in suggestions:
             value["automatic"] = value["block_id"] in applied_ids
         if applied:
-            emit(f"自动应用 {len(applied)} 条高置信修正（阈值 {AUTO_THRESHOLD}）", level="success", progress=0.95)
+            if mode in STRUCTURE_MODES:
+                emit(f"已自动应用 {len(applied)} 项修正（可撤销）", level="success", progress=0.95)
+            else:
+                emit(f"自动应用 {len(applied)} 条高置信修正（阈值 {AUTO_THRESHOLD}）", level="success", progress=0.95)
         # 自动应用的建议直接记为已采用。
         if applied_ids:
             store.decide_structure_suggestions(
@@ -1052,6 +1164,21 @@ def run_structure_job(
             "proposed_toc": proposed_toc,
             "suggestions": suggestions,
             "applied": applied,
+            "mode": mode or "legacy",
+            # 界面单行摘要读这个扁平对象（误标剔除 / 补齐漏标 / 层级修正）。
+            "categories": {
+                "removed": sum(1 for value in suggestions if value["operation"] == "set_type"),
+                "added": sum(1 for value in suggestions if value["operation"] == "set_title"),
+                "level": sum(1 for value in suggestions if value["operation"] == "set_level"),
+            },
+            "calibration": {
+                "mode": mode or "legacy",
+                "removed_mistags": sum(1 for value in suggestions if value["operation"] == "set_type"),
+                "added_missing": sum(1 for value in suggestions if value["operation"] == "set_title"),
+                "level_corrections": sum(1 for value in suggestions if value["operation"] == "set_level"),
+                "applied": len(applied),
+                "candidate_scope": candidate_scope,
+            },
             "reconciliation": reconciliation,
             "skipped_suggestions": skipped_model,
             "decisions": list(decisions.values()),
@@ -1100,6 +1227,14 @@ def run_structure_job(
         emit("结构分析完成", level="success", progress=1.0)
         store.update_job(project_id, job_id, status="completed", progress=1.0, result=result)
         return result
+    except _StructurePaused as paused:
+        # 暂停不是失败：已完成的模型请求已写入审计并可复用，继续时只补剩余部分。
+        with state_lock:
+            activity.append({"at": utc_now(), "level": "info", "text": str(paused)})
+        store.update_job(project_id, job_id, status="paused",
+                         message="已暂停；已完成的模型请求会在继续时复用。",
+                         activity=activity, result={"audit": audit, "mode": mode, "paused": True})
+        return {"paused": True, "mode": mode, "audit": audit}
     except Exception as error:
         activity.append({"at": utc_now(), "level": "error", "text": str(error)})
         store.update_job(project_id, job_id, status="failed", error=str(error), activity=activity, message=str(error))
@@ -1593,7 +1728,7 @@ def _assert_block_fresh(block: Block, operation: str, before: Any) -> None:
         raise StorageError("该建议已过时：文本内容已被其它修订修改，请重新校准后再采用。")
 
 
-def _prepare_patch(document: Document, proposal: dict[str, Any], source: str) -> StructurePatch:
+def _prepare_patch(document: Document, proposal: dict[str, Any], source: str, *, automatic_policy: str = "strict") -> StructurePatch:
     """校验并就地修改内存文档，不写盘；供单项与批量共用。
 
     批量调用时先对所有项完成校验，任何一项非法都不会留下部分提交。
@@ -1615,10 +1750,11 @@ def _prepare_patch(document: Document, proposal: dict[str, Any], source: str) ->
     handler = _OPERATIONS.get(operation)
     if handler is None:
         raise StorageError(f"不支持的结构变更：{operation}")
-    if automatic and (operation not in ALLOWED_AUTOMATIC_OPERATIONS or confidence < AUTO_THRESHOLD):
+    if automatic and automatic_policy == "strict" and (operation not in ALLOWED_AUTOMATIC_OPERATIONS or confidence < AUTO_THRESHOLD):
         raise StorageError("该变更不符合自动应用边界。")
-    if automatic and operation == "set_type" and (block.type != "title" or str(proposal.get("after")) != "paragraph"):
+    if automatic and automatic_policy == "strict" and operation == "set_type" and (block.type != "title" or str(proposal.get("after")) != "paragraph"):
         # 自动应用只允许“将已有标题降为正文”这类可逆操作，不能自动改成列表/脚注。
+        # automatic_policy="all" 是粗校/精校档位下的“全部自动应用”，仍只走可逆补丁。
         raise StorageError("自动应用只允许将标题降为正文。")
     before, after_value = handler(block, proposal["after"])
     # 结构改动会改变译文的上下文（角色/层级），让已存在的译文进入 stale 待复核。
@@ -1645,11 +1781,11 @@ def apply_patch(store: ProjectStore, project_id: str, proposal: dict[str, Any], 
         return patch
 
 
-def apply_patch_batch(store: ProjectStore, project_id: str, proposals: Iterable[dict[str, Any]], *, source: str = "user") -> list[StructurePatch]:
+def apply_patch_batch(store: ProjectStore, project_id: str, proposals: Iterable[dict[str, Any]], *, source: str = "user", automatic_policy: str = "strict") -> list[StructurePatch]:
     """原子批量：先全部校验，再一次性保存文档与修订记录。"""
     with store.document_lock(project_id):
         document = store.load_document(project_id)
-        patches = [_prepare_patch(document, proposal, source) for proposal in proposals]
+        patches = [_prepare_patch(document, proposal, source, automatic_policy=automatic_policy) for proposal in proposals]
         if not patches:
             return []
         _persist_structure(store, project_id, document, patches)
@@ -1662,6 +1798,18 @@ def apply_automatic(store: ProjectStore, project_id: str, proposals: Iterable[di
     if not automatic:
         return []
     return apply_patch_batch(store, project_id, automatic, source="ai")
+
+
+def apply_all_suggestions(store: ProjectStore, project_id: str, proposals: Iterable[dict[str, Any]]) -> list[StructurePatch]:
+    """粗校/精校档位的“全部自动应用”：不再逐条确认，仍然只写可逆补丁。
+
+    patch 仍标记 ``automatic=True`` 以便审计；这里只放开自动边界（strict→all），
+    每个改动都能在修订历史里撤销。删除/合并正文的操作不在结构补丁范围内。
+    """
+    values = [proposal for proposal in proposals if str(proposal.get("operation")) in MANUAL_OPERATIONS]
+    if not values:
+        return []
+    return apply_patch_batch(store, project_id, values, source="ai", automatic_policy="all")
 
 
 def revert_patch(store: ProjectStore, project_id: str, patch_id: str) -> StructurePatch:

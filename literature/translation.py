@@ -35,8 +35,9 @@ DEFAULT_CHUNK_FIELDS = 12
 # 单个字段（段落/单元格/图题/脚注）超过这个字符数时，预先沿句子边界拆成临时子段，
 # 让它在失败重试时可以继续缩批，而不是「只有一个 segment，不可再分」直接失败。
 MAX_SEGMENT_CHARS = 1200
-DEFAULT_PARALLEL_WORKERS = 4
+DEFAULT_PARALLEL_WORKERS = 8
 MAX_PARALLEL_WORKERS = 16
+# 注：旧作业的并发数从冻结快照读回（不会被新默认值改写），恢复不会变快变慢。
 # AIMD 并发自适应（additive increase / multiplicative decrease）：
 # 连续成功若干块后并发 +1 探测回用户设定的上限；收到 429 后并发减半。
 # 服务级信号量（RequestCoordinator）负责多作业共享同一服务的总量上限，

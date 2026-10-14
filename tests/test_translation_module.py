@@ -318,8 +318,8 @@ class TranslationModuleTests(unittest.TestCase):
         manager = JobManager(self.store, None)
         # 结构作业只关心“要不要重复启动”；模型解析在这里不影响守卫，用最小桩替代。
         manager.service_id_for = lambda role, explicit="": "svc"
-        manager.provider_from = lambda service_id, provider_input=None: MockProvider()
-        manager.models = types.SimpleNamespace(get=lambda service_id: {"model": "mock", "name": "Mock"})
+        manager.provider_from = lambda service_id, provider_input=None, model="": MockProvider()
+        manager.models = types.SimpleNamespace(get=lambda service_id: {"model": "mock", "name": "Mock"}, roles=lambda: {})
         manager.executor.submit = lambda fn: None
         self.store.create_job(self.project_id, "structure_ai", {"toc_entries": 0}, {})
         with self.assertRaises(StorageError):
@@ -409,8 +409,8 @@ class TranslationModuleTests(unittest.TestCase):
 
         manager = JobManager(self.store, None)
         manager.service_id_for = lambda role, explicit="": "svc"
-        manager.provider_from = lambda service_id, provider_input=None: MockProvider()
-        manager.models = types.SimpleNamespace(get=lambda service_id: {"model": "mock", "name": "Mock"})
+        manager.provider_from = lambda service_id, provider_input=None, model="": MockProvider()
+        manager.models = types.SimpleNamespace(get=lambda service_id: {"model": "mock", "name": "Mock"}, roles=lambda: {})
         manager.executor.submit = lambda fn: None
         barrier = threading.Barrier(2)
         created: list[str] = []
@@ -575,9 +575,9 @@ class TranslationModuleTests(unittest.TestCase):
     def test_thinking_disabled_respects_explicit_config(self):
         from literature.providers import OpenAICompatibleProvider
 
-        def make(style: str, effort: str) -> OpenAICompatibleProvider:
+        def make(style: str, effort: str, model: str = "qwen3.8-flash-next") -> OpenAICompatibleProvider:
             config = ProviderConfig.preset(
-                "custom", model="qwen3.8-flash-next", base_url="https://relay.example/v1",
+                "custom", model=model, base_url="https://relay.example/v1",
                 reasoning_style=style, reasoning_effort=effort,
             )
             return OpenAICompatibleProvider(config, api_key="k")
@@ -586,15 +586,23 @@ class TranslationModuleTests(unittest.TestCase):
         self.assertEqual(make("qwen_thinking", "").with_thinking_disabled().config.reasoning_effort, "off")
         self.assertEqual(make("qwen_thinking", "on").with_thinking_disabled().config.reasoning_effort, "on")
         self.assertEqual(make("glm_thinking", "").with_thinking_disabled().config.reasoning_effort, "off")
-        # openai_effort 协议：降到 minimal，显式 high 例外；未声明协议的服务不发送未知字段。
+        # openai_effort 协议：降到 minimal，显式 high 例外。
         self.assertEqual(make("openai_effort", "").with_thinking_disabled().config.reasoning_effort, "minimal")
         self.assertEqual(make("openai_effort", "high").with_thinking_disabled().config.reasoning_effort, "high")
-        untouched = make("", "")
+        # 未声明协议：按模型名自动推断（本机默认服务就是 qwen3 系列思考模型）。
+        auto = make("", "").with_thinking_disabled()
+        self.assertEqual(auto.config.reasoning_style, "qwen_thinking")
+        self.assertEqual(auto.config.reasoning_effort, "off")
+        # 推断不出协议的服务保持原样：不发送任何未声明字段。
+        untouched = make("", "", model="gpt-4o-mini")
         self.assertIs(untouched.with_thinking_disabled(), untouched)
         # 原对象不被修改。
         original = make("qwen_thinking", "")
         original.with_thinking_disabled()
         self.assertEqual(original.config.reasoning_effort, "")
+        auto_original = make("", "")
+        auto_original.with_thinking_disabled()
+        self.assertEqual(auto_original.config.reasoning_style, "")
 
 
 if __name__ == "__main__":

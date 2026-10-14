@@ -103,6 +103,10 @@ def main() -> int:
             checks.append(["冻结 revision 与 manifest 一致", health.get("runtime_revision") == manifest.get("runtime_revision")])
             checks.append(["能力包含 parse_lifecycle_v1", "parse_lifecycle_v1" in (health.get("capabilities") or [])])
             checks.append(["能力包含 task_history_v1", "task_history_v1" in (health.get("capabilities") or [])])
+            # 模型配置重设计（/v1/models 自动回填 + 任务级思考档位）新增的能力标记。
+            checks.append(["能力包含 model_services_v2", "model_services_v2" in (health.get("capabilities") or [])])
+            # 服务商 → 模型两层结构（任务内选模型）新增的能力标记。
+            checks.append(["能力包含 model_services_v3", "model_services_v3" in (health.get("capabilities") or [])])
         headers = {"x-literature-token": "frozen-test"}
         projects = httpx.get(f"http://127.0.0.1:{port}/projects", headers=headers, timeout=10, trust_env=False).json()
         checks.append(["冻结 API /projects 可用", isinstance(projects, list) and len(projects) == 2])
@@ -112,6 +116,12 @@ def main() -> int:
         checks.append(["冻结 API 默认保留期 90 天/1000 条", settings == {"retention_days": 90, "max_records": 1000}])
         tasks = httpx.get(f"http://127.0.0.1:{port}/ocr/tasks", headers=headers, params={"scope": "active"}, timeout=10, trust_env=False).json()
         checks.append(["冻结 API 任务中心可用", isinstance(tasks.get("items"), list) and "counts" in tasks])
+        # 免保存拉取模型的新端点：空 Base URL 应报业务错误（4xx/5xx），绝不能是 404（旧产物没有该路由）。
+        probe = httpx.post(f"http://127.0.0.1:{port}/model-services/models", headers=headers, json={"base_url": ""}, timeout=10, trust_env=False)
+        checks.append(["冻结产物含 /model-services/models 免保存拉取端点", probe.status_code != 404])
+        # v3 契约：roles 是 {service_id, model} 绑定对象（旧产物是字符串）。
+        service_view = httpx.get(f"http://127.0.0.1:{port}/model-services", headers=headers, timeout=10, trust_env=False).json()
+        checks.append(["冻结产物 v3：roles 是绑定对象", isinstance(service_view.get("roles", {}).get("structure"), dict)])
         migrated = httpx.post(f"http://127.0.0.1:{port}/projects/{project_id}/parse/migrate", headers=headers, timeout=20, trust_env=False).json()
         checks.append(["冻结进程按证据迁移旧前缀资源", bool(migrated.get("migrated"))])
         checks.append(["迁移 mode=legacy_prefix", migrated.get("mode") == "legacy_prefix"])

@@ -2,6 +2,202 @@
 
 > 本日志记录可验证事实、架构决策和仍需外部条件完成的验收。更新代码时应同步更新本文，避免把“已编码”“已测试”和“已用真实服务验证”混为一谈。
 
+> 条目为「最新在上」。2026-10-14 前的手工「第N轮」编号是遗留标记（历史上出现过重复，已用 `·` 后缀消歧），不再续编；新条目用 `## YYYY-MM-DD · 主题`，引用时以上文日期与主题为准。
+
+## 2026-10-14 · 模型配置 v3：服务商 → 模型两层 + 任务内选模型（已编码/全量测试/已重打包安装；未真机验收、未 commit）
+
+状态：**已编码 / 已全量自动测试 / 前端已构建 / 已重打包并安装**；**未真机验收**（真实服务拉取/批量追加/真实模型端到端），未启动客户端、未 commit。
+
+背景：上一轮已能读 `/v1/models` 自动回填，但每个模型仍是一个独立「服务」条目、与服务商并列；用户要求像 Cindy 一样「服务商 → 模型」层级，并能在任务界面直接选模型、调思考强度。
+
+### 数据与后端（lead）
+
+- 磁盘结构升级到 v2：`services[]` 是一个服务商（`service_id`/`name`/`preset`/`base_url` + `models[]`），每个模型自带 `context_window`/`max_output_tokens`/`temperature`/单价/思考配置；`roles` 由字符串改为 `{service_id, model}` 绑定对象。旧 v1 扁平结构（服务=模型、roles 字符串）在读取时自动迁移（`_normalize_provider`/`_normalize_role`），无需人工处理；`_write` 统一落 v2。
+- 新增 `ModelEntry`/`ModelProvider` 数据类；`ModelServiceStore` 增 `role_binding`/`get_model`/`resolve_model`/`has_model`；`config_for(service_id, model="")` 按服务商+模型构造 provider（model 留空用第一个模型，无模型时报明确错误）。
+- 任务级模型选择：`TranslationJobInput`/`StructureJobInput`/`StructureAIAnalyze`/`InstantInput`/`ReviewInput` 新增 `model`；`JobManager` 增 `model_for(role, service_id, explicit)`；翻译/结构/即时/译审四条路径都先解析 `service_id + model` 再建 provider，模型随任务快照冻结（暂停/恢复沿用）。
+- 接口：`ModelServiceInput` 改收 `models[]`（保留 flat 兼容字段）；`ModelRolesInput` 接受绑定对象或字符串；`check` 收可选 `model`。
+- 能力标记增 `model_services_v3`（后端 `/health` + 前端 `requiredCapabilities`），旧 sidecar 会被前端拦下。
+
+### 前端（Orca worker 实现，lead 复核构建）
+
+- `types.ts`/`modelServices.ts`：`ModelService`=服务商（含 `models[]`），roles 为绑定对象并兼容旧字符串；新增 `entryFor`/`roleBinding`；`check(serviceId, model?)`；payload 改 `{name,preset,base_url,models}`；旧 localStorage 迁移为 1 服务商 + 1 模型。
+- `ModelServicesDialog.tsx` 重写：左侧服务商列表（名称/基础 URL/N 个模型/已绑定），右侧表单 + **内嵌模型列表**（每行模型 ID + 上下文/输出/单价徽标 + 思考水平 + 删除，可展开编辑协议/预算）；「获取模型列表」选择器多选追加、跳过已存在 ID。
+- 新增 `TaskModelPicker.tsx`（服务商→模型分组 + 思考水平）；接入翻译 `ScopeDialog` 与结构「AI 校准」；`App.tsx`/`ReviewWorkspace.tsx` 启动请求带 `service_id + model + reasoning_mode + reasoning_budget`。
+
+### 验证
+
+- 全量 `pytest` **531 passed**。新增用例：v1→v2 自动迁移；服务商多模型 CRUD + 角色绑定（对象/字符串两种形态）；任务级 model 覆盖（`config_for` 与请求体都拿到显式模型，不传则用角色绑定）。
+- `tsc --noEmit` 通过；Vite 构建 `frontend/dist/assets/index-CvCfA0qc.js` 835.05 kB / `index-BdX3qNuA.css` 86.61 kB。
+
+### 打包与安装
+
+- PyInstaller sidecar：revision `7bc59bd7e095f6011c59`，sha256 **`8b52da841b5c795dacb12ef7a2d7d80dc8a5b71a85a40c0a01ed3324c3dcccdc`**，size 42968080；`dist/sidecar/`、`src-tauri/binaries/`、`.app/Contents/MacOS/` 三处逐字节相同。
+- Tauri：`node scripts/tauri-run.cjs build ...` → `Literature.app` 55 MiB（54.59 MiB）；adhoc codesign 验证通过。
+- 冻结冒烟：`tests/manual/frozen_sidecar_check.py` **15/15 PASS**（本轮新增 `model_services_v3` 与「roles 是绑定对象」两项）。
+- 安装：旧版（sidecar `2a6f107a…`）备份到 `launcher/.rollback-Literature-2a6f107a.app`，`zsh scripts/setup_macos_launcher.sh --app-only` 装入 `launcher/Literature.app`；安装后与构建包 `diff -rq` 完全一致、codesign 通过；客户端未启动。
+
+### 未验收
+
+- 真实服务「获取模型列表 → 批量追加 → PUT」「`check` 带 model」「角色绑定读写」未真机验收；真实模型端到端（结构+翻译）未做。
+- 未启动客户端、未 commit。
+
+## 2026-10-14 · 模型配置重设计（/v1/models 自动回填）+ 任务级思考档位
+
+状态：**已编码 / 已全量自动测试 / 前端已构建 / 已重打包并安装**；**未真机验收**（真实外部服务拉取、Keychain 链路、真实模型端到端联调未做），未启动客户端、未 commit。
+
+用户诉求：读 Base URL 的 `/v1/models` 自动带出模型名与上下文，不再手填；参照 Cindy 的模型配置交互重做界面；并支持任务开始前临时调整思考水平。
+
+### 后端（lead）
+
+- `providers.list_remote_models` 改为返回结构化元数据：`id` / `context_window` / `max_output_tokens` / 输入输出单价。字段别名收敛：`context_length`、`context_window`、`max_context_length`、`max_model_len`、`max_input_tokens`、`n_ctx`、`top_provider.context_length`；输出上限 `max_output_tokens` / `max_completion_tokens` / `max_tokens`；OpenRouter `pricing.prompt/completion`（每 token）自动换算为「每百万」。Base URL 容错：已含 `/v1` 直接请求 `/v1/models`，否则先 `/v1/models` 再 `/models`。
+- 新增 `POST /model-services/models`（`ModelProbeInput`：`base_url` / `api_key` / `service_id`）：**新建服务未保存时即可拉取**，无需先落盘；旧 `POST /model-services/{id}/models` 保留兼容。
+- 模型服务新增 `context_window` 字段（持久化、clamp 0–10M），供回填与展示。
+- 新增能力标记 `model_services_v2`（`/health` 与前端 `requiredCapabilities` 同步），旧 sidecar 会被前端「前后端版本不一致」拦下。
+- **任务级思考档位**：`TranslationJobInput` / `StructureJobInput` / `StructureAIAnalyze` 新增 `reasoning_mode`（`inherit`/`off`/`low`/`medium`/`high`）与 `reasoning_budget`（0=按服务）。`providers.apply_reasoning_mode` 把档位翻成协议字段（openai_effort 直接映射；qwen/glm 开关型 low/medium/high→开启；off→各协议关思考取值；推断不出协议则不改），由 `JobManager._apply_task_reasoning` 在 `apply_thinking_policy`（探测/缓存）之前落到 provider；档位随任务快照冻结，暂停/恢复沿用。
+- 修 `with_thinking_disabled` 缺陷：显式 `openai_effort` 下 `low/medium` 会被默认关思考改写成 `minimal`；现改为「显式协议 + 显式非空强度」一律尊重（`high` 的旧行为不变）。
+
+### 前端（Orca worker 实现，lead 复核构建）
+
+- 新增 `workbench/ThinkingLevelField.tsx`：任务前思考水平共用组件（档位下拉 + 低/中/高时显示预算）。
+- 重写 `ModelServicesDialog.tsx`：对齐 Cindy——「获取模型列表」按钮、选择器（已选 X / 共 Y、多选批量添加）、条目徽标（模型 ID / 上下文 / 最大输出 / 单价，无报价显示「该路由没有报价数据」）、Base URL 失焦或保存密钥后自动拉取、刷新提示「已发现 N 个新模型 / 已是最新」、测试连接「连接成功（{{ms}}ms）」、错误按 401/403/404/429/余额/上下文超长/模型不存在归一；表单分层为基础区 + 折叠高级区（上下文「留空按 200K 保守默认」、输出上限、温度、单价 / 百万 tokens、思考协议）。
+- `ScopeDialog`（翻译启动）与结构校对「AI 校准」区增设思考水平选择；`App.tsx` 两条翻译启动路径与 `ReviewWorkspace.tsx` 结构作业请求都发送 `reasoning_mode` / `reasoning_budget`（inherit 时预算强制归零）。
+- 样式：`mineru.css` 增 `model-picker` / `thinking-level` / `model-advanced` 等。
+
+### 验证
+
+- 全量 `pytest` 两次 exit 0。新增 `tests/test_model_services.py`：元数据解析（含 OpenRouter 风格）、未保存拉取、任务级档位映射、`openai_effort` low/medium 不被改写、结构作业端到端请求体带 `reasoning_effort=high`、作业快照冻结。顺手修掉 `test_structure_job_probes_thinking_fields_once_then_uses_cache` 的 teardown 竞态（等作业终态再退出）。
+- `tsc --noEmit` 通过；Vite 生产构建 `frontend/dist/assets/index-zQLoj23n.js` 830.83 kB / `index-DWoiT7ke.css` 85.35 kB。
+
+### 打包与安装
+
+- PyInstaller sidecar：sha256 **`2a6f107aabf3a089991d069e9ef6c05c1428ecedb6c06a433cb2347c50e6d951`** / size **42960016** / revision `7fbfa572a60325c73196`，与 `src-tauri/binaries/manifest.json` 一致；`dist/sidecar/`、`src-tauri/binaries/`、`.app/Contents/MacOS/` 三处逐字节相同。
+- Tauri 打包：`node scripts/tauri-run.cjs build --config src-tauri/tauri.bundle.conf.json --config '{"build":{"beforeBuildCommand":""}}'` → `Literature.app` 55 MiB（54.58 MiB）；`codesign --force --deep --sign -` 后 `codesign --verify --deep --strict` 通过（adhoc）。
+- 冻结 sidecar 隔离冒烟：`tests/manual/frozen_sidecar_check.py` **13/13 PASS**（新增「能力包含 `model_services_v2`」与「冻结产物含 `POST /model-services/models` 免保存拉取端点」两项）。
+- 安装：旧版（sidecar `258845a2…`）`ditto` 备份到 `launcher/.rollback-Literature-258845a2.app`（已验证含旧 sidecar，不提交），再 `zsh scripts/setup_macos_launcher.sh --app-only`。安装后：内置 sidecar sha/size 与 manifest 一致、与构建包 `diff -rq` **完全一致**、codesign 通过；客户端未启动。
+
+### 未验收
+
+- 真实外部服务 `/v1/models` 拉取、批量添加、Keychain 保存链路未真机验收（本机 Keychain 读取被凭据访问策略拦下，未能实拉 yellowbee 网关）。
+- 真实模型端到端联调（结构 + 翻译各一）未做；错误归一依赖后端回显文本关键词，极端中转站文案可能原样透传。
+- 已安装但未启动、未 commit；真实耗时/质量对比未做。
+
+## 2026-10-14 · 翻译提速验收 + 重打包安装（worker 验收轮：真实 provider 探测已通过，已安装，未启动/未 commit）
+
+状态：**已真实验收（provider 探测）/ 已重打包 / 已安装**；未启动客户端、未 commit；关思考后的真实翻译耗时/质量对比未做。
+
+承接同日「翻译提速：真正关掉思考」条目的遗留验收项与安装。
+
+### 验收结果
+
+- 全量 `pytest` **522 passed**（复跑）。
+- `tsc --noEmit` 通过；Vite 生产构建产物与上轮记录逐字一致（`index-hceY4Yzm.js` 820.60 kB / `index-DtKO1_xS.css` 82.81 kB）。本机仍无 PATH node，借用 Playwright 内置 node（v24.18.1）。
+- **真实 provider 探测（上轮未验收项，本轮补上）**：`.venv/bin/python tests/manual/thinking_probe_check.py` 对翻译角色服务 `yellowbee`（qwen3.8-flash-next）实测：生效写法为 `qwen_chat_template_kwargs`（`chat_template_kwargs.enable_thinking=false`），确认请求 reasoning=0 / output=8 / 占比 **0%**（阈值 25%），退出码 0。Keychain 读取在 worker 会话可用（上轮被安全策略拦下）。注：探测脚本只验证不落缓存；缓存仍由客户端首个作业按同一生产代码探测后写入，属预期行为。
+- 未跑同书开/关思考 A/B 与译文质量抽检（需要启动客户端后由用户观察）。
+
+### 打包与安装
+
+- PyInstaller sidecar：sha256 **`258845a224e7e0f15e60506998d4198197198665eea6f7812243d2c6bcd06b88`** / size **42954896** / revision `d17a3834dc4746073211`，与 `src-tauri/binaries/manifest.json` 一致；`dist/sidecar/`、`src-tauri/binaries/`、`.app/Contents/MacOS/` 三处逐字节相同。
+- Tauri 打包：`node scripts/tauri-run.cjs build --config src-tauri/tauri.bundle.conf.json --config '{"build":{"beforeBuildCommand":""}}'` → `Literature.app` 54.58 MiB；`codesign --force --deep --sign -` 后 `codesign --verify --deep --strict` 通过（adhoc）。
+- 冻结 sidecar 隔离冒烟：`tests/manual/frozen_sidecar_check.py` **11/11 PASS**（revision 与 manifest 逐字符一致）。
+- 安装：按第二十五轮同口径处理——先结束构建目录孤儿 sidecar（PID 33326/33327，非已安装客户端），旧版（sidecar `61bbe834…`）`ditto` 备份到 `launcher/.rollback-Literature-61bbe834.app`（已验证含旧 sidecar，不提交），再 `zsh scripts/setup_macos_launcher.sh --app-only`（脚本为 zsh；首次调用因审批超时未执行，重试成功）。安装后：内置 sidecar sha/size 与 manifest 及构建包一致、与构建包 `diff -rq` **完全一致**、codesign 通过；客户端未启动。
+- 包内容：本轮翻译提速全部改动 + 工作树中既有的结构校对粗校/精校等未提交改动（自最新工作树重建，无丢失）。
+
+## 2026-10-14 · 翻译提速：真正关掉思考（自动推断 + 字段探测 + 400 安全网）（已编码/全量自动测试/前端构建；未真实 provider 验收、未重打包/安装/commit）
+
+用户提出「如何大幅度提升目前的翻译速率」。结论：瓶颈不是并发/分块/磁盘，而是**思考没被真正关掉**。
+
+### 定位依据（本机真实库实测，`library/*/literature.sqlite`）
+
+- `sincerity and authenticity` job `8631b4bf…`：77 请求 / 661 目标块 / 679 s（16 并发）；平均输入 1,362 token、平均输出 **9,824** token，其中 **reasoning 9,202（93.7%）**；反推单请求平均延迟 ≈152 s。
+- `Between Cultures`（130 请求 / 27 min）、`Once upon a future time`（5,741 s 只译完 13/2564 块）同型，reasoning 占比均约 93%。
+- 根因：`model-services.json` 里该服务的 `reasoning_style` 为空（`preset: custom`），而 `with_thinking_disabled()` 当时的规定是「只在用户显式声明协议时才改写字段」，因此整条链路调用它等于 no-op。
+
+### 已实现
+
+- **自动推断**（`literature/providers.py`）：新增 `infer_reasoning_style` / `resolve_reasoning_style` / `disabled_reasoning_effort`。未声明协议（`""` 或新增的 `auto`）时按模型名前缀保守推断（`qwen3*`/`qwq` → qwen，`glm-4*` → glm，`gpt-5*`/`o*` → openai_effort）；推断不出则不发送任何字段（与改造前一致）。`REASONING_STYLES` 增加 `auto`。显式 `on`/`high` 仍被尊重。
+- **字段写法探测**（`probe_thinking_off` + `_settle_streaming_support` + `_probe_attempt`）：不同 OpenAI 兼容服务认不同的关思考写法（`enable_thinking` / `chat_template_kwargs.enable_thinking` / `reasoning_effort=minimal` / GLM `thinking`）。先用一个**不带思考字段**的 `max_tokens=96` 请求把「服务是否支持流式」定下来（拒流式则把 `_stream_disabled` 提升到父 provider），再逐候选探测，按 `reasoning_tokens/output_tokens ≤ 25%` 判定真正生效的那个。三态返回：成功 dict / `{}`（都不生效）/ `None`（临时故障——限流、5xx、超时、401/403/404、无 usage、已挂协调钩子——**不写缓存**）。探测子 provider 自建的连接池会释放，不误关作业连接池。
+- **探测缓存**（`literature/model_services.py`）：新增 `thinking-policy.json`（`_POLICY_LOCK` 保护、tmp+replace 写入），按 `service_id\0model` 记录 `variant`。`thinking_policy` 只认带 `probed_at` 的条目；改模型/Base URL/协议或换密钥（`PUT /model-services/{id}/key`）会失效缓存。负缓存语义为 `NO_REASONING_STYLE="none"`——**明确不发任何字段**（含 `thinking_budget`），避免严格服务每个作业白付一次 400。
+- **400 安全网**（`_complete`）：请求体带思考字段且收到 400 时，先按 `_EXPLICIT_REASONING_FIELD_HINT` 判断错误体是否**点名**了思考字段——点名则先摘字段（保住流式），否则先回退非流式；两个闸门单调，最多 3 次请求收敛，不会死循环。这保证「离线/未探测」或「服务不认字段」都不会让整本书在第一个分块就失败。
+- **接入四路**（`literature/api.py::JobManager.apply_thinking_policy`）：翻译作业与结构作业（`allow_probe=True`，探测前把「正在探测关思考字段」写入任务 message）、单块译审、即时翻译（只读缓存不探测）；`/structure/analyze-ai` 旧端点一并接入。随请求传入的临时 provider（无 service_id）不做缓存/探测。
+  - 结构路径的 `allow_probe=True` 是 2026-10-14 补的：真实网关拒收顶层 `enable_thinking`（只认 `chat_template_kwargs`），若结构路径只读缓存，则**只用结构校对的用户永远预热不了缓存**，会一直发被拒的默认字段、靠安全网摘掉 → 思考始终开着。回归测试 `test_structure_job_probes_thinking_fields_once_then_uses_cache`（已用禁用探测实验验证：去掉 `allow_probe=True` 该用例会失败）。
+- **并发默认 4 → 8**：`TranslationJobInput.parallel_workers`、`App.tsx`、`ScopeConfirm` 默认值与 `DEFAULT_PARALLEL_WORKERS` 同步；上限仍 16，AIMD 在 429 时减半。
+- **前端**（`ModelServicesDialog.tsx`）：思考模式协议下拉新增「自动识别（推荐）」并解释探测与缓存行为。
+
+### 验证
+
+- 全量 `pytest` **523 passed**（新增 `tests/test_thinking_policy.py` 29 项 + `tests/test_model_services.py` 1 项结构路径探测缓存回归：推断、字段变体、探测成功/静默忽略/只回思维链/临时故障中止/401 不写缓存/无 usage 不写缓存/已挂钩子不探测/连接池释放、400 安全网四种组合、缓存三态与失效、`NO_REASONING_STYLE` 负缓存、并发默认值）。
+- `tsc --noEmit` 通过；Vite 生产构建 `frontend/dist/assets/index-hceY4Yzm.js`（820.60 kB）/ `index-DtKO1_xS.css`（82.81 kB）。
+- 三轮独立 reviewer 复核：第 1 轮指出并修掉「400 分支把流式回退误判成字段被拒」「只回思维链被当瞬时故障」；第 2 轮指出并修掉「401/403/404 被当字段被拒并永久负缓存」「探测与流式回退耦合」「负缓存仍漏发 `thinking_budget`」；第 3 轮全部复核通过，并补上「无 usage 不写缓存」「已挂协调钩子不探测」「通用 400 优先保关思考」三项。
+- 新增人工脚本 `tests/manual/thinking_probe_check.py`：对真实服务跑探测并打印生效写法与实测 reasoning 占比（结论直接复用生产 `probe_thinking_off`，与客户端行为一致）。
+
+### 未验收（不混写）
+
+- 关思考后的**真实翻译耗时对比与译文质量抽检**未做（需启动客户端跑一本书）；「6–10×」仍是推理值，不是实测值。
+- 未做真实视觉模型 / 真实 MinerU Token 多格式验收（与本轮无关，沿用上一条目的遗留项）。
+- **已安装包不含本条目最后的「结构路径也探测」修复**：reviewer 打包的 sidecar revision `d17a3834dc4746073211` 在我补上 `_claim_structure_job` 的 `allow_probe=True` 之前构建。翻译链路不受影响；只用结构校对的用户需要重新打包才能预热缓存。
+
+> 真实验收与安装由 Orca reviewer worker（`m978l6kooeglwjn8cwsfbpiw`）于同日补完：
+> 实测 `thinking_probe_check.py` 对 yellowbee（qwen3.8-flash-next）确认生效写法为
+> `qwen_chat_template_kwargs`（`chat_template_kwargs.enable_thinking=false`），
+> 请求 reasoning=0 / output=8（占比 0%，阈值 25%），退出码 0；sidecar
+> sha256 `258845a2…` / revision `d17a3834dc4746073211`，冻结冒烟 11/11 PASS，
+> Tauri 包 54.58 MiB，adhoc 签名校验通过，已安装（客户端未启动）。
+> 这同时证明「顶层 `enable_thinking` 被网关拒收、靠探测换到第二候选」的主链路有效。
+> 改动仍**未 commit**。
+
+## 2026-10-14（第二十五轮）：打包并安装客户端（用户授权“打包安装”，未启动、未 commit）
+
+把第二十四轮的粗校/精校结构校对打进可交付 macOS 客户端并安装。本轮**只做构建与安装验证**，未启动客户端、未调真实 MinerU/provider、未提交 Git。
+
+### 构建输入与产物（安装前可复核）
+
+- 冻结 revision：`literature/runtime_revision.py::source_revision()` = **`784fe85c3b42b3a2f86e`**（工作树含第二十四轮未提交改动）。
+- 前端产物：`tsc --noEmit` 通过；Vite 生产构建 `frontend/dist/assets/index-CC7R9OzN.js`（820105 B）、`index-DtKO1_xS.css`（82807 B）。构建用 `~/Library/Caches/ms-playwright-go/1.57.0/node`（v24.11.1）——ChatGPT.app 内置 node 因 code signature Team ID 与 rollup 原生模块不一致，无法 `dlopen`。
+- PyInstaller sidecar：`.venv/bin/python scripts/build_sidecar.py` → sha256 **`61bbe8346b055931172ac30e34989b3887fd977711bab7c32b4bce6828f87def`** / size **42944912**，与 `src-tauri/binaries/manifest.json` 一致；`dist/sidecar/literature-sidecar`、`src-tauri/binaries/literature-sidecar-aarch64-apple-darwin`、`.app/Contents/MacOS/literature-sidecar` **三处逐字节相同**。
+- Tauri 打包：`node scripts/tauri-run.cjs build --config src-tauri/tauri.bundle.conf.json --config '{"build":{"beforeBuildCommand":""}}'`（`NAPI_RS_NATIVE_LIBRARY_PATH` 指向 `@tauri-apps/cli-darwin-arm64@2.12.1` 的 `.node`）；`src-tauri/target/release/bundle/macos/Literature.app` **54.57 MiB**；`codesign --force --deep --sign -` 后 `codesign --verify --deep --strict` 通过（adhoc）。
+- 版本确认：Tauri v2 把前端资源压缩编进 `Contents/MacOS/literature`，`strings -a` 取出的资源名为 **`assets/index-CC7R9OzN.js`**，与 `frontend/dist/assets/` 一致。
+
+### 验证
+
+- **冻结 sidecar 隔离冒烟**（临时库/runtime、假 Token、不联网）：`tests/manual/frozen_sidecar_check.py` **11/11 PASS**（`/health` revision 与 manifest 逐字符一致、能力含 `parse_lifecycle_v1`/`task_history_v1`、未解析资源覆盖、任务中心、旧前缀迁移 3/6）。
+- 额外实测冻结二进制 `/health`：revision `784fe85c3b42b3a2f86e` 与 manifest 一致，能力含 **`structure_modes_v1`** / **`structure_pause_v1`**。
+- 安装：`scripts/setup_macos_launcher.sh --app-only`。安装前确认 `launcher/Literature.app` 及其内置后端未运行，并结束早前会话遗留的**构建目录孤儿 sidecar**（PID 21063/21064，指向 `src-tauri/target/release/bundle/macos/…`，非已安装客户端）；旧版（sidecar `b05922f76a9dcd62c62a0e839ef9d1d8cb44b307ba907c0fc74cd09162e6c4eb`）用 `ditto` 备份到 `launcher/.rollback-Literature-b05922f7.app`（已验证含旧 sidecar，不提交）。安装后：内置 sidecar sha256 与 manifest 一致、与构建包 `diff -rq` **完全一致**、`codesign --verify --deep --strict` 通过。
+
+### 未验收 / 未做（不混写）
+
+- 安装过程**未启动客户端**（安装后客户端于 11:42 由用户启动，当前运行新版本）；本轮未做系统性的原生窗口点击/交互验收（结构 UI 已在第二十四轮隔离浏览器 36/36 验收）。
+- 未调真实 MinerU/付费模型；**粗校/精校的真实模型 A/B 仍未验证**，不能声称准确率/token 收益。
+- 无 Developer ID 签名、无公证、无 Intel/通用包，不能把本地 adhoc 包当作对外发行包。
+- 未提交 Git。仍遗留：早期会话的开发态 smoke sidecar（PID 4098，`/tmp/lit-smoke`）与 Vite 开发服务器（PID 4105）仍在运行，不影响安装，本轮未动。
+
+## 2026-10-14（第二十四轮）：AI 结构校对重定义为「目录锚定的差分校准」（Lead 实施后端 + 收口，前端由 Orca designer worker 实施；已编码/全量自动测试/前端构建/隔离真实浏览器；未真实模型 A/B、未重打包/安装/提交）
+
+用户提出三点重构：①目标不是全面结构校准，而是「以原书目录为基准，剔除误标 + 补齐漏标 + 按目录自身父子层级对齐」；②给出粗校/精校两档（多花 token/时间换质量）；③UI 只留「选档 + 开始/暂停/继续」，其余决策由程序完成。经与用户确认：**精校范围收窄为「粗校 + 未收录小节发现 + 整树父子复核」，不做全量配对复核、默认关视觉**（用户明确否掉了 full 第二遍）；**修正建议全部自动应用**（推翻旧原则「AI 修改全部待确认」，改为依赖可逆补丁 + 修订历史撤销）；**后端与前端一次做到位**。用户逐定：前端交现有 Orca `designer` worker，后端由 Lead 直接实施（不开新 worker）。
+
+### 后端已实现（Lead）
+
+- **档位**：`literature/structure.py` 新增 `STRUCTURE_MODES = ("coarse", "fine")` 与 `structure_mode_config(mode, advanced, base)`——把档位展开为内部执行参数（两档同为：本地优先、`toc_extraction=auto`、`proofread_mode=off`、`planning_mode=global`、关视觉、`auto_apply=True`；精校额外 `discover_unlisted=True`）。`advanced` 仅作诊断/兼容覆盖，显式给出才生效。`api.py::StructureJobInput` 新增 `mode: Literal["coarse","fine"] | None = None`（`None` 保持旧行为，兼容既有调用/测试）与 `advanced: dict`；`_claim_structure_job` 在服务端展开预置（用户不再传复核模式/规划策略/目录来源/并发/视觉/超时）。
+- **候选收窄（粗校）**：`scope_calibration_candidates(payload)` 只保留「目录命中块 ∪ 本地建议涉及块」，丢弃看起来正常的未收录标题（那是精校的未收录小节发现）；形态明显可疑的未收录标题仍保留。仅在 `mode ∈ {coarse,fine}` 且存在目录且非精校时生效；目录为空的书自动回退「无目录模式」（本地信号 + 一次有界模型请求），不弹窗打断。
+- **全部自动应用**：`apply_all_suggestions` 以 `automatic_policy="all"` 放开 strict 自动边界（不再限制 `set_title` 与 `confidence < AUTO_THRESHOLD`），patch 仍标 `automatic=True`（审计可追溯），仍只走可逆补丁；旧 `auto_apply` 高级路径保持 strict 语义不变。档位下**本地证据先落建议、模型结论覆盖同块**（模型对「保持不变」不产建议，因此本地误标结论不会被静默丢掉）。
+- **暂停/继续**：新增 `_StructurePaused` 与 `check_pause()`；`run_structure_job(..., should_pause=...)` 在模型请求边界（`AuditedProvider._call`、目录提取前、规划前、每个复核批前/提交前）响应暂停。暂停时 job `status="paused"`（不是 failed），已完成响应已在审计中；继续 = `reuse_job_id` 指向暂停作业，复用判据从 `failed` 扩展到 `{failed,paused}`，只补剩余请求。`api.py` 新增 `POST /projects/{id}/structure/jobs/{id}/pause` 与 `/resume`；`_claim_structure_job` 建 `pause_event`、`run` 传 `should_pause`、`finally` 清理。
+- **结果**：`result` 新增 `mode`、`categories`（扁平单行摘要：`removed`/`added`/`level`）与 `calibration`（详细诊断：含 `applied`/`candidate_scope`），供单一主控卡展示一行摘要；`/health` 新增能力 `structure_modes_v1`、`structure_pause_v1`。
+- **自动采用已确认目录基准**：主流程只传 `mode` 时，`_claim_structure_job` 若发现项目存有 `structure/baseline` 且调用方未显式给 `toc`/`extract_toc`，则自动以其为基准并置 `extract_toc=False`（不重跑目录提取）；显式给出时不覆盖。这样前端只需传 `mode`，仍能尊重用户已确认/修订过的原书目录。
+
+### 验证
+
+- 全量 `pytest` **485 passed**（本轮新增 15 项）。新增 `tests/test_structure_modes_v2.py` 11 项：档位预置、精校与粗校仅差 mode 标志、`advanced` 覆盖但 mode 不变、未知档拒绝、候选收窄（保留目录相关+可疑、丢弃正常未收录）、strict 拒绝模型式 `set_title` 而 all 落地 `set_title`+`set_type` 且可撤销、粗校只向模型发送目录相关候选并全部自动应用（无待确认，`categories` 为 `{removed:0,added:2,level:1}`）、请求边界暂停后继续复用已完成请求（`reused_requests ≥ 1`）、请求前暂停后继续、旧参数无 `mode` 保持原行为且建议仍待确认。`tests/test_model_services.py` 新增 4 项：`mode` 解析 + 全自动应用后 pending 为空且含 `categories`、`/resume` 由 paused 配置重建并完成、主流程只传 mode 时自动采用已确认基准（`extract_toc=False`、`baseline_source=confirmed`）、**顶层显式字段覆盖档位预设**（`proofread_mode=full`/`planning_mode=adaptive`/`proofread_concurrency=3`/`toc_extraction=model` 均生效）。
+- 兼容回归：既有 470 项全部通过（`run_structure_job` 新增参数全为默认值；`_prepare_patch`/`apply_patch_batch` 新增 `automatic_policy` 默认 `strict`；`StructureJobInput` 新字段默认 `None`/`{}`）。
+- **前端**（designer worker；Lead 收口）：`OutlinePane.tsx` 重构为「模型字段 → 分段控件（粗校/精校）→ 单一主按钮（开始/暂停/继续校准）→ 运行面板（进度+阶段+已用时+一行摘要）→ 高级选项折叠」；`ReviewWorkspace.tsx` 状态收敛为 `mode` + `options`，主流程只传 `{service_id, mode}`，高级改动才随顶层字段覆盖；`review.css` 配套。
+- **前后端字段对齐（Lead）**：新增 `result.categories`（`removed`/`added`/`level`）作界面单行摘要，保留 `calibration` 作详细诊断；`toc_entries` 继续在 `reconciliation` 里。发现并修复两处集成缺陷：(1) 前端把高级覆盖发在**顶层字段**，而原后端只读 `advanced` 容器，导致覆盖被档位预设静默盖掉 → 改用 pydantic `model_fields_set` 识别显式字段，只有显式字段才覆盖预设（新增回归）；(2) `runModel` 的 `.then` 返回了轮询 Promise，使 `posting.current` 直到轮询结束才释放，**暂停按钮被永久拦截** → 改为不返回轮询 Promise（`void pollStructureJob(...)`）。
+- `tsc --noEmit` **通过**（exit 0）；Vite 生产构建通过（`index-CC7R9OzN.js` 820105 B、`index-DtKO1_xS.css` 82807 B）。两处均用 `~/Library/Caches/ms-playwright-go/1.57.0/node`（v24.11.1）执行（ChatGPT.app 内置 node 因 code signature Team ID 不匹配，无法 dlopen rollup 原生模块）。
+- **隔离真实浏览器**（路由 stub，不联网/不读 Keychain/不调付费模型）：`tests/manual/structure_ui_browser_check.py` **36/36 PASS、0 脚本错误**。重写后的 `structure_ui_check.cjs` 覆盖：分段控件与默认主按钮、主流程只传 `mode`、高级覆盖下发、运行中主按钮变可点「暂停」且 POST pause、暂停态变「继续校准」且继续带 `reuse_job_id`、耗时真实递增、一行摘要 `categories`（目录 312 · 剔除误标 8 · 补齐漏标 5 · 层级修正 21）、详情内覆盖口径/规划路径/本地目录来源、思考配置保存。原解析全流程浏览器验收 `parse_ui_browser_check.py` 仍全部通过（仅保存失败用例刻意 abort 的 `net::ERR_FAILED`，0 脚本错误）。
+
+### 未验收 / 未做（不混写）
+
+- 未重打包 sidecar/Tauri、未安装/启动客户端；未做原生窗口点击验收。
+- **未用真实模型做粗校/精校 A/B**，不能声称准确率、真实耗时或 token 收益；「粗校候选收窄」与「全部自动应用」的质量影响均未经真实样本验证。
+- 未改真实库 `raw`/`document`/`translations`；未提交 Git。
+
 ## 2026-10-14（第二十三轮）：重新打包并安装客户端（用户授权安装，未启动、未 commit）
 
 把前两轮的结构校对提速 + 项目列表轮询提速 + 资源清理一起打进可交付的 macOS 客户端并安装。本轮**只做了构建与安装验证**，未启动客户端、未调真实 MinerU/provider、未提交 Git。
@@ -88,7 +284,7 @@
 
 **验证（追加）**：全量 `pytest` **470 passed**；两项均在真实库上量了前后耗时（只读，未改真实库业务数据；`project_state` 是派生缓存，可重建）。**未验收（不混写）**：未重新打包/安装客户端；本机无 Node，前端本轮无改动也未重跑 `tsc`；未跑真实浏览器端到端。
 
-## 2026-10-14（第二十一轮）：翻译提速四项（对齐 TBL 策略，已编码/自动测试，未真实验收）
+## 2026-10-14（第二十一轮·翻译提速）：翻译提速四项（对齐 TBL 策略，已编码/自动测试，未真实验收）
 
 承接与 TranslateBooksWithLLMs 的比对结论（token 计量分块、AIMD 并发、prefix caching、思考控制），四项全部落在翻译主链路。未调用真实模型、未重打包客户端、未改库。
 
@@ -111,7 +307,7 @@
 - 未重建冻结 sidecar 与 Tauri 包，已安装客户端仍是旧引擎；`polish`/串行衔接等旧行为回归未逐项手测。
 - prompt 契约升为 `translation-v3`：恢复 v2 冻结任务会打 warning 并沿用冻结语义（现有逻辑，未新增迁移）。
 
-## 2026-10-14（第二十一轮）：在最新完整版本上安装自适应结构校对更新（用户授权安装，未 commit）
+## 2026-10-14（第二十一轮·安装自适应）：在最新完整版本上安装自适应结构校对更新（用户授权安装，未 commit）
 
 用户明确授权“在最新版本的程序之上安装这个更新”，要求不得用旧包覆盖其他模块的新改动。本轮未调真实模型/MinerU、未改真实库/raw、未启动客户端、未 commit/push。
 
