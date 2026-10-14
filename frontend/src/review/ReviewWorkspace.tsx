@@ -284,33 +284,39 @@ export default function ReviewWorkspace(props: Props) {
   // 主流程只传 mode（服务端按档位派生 preset）；高级选项里被显式改动的字段才随请求覆盖。
   const runModel = () => {
     if (posting.current || structureRunning || busy) return;
-    const resuming = structureJob?.status === "paused";
-    const reuseJobId = structureJob && ["failed", "paused"].includes(structureJob.status) ? structureJob.job_id : "";
-    let tocPages: number[];
-    try {
-      if (!Number.isInteger(options.requestTimeoutSeconds) || options.requestTimeoutSeconds < 30 || options.requestTimeoutSeconds > 1800) throw new Error("模型响应等待时间应为 30 至 1800 秒。");
-      tocPages = options.extractToc ? selectedPages() : [];
-      if (!options.extractToc && !parseTocDraft(tocText).length) throw new Error("请填写已确认目录，每行按“# 标题”格式标记层级。");
-    } catch (error) { setMessage((error as Error).message); return; }
-    if (!options.extractToc) persistBaseline(parseTocDraft(tocText), "confirmed");
+    const resumable = structureJob && ["failed", "paused"].includes(structureJob.status) ? structureJob.job_id : "";
+    const resuming = Boolean(resumable);
     const preset = MODE_PRESET[mode];
     const body: Record<string, unknown> = { service_id: taskModel.service_id, model: taskModel.model, mode, reasoning_mode: reasoningMode, reasoning_budget: reasoningMode === "inherit" ? 0 : reasoningBudget };
-    if (reuseJobId) body.reuse_job_id = reuseJobId;
-    if (!options.extractToc) { body.extract_toc = false; body.toc = parseTocDraft(tocText); }
-    if (tocPages.length) body.toc_page_indexes = tocPages;
-    if (options.requestTimeoutSeconds !== 600) body.request_timeout_seconds = options.requestTimeoutSeconds;
-    if (options.useVision !== preset.useVision) body.use_vision = options.useVision;
-    if (options.autoApply !== preset.autoApply) body.auto_apply = options.autoApply;
-    if (options.reviewMode !== preset.reviewMode) body.proofread_mode = options.reviewMode;
-    if (options.tocExtraction !== preset.tocExtraction) body.toc_extraction = options.tocExtraction;
-    if (options.proofreadConcurrency !== 2) body.proofread_concurrency = options.proofreadConcurrency;
-    if (options.planningMode !== preset.planningMode) body.planning_mode = options.planningMode;
+    if (!resumable) {
+      // 只有新建任务才在客户端校验/拼装参数；续跑交给后端 resume 契约复用已存配置，避免与暂停时快照不一致。
+      let tocPages: number[];
+      try {
+        if (!Number.isInteger(options.requestTimeoutSeconds) || options.requestTimeoutSeconds < 30 || options.requestTimeoutSeconds > 1800) throw new Error("模型响应等待时间应为 30 至 1800 秒。");
+        tocPages = options.extractToc ? selectedPages() : [];
+        if (!options.extractToc && !parseTocDraft(tocText).length) throw new Error("请填写已确认目录，每行按“# 标题”格式标记层级。");
+      } catch (error) { setMessage((error as Error).message); return; }
+      if (!options.extractToc) persistBaseline(parseTocDraft(tocText), "confirmed");
+      if (!options.extractToc) { body.extract_toc = false; body.toc = parseTocDraft(tocText); }
+      if (tocPages.length) body.toc_page_indexes = tocPages;
+      if (options.requestTimeoutSeconds !== 600) body.request_timeout_seconds = options.requestTimeoutSeconds;
+      if (options.useVision !== preset.useVision) body.use_vision = options.useVision;
+      if (options.autoApply !== preset.autoApply) body.auto_apply = options.autoApply;
+      if (options.reviewMode !== preset.reviewMode) body.proofread_mode = options.reviewMode;
+      if (options.tocExtraction !== preset.tocExtraction) body.toc_extraction = options.tocExtraction;
+      if (options.proofreadConcurrency !== 2) body.proofread_concurrency = options.proofreadConcurrency;
+      if (options.planningMode !== preset.planningMode) body.planning_mode = options.planningMode;
+    }
     posting.current = true;
     setStructureRunning(true);
     if (!resuming) setProposedToc(null);
     setStructureJob(null);
     setMessage(resuming ? "继续结构校准：已完成的部分直接复用" : "结构校准任务已启动");
-    api<Job>(`/projects/${projectId}/structure/jobs`, { method: "POST", body: JSON.stringify(body) })
+    const request = resumable
+      // 续跑真正复用后端 resume 契约：服务端用暂停/失败作业的审计做请求级复用，只补剩余请求。
+      ? api<Job>(`/projects/${projectId}/structure/jobs/${resumable}/resume`, { method: "POST" })
+      : api<Job>(`/projects/${projectId}/structure/jobs`, { method: "POST", body: JSON.stringify(body) });
+    request
       .then(job => {
         if (!mounted.current) return;
         trackedJob.current = job.job_id;

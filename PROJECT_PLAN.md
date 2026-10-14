@@ -1,6 +1,6 @@
 # Literature 总体计划
 
-> 本文件是新对话、上下文压缩或新 agent 接手后的第一入口。最后更新：2026-10-14。
+> 本文件是新对话、上下文压缩或新 agent 接手后的第一入口。最后更新：2026-10-15。
 
 ## 1. 产品定义
 
@@ -131,7 +131,7 @@ Tauri macOS 客户端（单实例）
 
 **当前里程碑**：M1 客户端导入与 MinerU 全能力接入。M2 结构校对（粗校/精校）与 M3 结构化翻译已具备可用纵向切片，见 §6。
 
-**最近一轮（2026-10-14 · 模型配置修复 + 设置归口）**：修复「服务商 → 模型」被搞反的问题——旧配置里同 Base URL 的多条服务现按 `(base_url, preset)` **自动合并成一个服务商、多个模型**（本机实际：`yellowbee` + 5 个模型）；模型配置从独立弹窗归口到「设置 → 模型服务」，设置改为**左侧分类导航 + 右侧内容**（通用/模型服务/翻译/结构校对/文档解析/用量与预算/关于）。全量 `pytest` **531 passed**；`tsc` + Vite 构建通过（`index-CmV7aqQK.js`）。**已重打包并安装并启动**：sidecar revision `240c5d81bf4da6f4ae18`（sha256 `fa41c17c…`），冻结冒烟 15/15，装入 `launcher/Literature.app`（旧版备份 `.rollback-Literature-8b52da84.app`）；迁移已实际生效。**未真机验收**（真实拉取/任务链路），详见日志。
+**当前交付（2026-10-15）**：后端安全/数据保护、探测预算与前端交互优化已打包安装到 `launcher/Literature.app`（sidecar `e1ed2b4c7ac4496e7851`）。全量 pytest 567 passed；tsc/Vite 通过；冻结冒烟 15/15，安装内容与构建包一致。真实服务与原生交互待用户验收；交付证据见开发日志。
 
 **能力标记**：以 `/health` 的 `capabilities` 为唯一事实来源（`literature/api.py`）——当前含 `intake_items_v1`、`structure_review_v2`、`model_services_v1/v2/v3`、`structure_modes_v1`、`structure_pause_v1`、`translation_engine_v2`、`translation_safety_v1`、`parse_lifecycle_v1`、`task_history_v1` 等。前端启动时校验关键标记，不静默复用旧后端。
 
@@ -140,7 +140,7 @@ Tauri macOS 客户端（单实例）
 - 真实模型验收：粗校/精校真实模型 A/B（准确率/耗时/token 收益均未验证）；真实视觉模型准确率与费用；真实 MinerU Token 多格式在线 smoke test。
 - 模型配置真实验收：真实外部服务 `/v1/models` 拉取、批量添加、Keychain 保存链路与真实模型端到端（结构 + 翻译）联调未做。
 - 翻译关思考的提速量化：探测已实测通过（reasoning 0%），但**同一本书开/关思考的耗时对比与译文质量抽检仍未做**。
-- 已安装包（sidecar revision `240c5d81…`）包含本轮全部后端改动（服务商按 Base URL 合并 + 任务级模型/思考覆盖）。
+- 当前安装包已包含 2026-10-15 源码改动；保留旧版回滚包，尚未由用户完成真实窗口验收。
 - 原生客户端：系统性的原生窗口点击/拖放/另存/Finder 与 PDF 解码视觉验收（AX 自动化不可靠）；无 Developer ID / 公证 / Intel 包。
 - 迁移前旧项目 `pages[].width/height` 为 0，缺「从封存 raw 重建规范文档」入口。
 - 大型非 PDF 的本地自动切分；当前依赖 MinerU 转换并反馈限制。

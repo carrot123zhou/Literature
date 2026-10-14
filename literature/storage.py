@@ -32,6 +32,34 @@ def safe_name(value: str) -> str:
     return value[:120] or "Untitled"
 
 
+# BCP-47 风格的宽松白名单：两到三段字母数字子标签，用 - 或 _ 连接。
+# locale 会直接拼进 translations/<locale>/... 路径，因此必须拒绝路径分隔符、
+# `..`、绝对路径等写法，否则可读写项目目录之外的 translation.json。
+_LOCALE_RE = re.compile(r"^[A-Za-z]{2,3}(?:[_-][A-Za-z0-9]{1,8})*$")
+
+
+def safe_locale(value: str) -> str:
+    """校验语言标签；非法取值一律拒绝，不把用户输入当路径片段。"""
+    text = str(value or "").strip()
+    if not text or len(text) > 35 or not _LOCALE_RE.match(text):
+        raise StorageError(f"非法的语言标记：{value!r}")
+    return text
+
+
+def locale_dir_under(project: Path, locale: str) -> Path:
+    """返回项目内的 ``translations/<locale>``，并做真实路径包含校验。
+
+    仅靠字符串白名单不够：若 ``translations`` 或 ``translations/<locale>`` 是符号链接，
+    或路径中任何一级指向项目之外，拼接结果仍可能逃逸。这里对解析后的真实路径做
+    前缀包含判定，不满足就拒绝（含已有目录符号链接的情形）。
+    """
+    project_root = project.resolve()
+    target = (project_root / "translations" / safe_locale(locale)).resolve()
+    if target == project_root or project_root not in target.parents:
+        raise StorageError(f"语言目录超出项目范围：{locale!r}")
+    return target
+
+
 def sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
@@ -47,6 +75,9 @@ def atomic_text(path: Path, text: str) -> None:
     try:
         with os.fdopen(handle, "w", encoding="utf-8") as output:
             output.write(text)
+            output.flush()
+            # 先落盘再 rename：否则崩溃/断电可能让 os.replace 之后的文件内容仍在页缓存里丢失。
+            os.fsync(output.fileno())
         os.replace(temporary, path)
     except Exception:
         Path(temporary).unlink(missing_ok=True)
@@ -200,7 +231,10 @@ class ProjectStore:
     @staticmethod
     def _translation_summary(project: Path, locale: str) -> dict[str, Any] | None:
         """读取持久化的轻量摘要，避免项目列表为每份文档重算全部译文状态。"""
-        path = project / "translations" / locale / "summary.json"
+        try:
+            path = locale_dir_under(project, locale) / "summary.json"
+        except StorageError:
+            return None
         try:
             value = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
@@ -329,9 +363,12 @@ class ProjectStore:
 
         document_path = project / "document" / "document.json"
         if document_path.is_file():
-            document = Document.from_dict(json.loads(document_path.read_text(encoding="utf-8")))
-            document.title = title
-            self.save_document(document)
+            # 与结构补丁/撤销共用同一把文档锁：重命名也要改 document.title，
+            # 否则并发写会互相覆盖（调用方已持锁时 RLock 可重入）。
+            with self.document_lock(project_id):
+                document = Document.from_dict(json.loads(document_path.read_text(encoding="utf-8")))
+                document.title = title
+                self.save_document(document)
         self._remember_project(project_id, project)
         return self._describe_project(project, value)
 
@@ -476,7 +513,7 @@ class ProjectStore:
         return Document.from_dict(json.loads(path.read_text(encoding="utf-8")))
 
     def translation_path(self, project_id: str, locale: str) -> Path:
-        return self.project_path(project_id) / "translations" / locale / "translation.json"
+        return locale_dir_under(self.project_path(project_id), locale) / "translation.json"
 
     def load_translation(self, project_id: str, locale: str = "zh-CN") -> TranslationLayer:
         path = self.translation_path(project_id, locale)
@@ -491,13 +528,13 @@ class ProjectStore:
 
     def save_translation_summary(self, project_id: str, locale: str, summary: dict[str, Any]) -> None:
         """写入项目列表可廉价读取的译文统计摘要。"""
-        path = self.project_path(project_id) / "translations" / locale / "summary.json"
+        path = locale_dir_under(self.project_path(project_id), locale) / "summary.json"
         atomic_json(path, {**summary, "locale": locale, "updated_at": utc_now()})
 
     # --- 术语表版本 ---------------------------------------------------------
 
     def glossary_versions_path(self, project_id: str, locale: str) -> Path:
-        return self.project_path(project_id) / "translations" / locale / "glossary_versions.json"
+        return locale_dir_under(self.project_path(project_id), locale) / "glossary_versions.json"
 
     def list_glossary_versions(self, project_id: str, locale: str) -> list[dict[str, Any]]:
         path = self.glossary_versions_path(project_id, locale)

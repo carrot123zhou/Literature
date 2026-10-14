@@ -24,8 +24,8 @@ from .model_services import MODEL_ROLES, ROLE_STRUCTURE, ROLE_TRANSLATION, Model
 from .models import UsageRecord
 from .ocr import MinerUService, delete_mineru_token, get_mineru_token, save_mineru_token
 from .parse_backends import describe_backends
-from .providers import PROVIDER_PRESETS, NO_REASONING_STYLE, OpenAICompatibleProvider, ProviderConfig, ProviderError, apply_reasoning_mode, delete_api_key, disabled_reasoning_effort, get_api_key, normalize_proxy_environment, probe_thinking_off, resolve_reasoning_style, save_api_key
-from .request_coordinator import BudgetExhausted, RequestCoordinator, prompt_cost_estimator
+from .providers import PROVIDER_PRESETS, NO_REASONING_STYLE, PROBE_MAX_TOKENS, OpenAICompatibleProvider, ProviderConfig, ProviderError, apply_reasoning_mode, delete_api_key, disabled_reasoning_effort, get_api_key, normalize_proxy_environment, probe_thinking_off, resolve_reasoning_style, save_api_key
+from .request_coordinator import BudgetExhausted, RequestCoordinator, ServiceBusyError, prompt_cost_estimator
 from .runtime_revision import RUNTIME_REVISION
 from .storage import ProjectStore, StorageError
 from .structure_signals import enrich_furniture_evidence
@@ -35,6 +35,50 @@ from .uploads import UploadStore
 
 
 logger = logging.getLogger(__name__)
+
+# 探测请求在“价格未知”时的保守预算占额：仅用于避免“未知= 0 免费”地逐次放行，
+# 不是对真实费用的上限承诺。有限预算下遇到一次不可量化费用后会直接停止后续探测。
+PROBE_UNKNOWN_COST_USD = 0.001
+
+
+def probe_prompt_cost_estimator(config: Any) -> Callable[[int], float]:
+    """探测专用的保守成本估算：输出按**子 provider** 的 max_output_tokens（探测已缩为
+    PROBE_MAX_TOKENS）计，而不是父 provider 的全输出上限。价格未知时返回 0
+    （由调用方决定是否用保守占额，不能用 0 冒充“免费”）。
+    """
+    input_price = getattr(config, "input_price_per_million", None)
+    output_price = getattr(config, "output_price_per_million", None)
+    max_output = max(1, int(getattr(config, "max_output_tokens", 0) or PROBE_MAX_TOKENS))
+
+    def estimate(prompt_chars: int) -> float:
+        if input_price is None or output_price is None:
+            return 0.0
+        input_tokens = prompt_chars // 2 + 200
+        return (input_tokens * input_price + max_output * output_price) / 1_000_000
+    return estimate
+
+
+def probe_cost_is_unknown(response: Any, error: Exception | None) -> bool:
+    """本次探测是否“费用无法量化”（需要记未知/阻止继续探测）。
+
+    - 有 usage（token>0）且算出 estimated_cost → 已知。
+    - 有 usage 但无单价（estimated_cost=None）→ 未知。
+    - **无 usage（token=0）→ 未知**：即使有单价也会算出 0，但那是“没量到”，不能当零成本。
+    - 无响应：显式 possible_charge 优先；否则 status=0 或非 4xx（除 408）保守按可能计费；
+      4xx（除 408）确定不计费。
+    """
+    if response is not None:
+        tokens = int(getattr(response, "input_tokens", 0) or 0) + int(getattr(response, "output_tokens", 0) or 0)
+        if tokens <= 0:
+            return True
+        return getattr(response, "estimated_cost", None) is None
+    if error is None:
+        return True
+    explicit = getattr(error, "possible_charge", None)
+    if explicit is not None:
+        return bool(explicit)
+    status = int(getattr(error, "status_code", 0) or 0)
+    return not (400 <= status < 500 and status != 408)
 
 
 def application_support() -> Path:
@@ -579,6 +623,8 @@ class JobManager:
     def apply_thinking_policy(
         self, provider: Any, service_id: str, *, allow_probe: bool = False,
         on_probe: Callable[[], None] | None = None,
+        on_probe_usage: Callable[[Any, Exception | None], None] | None = None,
+        project_id: str = "", budget: float = 0.0,
     ) -> Any:
         """把“确定性任务关思考”落到 provider 上，返回可能被替换的 provider。
 
@@ -606,12 +652,67 @@ class JobManager:
         if cached is None:
             if not allow_probe or not hasattr(provider, "with_reasoning"):
                 return provider
+            if budget > 0 and project_id:
+                # 探测也是花钱的真实请求：预算已用尽、账本不可读、或已有未知/待对账费用时
+                # 不再探测（不写缓存）。未知费用不能被当成 0 反复放行。
+                try:
+                    summary = self.store.usage_summary(project_id)
+                except Exception:
+                    logger.info("用量账本不可读，跳过关思考探测：service=%s model=%s", service_id, model)
+                    return provider
+                if (float(summary.get("estimated_cost") or 0) >= budget
+                        or int(summary.get("unknown_cost_records") or 0) > 0
+                        or int(summary.get("pending_cost_records") or 0) > 0):
+                    logger.info("项目预算已用尽或已有未知费用，跳过关思考探测：service=%s model=%s", service_id, model)
+                    return provider
             if on_probe is not None:
                 try:
                     on_probe()
                 except Exception:
                     logger.exception("探测提示写入失败（不影响探测）")
-            probed = probe_thinking_off(provider)
+            probe_state = {"stop": False}
+
+            def prepare_child(child: Any) -> None:
+                # 用子 provider 的 config（max_output_tokens 已缩为 PROBE_MAX_TOKENS）估算，
+                # 不按父 provider 的全输出上限预留；价格未知时用保守占额而不是 0。
+                estimator = probe_prompt_cost_estimator(getattr(child, "config", config))
+
+                def probe_cost_of(chars: int) -> float:
+                    value = estimator(chars)
+                    return value if value > 0 else (PROBE_UNKNOWN_COST_USD if budget > 0 else 0.0)
+
+                self.coordinator.attempt_hooks_for(
+                    service_id, child, project_id=project_id, budget=budget, cost_of=probe_cost_of,
+                )
+
+            def settle_child(child: Any, response: Any) -> None:
+                state = getattr(child, "_attempt_state", None)
+                handle = getattr(state, "handle", None) if state is not None else None
+                if state is not None:
+                    state.handle = None
+                if handle is not None:
+                    self.coordinator.reconcile(
+                        handle, actual_cost=(getattr(response, "estimated_cost", None) if response is not None else None),
+                    )
+
+            def probe_on_attempt(response: Any, error: Exception | None) -> None:
+                if on_probe_usage is not None:
+                    try:
+                        on_probe_usage(response, error)
+                    except Exception:
+                        logger.exception("探测用量回调失败（不影响探测判断）")
+                if budget > 0 and probe_cost_is_unknown(response, error):
+                    # 有限预算下出现不可量化费用后停止后续探测（unknown 不能被当成 0 反复放行）。
+                    probe_state["stop"] = True
+
+            def probe_should_continue() -> bool:
+                return not probe_state["stop"]
+
+            probed = probe_thinking_off(
+                provider, on_attempt=probe_on_attempt,
+                prepare_child=prepare_child, settle=settle_child,
+                should_continue=probe_should_continue,
+            )
             if probed is None:
                 # 探测被临时故障打断：不写缓存，保持默认字段，下次作业再试。
                 logger.info("关思考探测未完成（临时故障）：service=%s model=%s", service_id, model)
@@ -629,6 +730,44 @@ class JobManager:
             # 再被推断回去）。继续发默认字段只会让严格服务在每个新作业实例上白付一次 400。
             return provider.with_reasoning(style=NO_REASONING_STYLE, effort="", variant="")
         return provider
+
+    def record_probe_outcome(
+        self, project_id: str, job_id: str, response: Any, error: Exception | None,
+        *, provider_name: str = "", model_name: str = "",
+    ) -> None:
+        """把关思考探测请求纳入用量账本：探测也是真实的付费请求，不能当零成本。
+
+        有 usage 就写实际 token/费用；确实可能已计费但没有 usage（成功但服务不回 usage、
+        超时/流已开始/5xx）才持久记“费用未知”；400/401/403/404 等确定不计费的失败不记。
+        """
+        try:
+            tokens = int(getattr(response, "input_tokens", 0) or 0) + int(getattr(response, "output_tokens", 0) or 0)
+            if response is not None and tokens > 0:
+                self.store.record_usage(UsageRecord(
+                    usage_id=uuid.uuid4().hex, project_id=project_id, job_id=job_id,
+                    provider=str(getattr(response, "provider", "") or provider_name),
+                    model=str(getattr(response, "model", "") or model_name),
+                    scope="probe",
+                    input_tokens=int(getattr(response, "input_tokens", 0) or 0),
+                    output_tokens=int(getattr(response, "output_tokens", 0) or 0),
+                    cached_tokens=int(getattr(response, "cached_tokens", 0) or 0),
+                    reasoning_tokens=int(getattr(response, "reasoning_tokens", 0) or 0),
+                    estimated_cost=getattr(response, "estimated_cost", None),
+                    request_id=str(getattr(response, "request_id", "") or ""),
+                ))
+            else:
+                # 预算/并发未放行、请求根本没发出：不可能计费，也不写未知。
+                if isinstance(error, (BudgetExhausted, ServiceBusyError)):
+                    return
+                # 成功但无 usage、读/写超时、已开始的流 → 记“费用未知”；
+                # 连接失败与 4xx（除 408）确定不计费 → 不记；status=0 的未知原因保守按可能计费。
+                if probe_cost_is_unknown(response, error):
+                    self.store.record_pending_cost(
+                        project_id, job_id=job_id, reason="probe-no-usage",
+                        provider=provider_name, model=model_name,
+                    )
+        except Exception:
+            logger.exception("探测用量记账失败（不影响探测结论）")
 
     def start_structure(self, project_id: str, request: "StructureJobInput") -> str:
         # 与翻译启动同理：检查活动任务与创建/提交必须在同一临界区内完成，否则并发/双击
@@ -689,52 +828,66 @@ class JobManager:
             "service_name": service.get("name", ""),
         }
         job_id = self.store.create_job(project_id, "structure_ai", scope, config_value)
-        # 结构校对同样默认关思考（reasoning 对“按几何/目录证据定层级”贡献有限）。
-        # 这里也允许探测：只用结构校对的用户不会先跑翻译，若只读缓存就永远预热不了，
-        # 会一直发被合法拒收的默认字段、靠安全网摘掉→思考始终开着（真实网关就是这种）。
-        provider = self.apply_thinking_policy(
-            provider, service_id, allow_probe=True,
-            on_probe=lambda: self.store.update_job(
-                project_id, job_id, status="running",
-                message="正在探测该服务的关思考字段（只做一次，之后走缓存）…",
-            ),
-        )
-        # 结构请求同样进入公共协调层（服务并发/退避 + 项目预算，按每次 attempt 预留）。
-        structure_budget = float(self.store.load_manifest(project_id).get("budget_usd") or 0)
-        self.coordinator.attempt_hooks_for(
-            service_id, provider, project_id=project_id, budget=structure_budget,
-            cost_of=prompt_cost_estimator(provider.config) if hasattr(provider, "config") else None,
-        )
-        # 让结构响应在写 usage 后逐请求对账（不是作业结束用项目总额 delta）。
-        try:
-            provider._coordinator = self.coordinator
-            provider._budget_project = project_id
-        except Exception:
-            pass
-
         # 暂停事件：结构作业在模型请求边界响应暂停，已完成的响应写入审计可在继续时复用。
         pause = threading.Event()
-        self.pause_events[job_id] = pause
-
-        def run() -> None:
-            try:
-                run_structure_job(self.store, project_id, job_id, config_value, provider, should_pause=pause.is_set)
-            except Exception:
-                logger.exception("Structure job %s failed", job_id)
-            finally:
-                self.pause_events.pop(job_id, None)
-                try:
-                    provider.close()
-                except Exception:
-                    logger.exception("Provider close failed for structure job %s", job_id)
-                self.refresh_translation_summary(project_id)
-
         try:
+            # 结构校对同样默认关思考（reasoning 对“按几何/目录证据定层级”贡献有限）。
+            # 这里也允许探测：只用结构校对的用户不会先跑翻译，若只读缓存就永远预热不了，
+            # 会一直发被合法拒收的默认字段、靠安全网摘掉→思考始终开着（真实网关就是这种）。
+            # 结构请求同样进入公共协调层（服务并发/退避 + 项目预算，按每次 attempt 预留）。
+            structure_budget = float(self.store.load_manifest(project_id).get("budget_usd") or 0)
+            provider = self.apply_thinking_policy(
+                provider, service_id, allow_probe=True,
+                on_probe=lambda: self.store.update_job(
+                    project_id, job_id, status="running",
+                    message="正在探测该服务的关思考字段（只做一次，之后走缓存）…",
+                ),
+                on_probe_usage=lambda response, error: self.record_probe_outcome(
+                    project_id, job_id, response, error,
+                    provider_name=str(getattr(provider.config, "provider", "") or ""),
+                    model_name=str(getattr(provider.config, "model", "") or ""),
+                ),
+                project_id=project_id, budget=structure_budget,
+            )
+            self.coordinator.attempt_hooks_for(
+                service_id, provider, project_id=project_id, budget=structure_budget,
+                cost_of=prompt_cost_estimator(provider.config) if hasattr(provider, "config") else None,
+            )
+            # 让结构响应在写 usage 后逐请求对账（不是作业结束用项目总额 delta）。
+            try:
+                provider._coordinator = self.coordinator
+                provider._budget_project = project_id
+            except Exception:
+                pass
+            self.pause_events[job_id] = pause
+
+            def run() -> None:
+                try:
+                    run_structure_job(self.store, project_id, job_id, config_value, provider, should_pause=pause.is_set)
+                except Exception:
+                    logger.exception("Structure job %s failed", job_id)
+                finally:
+                    # 同样只清自己那一个 Event，避免误删 resume 后的新 Event。
+                    if self.pause_events.get(job_id) is pause:
+                        self.pause_events.pop(job_id, None)
+                    try:
+                        provider.close()
+                    except Exception:
+                        logger.exception("Provider close failed for structure job %s", job_id)
+                    self.refresh_translation_summary(project_id)
+
             self.executor.submit(run)
         except Exception as error:
-            # 线程池不可用（例如已关闭）：任务不能卡在 queued（既无 worker 执行，又会被 resume 以“正在运行”拒绝）。
-            self.store.update_job(project_id, job_id, status="failed", error=f"无法提交作业线程：{error}")
-            raise StorageError(f"无法提交作业线程：{error}") from error
+            # 建作业后到真正提交前的任何失败（探测/挂钩子/线程池关闭）都必须落到终态，
+            # 否则作业卡在 queued/running：界面一直“运行中”，后续启动也被“已有任务运行”挡住。
+            if self.pause_events.get(job_id) is pause:
+                self.pause_events.pop(job_id, None)
+            try:
+                provider.close()
+            except Exception:
+                logger.debug("结构作业启动失败后关闭 provider 失败", exc_info=True)
+            self.store.update_job(project_id, job_id, status="failed", error=f"无法启动结构校对作业：{error}")
+            raise StorageError(f"无法启动结构校对作业：{error}") from error
         return job_id
 
     def start_translation(self, project_id: str, request: TranslationJobInput, *, existing_job_id: str | None = None) -> str:
@@ -789,6 +942,13 @@ class JobManager:
                         project_id, job_id, status="running",
                         message="正在探测该服务的关思考字段（只做一次，之后走缓存）…",
                     ),
+                    on_probe_usage=lambda response, error: self.record_probe_outcome(
+                        project_id, job_id, response, error,
+                        provider_name=str(getattr(provider.config, "provider", "") or ""),
+                        model_name=str(getattr(provider.config, "model", "") or ""),
+                    ),
+                    project_id=project_id,
+                    budget=float(self.store.load_manifest(project_id).get("budget_usd") or 0),
                 )
                 # AIMD 需要能探速到用户设定的并发上限：服务级信号量只升不降到 max(默认, workers)，
                 # 作为跨作业共享同一服务的总量上限；单次作业内部由 AIMD 自适应控制。
@@ -821,7 +981,10 @@ class JobManager:
                         provider.close()
                     except Exception:
                         logger.exception("Provider close failed for %s", project_id)
-                self.pause_events.pop(job_id, None)
+                # 只清自己那一个 Event：暂停后立即 resume 会用同一 job_id 换上新 Event，
+                # 旧线程的 finally 若按 job_id 盲删，会把新 Event 删掉，导致继续后无法再暂停。
+                if self.pause_events.get(job_id) is pause:
+                    self.pause_events.pop(job_id, None)
 
         try:
             self.executor.submit(run)
@@ -1049,8 +1212,27 @@ def create_app(store: ProjectStore | None = None):
             "parse_coverage": ocr.project_coverage(project_id),
         }
 
+    ACTIVE_JOB_STATUSES = {"queued", "running"}
+    ACTIVE_OCR_STATES = {"queued", "preparing", "uploading", "processing", "downloading", "merging", "waiting", "interrupted"}
+
+    def active_job_blockers(project_id: str) -> list[str]:
+        """列出仍在运行/等待中的项目作业（翻译、结构、即时）与 MinerU 解析作业。"""
+        blockers = [str(job.get("job_id")) for job in store.list_jobs(project_id) if job.get("status") in ACTIVE_JOB_STATUSES]
+        blockers += [str(job.get("job_id")) for job in ocr.list(project_id) if job.get("state") in ACTIVE_OCR_STATES]
+        return blockers
+
     @app.patch("/projects/{project_id}")
     def update_project(project_id: str, request: ProjectUpdate):
+        # 重命名、改语言/章节都会移动项目目录或整体重写 document.json。
+        # 正在跑的作业仍按旧路径/旧文档写盘，会在旧路径下重建幽灵目录或丢掉并发修订，
+        # 因此有活动作业时直接拒绝，而不是“写完再发现不一致”。
+        touches_document = any(value is not None for value in (
+            request.title, request.source_language, request.target_language, request.chapter_language_overrides,
+        ))
+        if touches_document:
+            blockers = active_job_blockers(project_id)
+            if blockers:
+                raise HTTPException(status_code=409, detail="项目仍有运行或等待中的任务，请等待任务结束后再修改项目信息。")
         if request.title is not None:
             store.rename_project(project_id, request.title)
 
@@ -1066,23 +1248,25 @@ def create_app(store: ProjectStore | None = None):
         if request.budget_usd is not None:
             changes["budget_usd"] = request.budget_usd
         if has_document:
-            document = store.load_document(project_id)
-            if request.source_language is not None:
-                document.source_language_mode = request.source_language
-                document.source_language = detect_language(document.blocks) if request.source_language == "auto" else request.source_language
-                changes.update(source_language=document.source_language, source_language_mode=request.source_language)
-            if request.target_language is not None:
-                document.target_language = request.target_language
-                changes["target_language"] = request.target_language
-            if request.chapter_language_overrides is not None:
-                for block_id in request.chapter_language_overrides:
-                    block = document.block(block_id)
-                    if block.type != "title":
-                        raise HTTPException(status_code=400, detail=f"章节语言覆盖必须挂接标题 block：{block_id}")
-                document.chapter_language_overrides = dict(request.chapter_language_overrides)
-                changes["chapter_language_overrides"] = document.chapter_language_overrides
-            store.save_document(document)
-            manifest = store.update_manifest(project_id, **changes) if changes else store.load_manifest(project_id)
+            # document.json 的读改写必须与结构补丁/撤销共用同一把锁，否则并发写会互相覆盖。
+            with store.document_lock(project_id):
+                document = store.load_document(project_id)
+                if request.source_language is not None:
+                    document.source_language_mode = request.source_language
+                    document.source_language = detect_language(document.blocks) if request.source_language == "auto" else request.source_language
+                    changes.update(source_language=document.source_language, source_language_mode=request.source_language)
+                if request.target_language is not None:
+                    document.target_language = request.target_language
+                    changes["target_language"] = request.target_language
+                if request.chapter_language_overrides is not None:
+                    for block_id in request.chapter_language_overrides:
+                        block = document.block(block_id)
+                        if block.type != "title":
+                            raise HTTPException(status_code=400, detail=f"章节语言覆盖必须挂接标题 block：{block_id}")
+                    document.chapter_language_overrides = dict(request.chapter_language_overrides)
+                    changes["chapter_language_overrides"] = document.chapter_language_overrides
+                store.save_document(document)
+                manifest = store.update_manifest(project_id, **changes) if changes else store.load_manifest(project_id)
             return {**document.to_dict(), "budget_usd": manifest.get("budget_usd", 0)}
         if changes:
             store.update_manifest(project_id, **changes)
@@ -1090,10 +1274,7 @@ def create_app(store: ProjectStore | None = None):
 
     @app.delete("/projects/{project_id}")
     def delete_project(project_id: str):
-        active_ocr_states = {"queued", "preparing", "uploading", "processing", "downloading", "merging", "waiting", "interrupted"}
-        active_ocr = [job for job in ocr.list(project_id) if job["state"] in active_ocr_states]
-        active_jobs = [job for job in store.list_jobs(project_id) if job["status"] in {"queued", "running"}]
-        if active_ocr or active_jobs:
+        if active_job_blockers(project_id):
             raise HTTPException(status_code=409, detail="项目仍有运行或等待中的任务，请等待任务结束后再删除。")
         ocr.archive_project_jobs(project_id)
         return store.delete_project(project_id)
@@ -1685,10 +1866,17 @@ def create_app(store: ProjectStore | None = None):
         import time as _time
         started = _time.perf_counter()
         provider = models.config_for(service_id, request.model if request else "", timeout=30.0)
-        response = provider.complete(
-            system="你是连接性探测助手。只返回 JSON {\"ok\":true}。",
-            user="ping",
-        )
+        try:
+            response = provider.complete(
+                system="你是连接性探测助手。只返回 JSON {\"ok\":true}。",
+                user="ping",
+            )
+        finally:
+            # 每次检查都新建 provider；不关连接池会每次泄漏一个 httpx.Client。
+            try:
+                provider.close()
+            except Exception:
+                logger.debug("探测 provider 关闭失败", exc_info=True)
         return {
             "ok": True,
             "service_id": service_id,
@@ -1763,11 +1951,8 @@ def create_app(store: ProjectStore | None = None):
         provider = manager.provider_from(resolved, None, model=model)
         # 单块译审同样是翻译任务：默认关思考，走已有探测缓存（不在这里再探测，避免交互延迟）。
         provider = manager.apply_thinking_policy(provider, service_id)
-        manager.coordinator.attempt_hooks_for(
-            service_id, provider, project_id=project_id,
-            budget=float(store.load_manifest(project_id).get("budget_usd") or 0),
-            cost_of=prompt_cost_estimator(provider.config),
-        )
+        # 注：预算/并发的 attempt hooks 由 TranslationService.review() 自己挂（已在服务层），
+        # 这里不再重复挂一次，避免同一 provider 被两次 attempt_hooks_for 覆盖。
         service = TranslationService(store, provider, coordinator=manager.coordinator, service_id=service_id)
         try:
             return service.review(project_id, block_id, locale=request.locale, instructions=request.instructions)
@@ -1901,10 +2086,25 @@ def create_app(store: ProjectStore | None = None):
     return app
 
 
-try:
-    app = create_app()
-except RuntimeError:
-    app = None
+def _default_app():
+    """惰性构造默认应用。
+
+    不模块级调用：否则任何 `import literature.api`（包括测试收集）都会读真实
+    LITERATURE_LIBRARY / LITERATURE_RUNTIME、创建 session-token与 uploads 目录。
+    """
+    try:
+        return create_app()
+    except RuntimeError:
+        return None
+
+
+def __getattr__(name: str):
+    # `from literature.api import app` / `uvicorn literature.api:app` 首次访问时才构造。
+    if name == "app":
+        value = _default_app()
+        globals()["app"] = value
+        return value
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 def main() -> None:
@@ -1912,6 +2112,7 @@ def main() -> None:
         import uvicorn
     except ImportError as error:
         raise SystemExit("缺少 uvicorn，请先安装 Literature 依赖。") from error
+    app = _default_app()
     if app is None:
         raise SystemExit("Literature API 初始化失败。")
     # 修正 NO_PROXY 中 httpx 无法解析的条目，避免模型与 MinerU 请求因代理环境直接失败。

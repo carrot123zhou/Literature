@@ -3,7 +3,7 @@ import { isDesktop, runtimeInfo } from "./desktop";
 let base = import.meta.env.VITE_API_URL || "http://127.0.0.1:41731";
 let token = import.meta.env.VITE_LITERATURE_TOKEN || "";
 let ready: Promise<void> | undefined;
-const requiredCapabilities = ["intake_items_v1", "structure_review_v2", "model_services_v1", "model_services_v2", "model_services_v3", "structure_job_v1", "structure_vision_v1", "desktop_resources_v1", "translation_module_v1", "translation_engine_v2", "resource_pipeline_v1", "translation_safety_v1", "parse_lifecycle_v1", "task_history_v1"];
+const requiredCapabilities = ["intake_items_v1", "structure_review_v2", "model_services_v1", "model_services_v2", "model_services_v3", "structure_job_v1", "structure_modes_v1", "structure_pause_v1", "structure_vision_v1", "parse_backends_v1", "desktop_resources_v1", "translation_module_v1", "translation_engine_v2", "resource_pipeline_v1", "translation_safety_v1", "parse_lifecycle_v1", "task_history_v1"];
 
 export function initializeApi(): Promise<void> {
   return ready ||= connect();
@@ -25,7 +25,8 @@ async function connect() {
       }
     } catch (error) {
       if (error instanceof Error && (error.message.includes("前后端版本不一致") || error.message.includes("会话校验失败"))) throw error;
-      if (isDesktop) await runtimeInfo();
+      // 重连时端口与令牌都可能已轮换：必须写回新的 runtimeInfo，否则会一直拿旧地址/旧令牌重试。
+      if (isDesktop) { const info = await runtimeInfo(); base = info.apiUrl; token = info.token; }
     }
     await new Promise(resolve => window.setTimeout(resolve, 250));
   }

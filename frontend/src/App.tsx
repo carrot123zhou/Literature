@@ -13,6 +13,8 @@ import type { ReasoningMode } from "./workbench/ThinkingLevelField";
 import { isWorkView, readLastProject, useHashRoute, writeLastProject } from "./viewState";
 import type { DocumentGraph, GlossaryVersion, Job, Project, StructurePatch, StructureSuggestion, TranslationEstimate, TranslationLayer, TranslationStats, UsageRecord } from "./types";
 
+const JOB_KIND: Record<string, string> = { translate: "翻译", refine: "润色", structure: "结构校对", proofread: "结构校对" };
+const JOB_STATUS: Record<string, string> = { queued: "排队中", running: "进行中", paused: "已暂停", budget_paused: "预算暂停", completed: "已完成", failed: "失败", partial_failed: "部分失败", cancelled: "已取消" };
 function savedInstructions(): string { try { return window.localStorage.getItem("literature.translation.instructions") || "" } catch { return "" } }
 
 export default function App() {
@@ -57,42 +59,81 @@ export default function App() {
   // 防止项目切换后旧的异步响应回来污染当前项目状态（F08）。
   const activeProjectRef = useRef(activeProjectId);
   const loadSeqRef = useRef(0);
+  const localeSeqRef = useRef(0);
   const translationRevisionRef = useRef<{ key: string; revision: string }>({ key: "", revision: "" });
+  // 目标语言只影响译文层：用 ref 读取，避免「切换语言 → refreshProject 重建 → 项目加载 effect 重跑 → 整个工作区被清空」。
+  const localeRef = useRef(locale);
+  const previousLocaleRef = useRef(locale);
   useEffect(() => { activeProjectRef.current = activeProjectId; }, [activeProjectId]);
+  useEffect(() => { localeRef.current = locale; }, [locale]);
+  const loadTranslationLayer = useCallback(async (id: string, target: string) => {
+    const [layer, versions] = await Promise.all([
+      api<TranslationLayer>(`/projects/${id}/translations/${target}`),
+      api<GlossaryVersion[]>(`/projects/${id}/translations/${target}/glossary/versions`),
+    ]);
+    const frozen = Object.keys(layer.glossary_snapshot || {}).length;
+    const glossaryValue = frozen ? layer.glossary_snapshot : await api<Record<string, string>>(`/projects/${id}/glossary/draft`);
+    return { layer, versions, glossaryValue };
+  }, []);
   const refreshProject = useCallback(async (id: string) => {
-    // 请求代次：project/locale 切换后，旧的迟到响应不能覆盖新状态。
+    // 请求代次：project 切换后，旧的迟到响应不能覆盖新状态。
     const seq = ++loadSeqRef.current;
-    const [graph, layer, glossaryVersionsValue, patchesValue, usageRecordsValue, state] = await Promise.all([
+    const target = localeRef.current;
+    const [graph, translationLayer, patchesValue, usageRecordsValue, state] = await Promise.all([
       api<DocumentGraph>(`/projects/${id}/document`),
-      api<TranslationLayer>(`/projects/${id}/translations/${locale}`),
-      api<GlossaryVersion[]>(`/projects/${id}/translations/${locale}/glossary/versions`),
+      loadTranslationLayer(id, target),
       api<StructurePatch[]>(`/projects/${id}/structure/patches`),
       api<UsageRecord[]>(`/projects/${id}/usage/records`),
       api<any>(`/projects/${id}`),
     ]);
-    const frozen = Object.keys(layer.glossary_snapshot || {}).length;
-    const glossaryValue = frozen ? layer.glossary_snapshot : await api<Record<string, string>>(`/projects/${id}/glossary/draft`);
+    const { layer, versions, glossaryValue } = translationLayer;
     if (activeProjectRef.current !== id || seq !== loadSeqRef.current) return;
     translationRevisionRef.current = {
-      key: `${id}:${locale}`,
+      key: `${id}:${target}`,
       revision: (layer as TranslationLayer & { revision?: string }).revision || layer.updated_at || "",
     };
     setTranslation(layer);
     setGlossary(glossaryValue);
-    setGlossaryVersions(glossaryVersionsValue);
+    setGlossaryVersions(versions);
     setPatches(patchesValue);
     setUsageRecords(usageRecordsValue);
     setDocument({ ...graph, budget_usd: state.budget_usd || 0 }); setJobs(state.jobs); setUsage(state.usage);
-  }, [locale]);
+  }, [loadTranslationLayer]);
+  // 切换目标语言：只换译文层与术语表，不重置文档/任务/建议（否则整块工作区会闪空）。
+  const refreshTranslationLocale = useCallback(async (id: string) => {
+    const seq = ++localeSeqRef.current;
+    const target = localeRef.current;
+    const { layer, versions, glossaryValue } = await loadTranslationLayer(id, target);
+    if (activeProjectRef.current !== id || localeRef.current !== target || seq !== localeSeqRef.current) return;
+    translationRevisionRef.current = {
+      key: `${id}:${target}`,
+      revision: (layer as TranslationLayer & { revision?: string }).revision || layer.updated_at || "",
+    };
+    setTranslation(layer);
+    setGlossary(glossaryValue);
+    setGlossaryVersions(versions);
+  }, [loadTranslationLayer]);
   const resetProjectState = useCallback(() => {
     setDocument(null); setTranslation(null); setSelected(""); setChecked(new Set());
     setSuggestions([]); setPatches([]); setJobs([]); setGlossary({}); setUsageRecords([]);
     setUsage({ input_tokens: 0, output_tokens: 0, cached_tokens: 0, reasoning_tokens: 0, estimated_cost: 0, unknown_cost_records: 0, pending_cost_records: 0 });
   }, []);
+  // 统一错误反馈：所有直接操作失败都要落到顶部提示，而不是变成未处理的 Promise。
+  const reportError = useCallback((error: unknown, fallback: string) => {
+    setMessage(error instanceof Error && error.message ? error.message : fallback);
+  }, []);
 
   useEffect(() => { initializeApi().then(refreshProjects).then(() => setStartup("ready")).catch(error => setStartup(String(error))); }, [refreshProjects]);
   useEffect(() => { window.localStorage.setItem("literature.translation.instructions", instructions); }, [instructions]);
-  useEffect(() => { try { window.localStorage.setItem("literature.translation.locale", locale); } catch { /* ignore */ } setEstimate(null); }, [locale]);
+  useEffect(() => {
+    try { window.localStorage.setItem("literature.translation.locale", locale); } catch { /* ignore */ }
+    setEstimate(null);
+    // 仅当目标语言真的变化时刷新译文层；项目切换由 refreshProject 负责，避免重复请求。
+    const changed = previousLocaleRef.current !== locale;
+    previousLocaleRef.current = locale;
+    if (!changed || !activeProjectRef.current) return;
+    refreshTranslationLocale(activeProjectRef.current).catch(error => setMessage(error instanceof Error ? error.message : String(error)));
+  }, [locale, refreshTranslationLocale]);
   useEffect(() => { if (route.projectId) { setLastProject(route.projectId); writeLastProject(route.projectId); } }, [route.projectId]);
   useEffect(() => {
     if (!lastProject || !projects.length) return;
@@ -110,9 +151,12 @@ export default function App() {
     if (!activeProjectId) return;
     let cancelled = false;
     let timer = 0;
+    const schedule = (delay: number) => { timer = window.setTimeout(() => void tick(), delay); };
     const tick = async () => {
-      // 闲置保守降到 5 秒；有真正执行中的任务才回到 1.5 秒。
-      let delay = 5000;
+      // 隐藏窗口时不做无意义轮询；回到前台立即补一次。（`document` 在此是项目状态，需用 window.document）
+      if (window.document.hidden) { schedule(10000); return; }
+      // 收敛轮询：在跑 1.5s；任务结束后退到 8s；无任何任务退到 15s。
+      let delay = 15000;
       try {
         const value = await api<any>(`/projects/${activeProjectId}/status`);
         if (cancelled) return;
@@ -120,7 +164,7 @@ export default function App() {
         setSyncError(""); setLastSyncAt(Date.now());
         const translateJobs = value.jobs.filter((job: Job) => job.kind === "translate" || job.kind === "refine");
         const running = translateJobs.some((job: Job) => ["queued", "running"].includes(job.status));
-        const busy = value.jobs.some((job: Job) => ["queued", "running"].includes(job.status));
+        const busy = value.jobs.some((job: Job) => ["queued", "running", "pause_requested"].includes(job.status));
         const signature = translateJobs[0] ? `${translateJobs[0].job_id}:${translateJobs[0].updated_at}` : "";
         // 只有“真正在执行/排队”或“任务结果签名变化”时才拉整层译文；暂停/闲置不再反复拉全量。
         if (running || signature !== seenTranslationJobRef.current) {
@@ -133,28 +177,32 @@ export default function App() {
             setTranslation(layer);
           }
         }
-        delay = busy ? 1500 : 5000;
+        delay = busy ? 1500 : value.jobs.length ? 8000 : 15000;
       } catch (error) {
         if (!cancelled) setSyncError(error instanceof Error ? error.message : String(error));
       } finally {
-        if (!cancelled) timer = window.setTimeout(tick, delay);
+        if (!cancelled) schedule(delay);
       }
     };
-    tick();
-    return () => { cancelled = true; window.clearTimeout(timer); };
+    const onVisibility = () => { if (!window.document.hidden) { window.clearTimeout(timer); void tick(); } };
+    window.document.addEventListener("visibilitychange", onVisibility);
+    void tick();
+    return () => { cancelled = true; window.clearTimeout(timer); window.document.removeEventListener("visibilitychange", onVisibility); };
   }, [activeProjectId, locale]);
   // 切项目/语言时丢弃候选，避免按旧项目/语言采纳。
   useEffect(() => { reviewSeqRef.current += 1; setReviewCandidate(null); }, [activeProjectId, locale]);
   useEffect(() => {
     if (view !== "resources") return;
-    // 进入文件资源页立即刷新一次，并按 3 秒轮询，让校对/翻译状态及时回显。
-    refreshProjects().catch(() => {});
-    const timer = window.setInterval(() => refreshProjects().catch(() => {}), 3000);
-    return () => window.clearInterval(timer);
+    // 进入文件资源页立即刷新一次，并按 3 秒轮询，让校对/翻译状态及时回显；窗口隐藏时暂停。
+    const run = () => { if (!window.document.hidden) refreshProjects().catch(() => {}); };
+    run();
+    const timer = window.setInterval(run, 3000);
+    window.document.addEventListener("visibilitychange", run);
+    return () => { window.clearInterval(timer); window.document.removeEventListener("visibilitychange", run); };
   }, [view, refreshProjects]);
   useEffect(() => {
     if (!message) return;
-    const timer = window.setTimeout(() => setMessage(""), 6000);
+    const timer = window.setTimeout(() => setMessage(""), /失败|错误|无法|不可用|Error|error/.test(message) ? 15000 : 6000);
     return () => window.clearTimeout(timer);
   }, [message]);
 
@@ -246,36 +294,74 @@ export default function App() {
     const blockIds = options.scope === "blocks" ? selectedScope : [];
     // 请求代次：选项快速变化时，旧请求的迟到响应不能覆盖新选项的估算。
     const seq = ++estimateSeqRef.current;
-    const value = await api<TranslationEstimate>(`/projects/${activeProjectId}/translation/estimate`, {
-      method: "POST",
-      body: JSON.stringify({
-        service_id: options.serviceId || models.roles.translation.service_id, model: options.model || models.roles.translation.model, scope: options.scope, block_ids: blockIds,
-        locale: options.locale || locale, refine: options.refine, force: options.force,
-        polish: options.polish, glossary: options.useGlossary === false ? {} : glossary,
-        instructions: options.instructions ?? instructions,
-      }),
-    });
-    if (seq === estimateSeqRef.current) setEstimate(value);
+    try {
+      const value = await api<TranslationEstimate>(`/projects/${activeProjectId}/translation/estimate`, {
+        method: "POST",
+        body: JSON.stringify({
+          service_id: options.serviceId || models.roles.translation.service_id, model: options.model || models.roles.translation.model, scope: options.scope, block_ids: blockIds,
+          locale: options.locale || locale, refine: options.refine, force: options.force,
+          polish: options.polish, glossary: options.useGlossary === false ? {} : glossary,
+          instructions: options.instructions ?? instructions,
+        }),
+      });
+      if (seq === estimateSeqRef.current) setEstimate(value);
+    } catch (error) {
+      if (seq === estimateSeqRef.current) reportError(error, "预估失败");
+    }
   };
   const invalidateEstimate = useCallback(() => {
     // 稳定引用：选项真正变化时才失效，不能让每次 render 都清估算（否则刚显示的估算立即消失）。
     estimateSeqRef.current += 1;
     setEstimate(null);
   }, []);
-  const unlockBlock = async (blockId: string) => { await api(`/projects/${activeProjectId}/translations/${blockId}/unlock?locale=${encodeURIComponent(locale)}`, { method: "POST" }); await refreshProject(activeProjectId); };
-  const pauseJob = async (job: Job) => { await api(`/projects/${activeProjectId}/translation/jobs/${job.job_id}/pause`, { method: "POST" }); setMessage("已请求暂停；当前分块完成后停止"); };
-  const resumeJob = async (job: Job) => { await api(`/projects/${activeProjectId}/translation/jobs/${job.job_id}/resume`, { method: "POST" }); setMessage(job.status === "failed" || job.status === "partial_failed" ? "正在重试失败分块" : "翻译任务已恢复"); };
+  const unlockBlock = async (blockId: string) => {
+    if (!activeProjectId) return;
+    try {
+      await api(`/projects/${activeProjectId}/translations/${blockId}/unlock?locale=${encodeURIComponent(locale)}`, { method: "POST" });
+      await refreshProject(activeProjectId);
+      setMessage("已解锁该段译文");
+    } catch (error) {
+      reportError(error, "解锁失败");
+    }
+  };
+  const pauseJob = async (job: Job) => {
+    if (!activeProjectId) return;
+    try {
+      await api(`/projects/${activeProjectId}/translation/jobs/${job.job_id}/pause`, { method: "POST" });
+      setMessage("已请求暂停；当前分块完成后停止");
+    } catch (error) {
+      reportError(error, "暂停失败");
+    }
+  };
+  const resumeJob = async (job: Job) => {
+    if (!activeProjectId) return;
+    try {
+      await api(`/projects/${activeProjectId}/translation/jobs/${job.job_id}/resume`, { method: "POST" });
+      setMessage(job.status === "failed" || job.status === "partial_failed" ? "正在重试失败分块" : "翻译任务已恢复");
+    } catch (error) {
+      reportError(error, "恢复任务失败");
+    }
+  };
   const freezeGlossary = async (entries: Record<string, string>) => {
-    setGlossary(entries);
-    await api(`/projects/${activeProjectId}/translations/${locale}/glossary`, { method: "PUT", body: JSON.stringify({ entries }) });
-    setGlossaryVersions(await api<GlossaryVersion[]>(`/projects/${activeProjectId}/translations/${locale}/glossary/versions`));
-    setMessage(`术语表已冻结：${Object.keys(entries).length} 项`);
+    if (!activeProjectId) return;
+    try {
+      // 冻结以服务端成功为准：写入成功后再回读快照与版本，不做乐观写入。
+      await api(`/projects/${activeProjectId}/translations/${locale}/glossary`, { method: "PUT", body: JSON.stringify({ entries }) });
+      await refreshTranslationLocale(activeProjectId);
+      setMessage(`术语表已冻结：${Object.keys(entries).length} 项`);
+    } catch (error) {
+      reportError(error, "冻结术语表失败");
+    }
   };
   const rollbackGlossary = async (version: number) => {
-    const value = await api<{ entries: Record<string, string>; version: number }>(`/projects/${activeProjectId}/translations/${locale}/glossary/rollback`, { method: "POST", body: JSON.stringify({ version }) });
-    setGlossary(value.entries);
-    setGlossaryVersions(await api<GlossaryVersion[]>(`/projects/${activeProjectId}/translations/${locale}/glossary/versions`));
-    setMessage(`术语表已回滚为 v${version} 的内容（新版本 v${value.version}）`);
+    if (!activeProjectId) return;
+    try {
+      const value = await api<{ entries: Record<string, string>; version: number }>(`/projects/${activeProjectId}/translations/${locale}/glossary/rollback`, { method: "POST", body: JSON.stringify({ version }) });
+      await refreshTranslationLocale(activeProjectId);
+      setMessage(`术语表已回滚为 v${version} 的内容（新版本 v${value.version}）`);
+    } catch (error) {
+      reportError(error, "回滚术语表失败");
+    }
   };
   const reviewBlock = async (blockId: string) => {
     if (!models.roles.translation.service_id) { openSettings("models"); setMessage("请先配置翻译模型"); return; }
@@ -341,7 +427,7 @@ export default function App() {
       openResources={openResources}
       openWork={openWork}
       closeProject={closeProject}
-      openSettings={() => setSettings(true)}
+      openSettings={() => openSettings(settingsSection)}
       project={activeProject ? { title: document?.title || activeProject.title, subtitle: document ? `${document.source_language} → ${document.target_language}` : activeProject.state, usage: usageBadge } : undefined}
     />
 
@@ -419,7 +505,7 @@ export default function App() {
           onConfigureModel={() => openSettings("models")}
         />
       : projectPlaceholder("选择一个已完成处理的文档，进入阅读与翻译；或去首页上传新文件。"))}
-    {isWorkView(view) && <footer className="statusbar"><span>{syncError ? <b style={{ color: "var(--rdg-fail, #b91c1c)" }}>同步失败：{syncError}</b> : lastSyncAt ? `已同步 ${new Date(lastSyncAt).toLocaleTimeString()}` : "本地项目 · 已保存"}</span><span>{jobs[0] ? `${jobs[0].kind} · ${jobs[0].status} · ${Math.round(jobs[0].progress * 100)}%` : "无运行任务"}</span><span>{suggestions.filter(value => !value.automatic).length} 项待确认</span></footer>}
+    {isWorkView(view) && <footer className="statusbar"><span>{syncError ? <b style={{ color: "var(--rdg-fail, #b91c1c)" }}>同步失败：{syncError}</b> : lastSyncAt ? `已同步 ${new Date(lastSyncAt).toLocaleTimeString()}` : "本地项目 · 已保存"}</span><span>{jobs[0] ? `${JOB_KIND[jobs[0].kind] || jobs[0].kind} · ${JOB_STATUS[jobs[0].status] || jobs[0].status} · ${Math.round(jobs[0].progress * 100)}%` : "无运行任务"}</span>{view === "review" && <span>{suggestions.filter(value => !value.automatic).length} 项待确认</span>}</footer>}
 
     {settings && <Settings
       projectId={activeProjectId || undefined}

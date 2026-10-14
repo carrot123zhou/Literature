@@ -49,8 +49,7 @@ class RequestCoordinatorTests(unittest.TestCase):
             })
 
         provider = streaming_free_provider(handler, max_retries=0)
-        coordinator = RequestCoordinator()
-        coordinator.set_service_limit("svc", 1)
+        coordinator = RequestCoordinator(default_service_limit=1)
         coordinator.attempt_hooks_for("svc", provider)
         release = threading.Event()
 

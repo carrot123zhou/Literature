@@ -129,9 +129,10 @@ class AutoApplyTests(unittest.TestCase):
 class ProviderStub:
     config = ProviderConfig.preset("custom", base_url="mock://fixture", model="fixture")
 
-    def __init__(self, *, unplanned=()):
+    def __init__(self, *, unplanned=(), roles=None):
         self.calls = []
         self.unplanned = set(unplanned)
+        self.roles = roles or ROLES
 
     def complete(self, *, system, user):
         payload = json.loads(user)
@@ -141,13 +142,13 @@ class ProviderStub:
             for row in payload.get("candidates", []):
                 if row["block_id"] in self.unplanned:
                     continue
-                role, parent = ROLES.get(row["block_id"], ("h2", None))
+                role, parent = self.roles.get(row["block_id"], ("h2", None))
                 rows.append({"block_id": row["block_id"], "role": role, "parent_id": parent,
                              "confidence": 0.9, "reason": "stub"})
             return ProviderResponse(content=json.dumps({"outline": rows}), provider="mock", model="fixture")
         rows = []
         for row in payload.get("title_candidates", []):
-            role, parent = ROLES.get(row["block_id"], ("h2", None))
+            role, parent = self.roles.get(row["block_id"], ("h2", None))
             rows.append({"block_id": row["block_id"], "role": role, "parent_id": parent,
                          "confidence": 0.9, "reason": "stub"})
         return ProviderResponse(content=json.dumps({"decisions": rows}), provider="mock", model="fixture")
@@ -230,6 +231,19 @@ class CoarseJobTests(unittest.TestCase):
             result = run_structure_job(store, project, resumed, {**options, "reuse_job_id": job}, ProviderStub())
             self.assertEqual(store.get_job(project, resumed)["status"], "completed")
             self.assertEqual(result["mode"], "coarse")
+
+    def test_model_unchanged_vetoes_local_wrong_edit(self):
+        # 模型明确判断 b0"保持 h2 不变"时，本地"按目录改 h1"的错误改动必须被否决，
+        # 不能因为模型对 unchanged 不产出建议就让本地改动留在"全部自动应用"里。
+        with tempfile.TemporaryDirectory() as tmp:
+            store, project = build_fixture(Path(tmp))
+            options = coarse_options()
+            job = store.create_job(project, "structure_ai", {}, options)
+            provider = ProviderStub(roles={**ROLES, "b0": ("h2", None)})
+            result = run_structure_job(store, project, job, options, provider)
+            document = store.load_document(project)
+            self.assertEqual(document.block("b0").level, 2)
+            self.assertEqual(result["calibration"]["level_corrections"], 0)
 
     def test_legacy_options_without_mode_keep_previous_behaviour(self):
         with tempfile.TemporaryDirectory() as tmp:

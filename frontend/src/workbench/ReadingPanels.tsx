@@ -209,7 +209,7 @@ export function ScopeDialog({ projectTitle, locale, stats, selectedScopeCount, g
   onClose: () => void;
   onConfirm: (value: ScopeConfirm) => void;
 }) {
-  const [scope, setScope] = useState<ScopeKey>("book");
+  const [scope, setScope] = useState<ScopeKey>(stats.untranslated > 0 && stats.untranslated < stats.total ? "untranslated" : "book");
   const [target, setTarget] = useState(locale);
   const [glossaryMode, setGlossaryMode] = useState<"frozen" | "none">("frozen");
   const [instructions, setInstructions] = useState("");
@@ -241,7 +241,7 @@ export function ScopeDialog({ projectTitle, locale, stats, selectedScopeCount, g
     <div className="dialog" role="dialog" aria-modal="true" aria-label="选择翻译范围">
       <div className="dialog-head">
         <span className="mono">FR</span>
-        <div style={{ flex: 1 }}><h2>翻译 · {projectTitle}</h2><p className="src">每次启动都需要手动选择范围</p></div>
+        <div style={{ flex: 1 }}><h2>翻译 · {projectTitle}</h2><p className="src">选择范围与模型后开始</p></div>
         <button className="x" onClick={onClose} aria-label="关闭">✕</button>
       </div>
       <div className="dialog-body">
@@ -281,6 +281,7 @@ export function ScopeDialog({ projectTitle, locale, stats, selectedScopeCount, g
             </label>)}
           </div>
         </div>
+        <details className="scope-more"><summary style={{ cursor: "pointer", margin: "4px 0 12px", fontWeight: 600 }}>更多选项（附加要求、润色、重译、并发）</summary>
         <div className="field"><label>附加要求（进入任务快照）</label>
           <input value={instructions} onChange={event => setInstructions(event.target.value)} placeholder="如：保留原文人名，不译"/>
         </div>
@@ -306,6 +307,7 @@ export function ScopeDialog({ projectTitle, locale, stats, selectedScopeCount, g
             <label className={polish && !refine ? "on" : ""} style={{ width: "100%" }}><input type="checkbox" checked={polish} disabled={refine} onChange={event => setPolish(event.target.checked)}/><span className="n"><b>翻译后自动润色</b><small>两遍制：先翻译再文学润色，质量更高，耗时与费用约翻倍</small></span></label>
           </label>
         </div>
+        </details>
         <div className="xnote">校对未完成不影响翻译；翻译完成后再调整结构时，译文会<b>自动对齐到新的内容层级</b>，无需重新翻译。翻译按小块并发发送，单段失败只重试该段，不重复已成功的 usage。</div>
         {estimate ? <div className="xnote">将处理 <b>{estimate.block_count}</b> 块 · 约 {estimate.estimated_input_tokens.toLocaleString()}{(estimate.estimated_input_tokens_low != null && estimate.estimated_input_tokens_high != null) ? `（区间 ${estimate.estimated_input_tokens_low.toLocaleString()}–${estimate.estimated_input_tokens_high.toLocaleString()}）` : ""} 输入 token · {estimate.chunk_count} 个请求{estimate.has_pricing ? (estimate.estimated_cost != null ? ` · 估费 ${estimate.estimated_cost_low != null && estimate.estimated_cost_high != null ? `$${estimate.estimated_cost_low.toFixed(4)}–$${estimate.estimated_cost_high.toFixed(4)}（约 $${estimate.estimated_cost.toFixed(4)}）` : `约 $${estimate.estimated_cost.toFixed(4)}`}` : " · 价格未知，无法给出硬预算") : <span> · 单价比未配置，无法估算费用</span>}</div> : null}
       </div>

@@ -28,15 +28,27 @@ class ProviderError(RuntimeError):
     # 把它挂在异常上，上层仍能将真实用量记账，而不是把已产生的费用当成零。
     # status_code：429/5xx 等临时故障的状态码。调度层（AIMD 并发自适应）据此
     # 降低并发，而不是把 429 和确定性失败混在一起。
-    def __init__(self, message: str, *, response: "ProviderResponse | None" = None, status_code: int = 0) -> None:
+    # possible_charge：本次失败是否“可能已经产生费用”。None = 未知（外部按保守口径处理）；
+    # True = 可能已计费（读/写超时、流已开始、5xx）；False = 确定不计费（连接失败、4xx 等）。
+    possible_charge: bool | None = None
+
+    def __init__(
+        self, message: str, *,
+        response: "ProviderResponse | None" = None, status_code: int = 0,
+        possible_charge: bool | None = None,
+    ) -> None:
         super().__init__(message)
         self.response = response
         self.status_code = int(status_code or 0)
+        if possible_charge is not None:
+            self.possible_charge = bool(possible_charge)
 
 
 class ProviderTimeoutError(ProviderError):
     def __init__(self, kind: str, seconds: float) -> None:
         self.kind, self.seconds = kind, seconds
+        # 读/写超时可能已经产生费用；连接/连接池超时不可能计费。
+        self.possible_charge = kind in {"read", "write"}
         action = {"read": "等待模型响应", "connect": "连接模型服务", "write": "发送模型输入", "pool": "等待模型连接"}[kind]
         hint = (
             "若本任务用量里 reasoning 占比很高，可在模型服务里关闭思考模式或换用非思考模型。"
@@ -47,6 +59,64 @@ class ProviderTimeoutError(ProviderError):
 
 class _StreamUnsupported(Exception):
     """流式请求没有得到可用输出（空事件流），应回退非流式重试。"""
+
+
+class _StreamInterrupted(ProviderError):
+    """流式已读到部分数据后断开：可能已经产生费用，不能当作“没花钱”自动重发。"""
+
+    possible_charge = True
+
+
+class _SSEErrorEvent(ProviderError):
+    """服务端在 HTTP 200 的 SSE 流里回了一个 error 事件（限流/配额/上游故障）。"""
+
+    possible_charge = True
+
+
+def _sse_error_status(error_value: Any) -> int:
+    """把 SSE error 事件里的文本归一到更接近真实原因的 HTTP 状态码（只作分类，不冒充证据）。"""
+    if isinstance(error_value, str):
+        text = error_value
+    else:
+        try:
+            text = json.dumps(error_value, ensure_ascii=False)
+        except (TypeError, ValueError):
+            text = str(error_value)
+    lowered = text.lower()
+    if "rate" in lowered and "limit" in lowered:
+        return 429
+    if any(token in lowered for token in ("insufficient", "quota", "balance", "exceeded") ):
+        return 402
+    if any(token in lowered for token in ("unauthorized", "invalid api key", "authentication", "auth failed")):
+        return 401
+    if "not found" in lowered or "no such model" in lowered:
+        return 404
+    return 502
+
+
+def _sse_error_message(error_value: Any) -> str:
+    if isinstance(error_value, dict):
+        message = error_value.get("message") or error_value.get("type") or error_value.get("code") or ""
+        if message:
+            return redact_error_text(message)
+    return redact_error_text(error_value)
+
+
+# 上游错误原文往往是一整页 HTML，甚至可能回显密钥，不能原样写进长期数据文件。
+_ERROR_TEXT_LIMIT = 300
+_SECRET_TEXT_RE = re.compile(
+    r"(sk-[A-Za-z0-9_\-]{6,}|Bearer\s+[A-Za-z0-9._\-]{6,}|[A-Za-z0-9_\-]{32,})",
+    re.IGNORECASE,
+)
+
+
+def redact_error_text(value: Any) -> str:
+    """把上游错误文本限长并脱敏（掩掉疑似密钥/长 token），供写入日志与数据文件。"""
+    text = str(value if value is not None else "")
+    text = _SECRET_TEXT_RE.sub("[REDACTED]", text)
+    if len(text) > _ERROR_TEXT_LIMIT:
+        text = text[:_ERROR_TEXT_LIMIT] + "…(已截断)"
+    return text
 
 
 def _aggregate_sse_events(lines: Iterable[Any]) -> dict[str, Any] | None:
@@ -60,12 +130,14 @@ def _aggregate_sse_events(lines: Iterable[Any]) -> dict[str, Any] | None:
     usage: dict[str, Any] = {}
     model = ""
     request_id = ""
+    saw_done = False
     for raw in lines:
         line = (raw or "").strip()
         if not line.startswith("data:"):
             continue
         payload = line[len("data:"):].strip()
         if payload == "[DONE]":
+            saw_done = True
             break
         try:
             event = json.loads(payload)
@@ -73,6 +145,10 @@ def _aggregate_sse_events(lines: Iterable[Any]) -> dict[str, Any] | None:
             continue
         if not isinstance(event, dict):
             continue
+        if event.get("error"):
+            # 部分中转在 HTTP 200 的流里用 error 事件报限流/配额/上游故障；
+            # 忽略它会把被截断的输出当成完整结果，或把限流误判成“流式不兼容”而重发。
+            raise _SSEErrorEvent(_sse_error_message(event["error"]), status_code=_sse_error_status(event["error"]))
         model = str(event.get("model") or model)
         request_id = str(event.get("id") or request_id)
         event_usage = event.get("usage")
@@ -93,6 +169,10 @@ def _aggregate_sse_events(lines: Iterable[Any]) -> dict[str, Any] | None:
             finish_reason = str(reason)
     if not any(part.strip() for part in content_parts) and not usage and not finish_reason:
         return None
+    if not finish_reason and not saw_done:
+        # usage 不等于正常终止：有些中转只在末尾回 usage，却没有 [DONE] / finish_reason。
+        # 缺终止标记的流按“不完整”上报（可能被截断），宁可多一次小批重试，不能当完整结果。
+        finish_reason = "incomplete_stream"
     return {
         "model": model,
         "id": request_id,
@@ -109,6 +189,46 @@ class _HTTPStatusError(Exception):
         self.response = response
         self.detail = detail
         self.status_code = int(getattr(response, "status_code", 0) or 0)
+
+
+def _is_loopback_host(host: str) -> bool:
+    """仅把精确的 localhost 与真正的回环 IP（127.0.0.0/8、::1）视为本机。
+
+    不能用前缀匹配：`127.attacker.example` 这类公网域名会以前缀 `127.` 误判为本机。
+    也不把 `0.0.0.0` 当作 loopback（它是“所有接口”通配地址，保守拒绝携带密钥）。
+    """
+    if host == "localhost":
+        return True
+    try:
+        import ipaddress
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def plaintext_http_blocked(base_url: str) -> bool:
+    """地址是明文 ``http://`` 且主机不是本机 loopback 时返回 True。
+
+    API Key 走 ``Authorization`` 头；对远程主机用明文 HTTP 会把密钥暴露在链路上。
+    本地网关/开发服务（localhost、127.0.0.0/8、[::1]）保留 http 契约，不受限制。
+    """
+    try:
+        from urllib.parse import urlparse
+        parsed = urlparse(str(base_url or ""))
+    except ValueError:
+        return False
+    if (parsed.scheme or "").lower() != "http":
+        return False
+    return not _is_loopback_host((parsed.hostname or "").lower())
+
+
+def assert_key_transport_safe(base_url: str, api_key: str) -> None:
+    """在携带密钥发请求前调用；阻止把密钥发往明文 HTTP 的远程地址。"""
+    if (api_key or "").strip() and plaintext_http_blocked(base_url):
+        raise ProviderError(
+            "为避免 API Key 经明文 HTTP 泄露，远程服务必须使用 https:// 地址；"
+            "本机 loopback（localhost / 127.0.0.1 / [::1]）不受限制。"
+        )
 
 
 def normalize_proxy_environment() -> None:
@@ -488,6 +608,7 @@ def list_remote_models(base_url: str, api_key: str, *, timeout: float = 30.0) ->
         raise ProviderError("请填写 Base URL。")
     if not (api_key or "").strip():
         raise ProviderError("请先填写 API Key。")
+    assert_key_transport_safe(base_url, api_key)
     try:
         import httpx
     except ImportError as error:
@@ -505,9 +626,9 @@ def list_remote_models(base_url: str, api_key: str, *, timeout: float = 30.0) ->
             break
         except Exception as error:  # 404 等按候选 URL 试下一个，最终报最后一个错误
             failure = error
-            detail = getattr(getattr(error, "response", None), "text", "")
+            detail = redact_error_text(getattr(getattr(error, "response", None), "text", ""))
     if failure is not None:
-        raise ProviderError(f"获取模型列表失败：{detail or failure}") from failure
+        raise ProviderError(f"获取模型列表失败：{redact_error_text(detail or failure)}") from failure
     items = value.get("data") if isinstance(value, dict) else None
     if not isinstance(items, list):
         raise ProviderError("模型列表响应格式无法识别。")
@@ -662,7 +783,7 @@ class OpenAICompatibleProvider:
             content.append({"type": "image_url", "image_url": {"url": item["image_url"], "detail": "high"}})
         return self._complete(system=system, content=content)
 
-    def _read_stream(self, client: Any, url: str, headers: dict[str, str], body: dict[str, Any], timeouts: Any) -> tuple[Any, dict[str, Any]]:
+    def _read_stream(self, client: Any, url: str, headers: dict[str, str], body: dict[str, Any], timeouts: Any, progress: dict[str, bool] | None = None) -> tuple[Any, dict[str, Any]]:
         """发起一次 SSE 流式请求，聚合成与非流式一致的响应 JSON 后返回。
 
         流式把「读超时」的语义从「等待整份响应的总时限」变成「两个数据块之间的
@@ -673,7 +794,7 @@ class OpenAICompatibleProvider:
         with client.stream("POST", url, headers=headers, json=body, timeout=timeouts) as response:
             if response.status_code >= 400:
                 response.read()
-                raise _HTTPStatusError(response, response.text)
+                raise _HTTPStatusError(response, redact_error_text(response.text))
             content_type = str(response.headers.get("content-type") or "").lower()
             if "text/event-stream" not in content_type:
                 # 必须先 read()：真实流式响应未读取前访问 .json()/.text 会抛
@@ -691,12 +812,44 @@ class OpenAICompatibleProvider:
                         value = _aggregate_sse_events(text.splitlines())
                         if value is not None:
                             return response, value
-                    raise _HTTPStatusError(response, f"响应不是有效 JSON：{error}") from error
-            value = _aggregate_sse_events(response.iter_lines())
+                    raise _HTTPStatusError(response, f"响应不是有效 JSON：{redact_error_text(error)}") from error
+            value = self._aggregate_stream_lines(response.iter_lines(), progress)
             if value is None:
                 # 连一个有效事件都没有：视为协议不兼容，回退非流式，而不是伪造成空译文。
                 raise _StreamUnsupported("空事件流")
             return response, value
+
+    @staticmethod
+    def _aggregate_stream_lines(lines: Iterable[Any], progress: dict[str, bool] | None = None) -> dict[str, Any] | None:
+        """聚合 SSE 行，并区分“接收到数据后才断开”与“一个字节都没拿到”。
+
+        已读到内容的断流会抛 _StreamInterrupted：内容可能已经被服务端生成并计费，
+        不能按“本次无实际费用”自动重发（会双重扣费且漏账）。
+        ``progress`` 为调用方提供的可变标记（用于异常兜底判断是否可能已计费）。
+        """
+        try:
+            import httpx
+        except ImportError as error:
+            raise ProviderError("缺少 httpx，请安装 Literature Python 依赖。") from error
+        received = False
+
+        def marked() -> Iterable[Any]:
+            nonlocal received
+            for line in lines:
+                received = True
+                if progress is not None:
+                    progress["received"] = True
+                yield line
+
+        try:
+            return _aggregate_sse_events(marked())
+        except httpx.TimeoutException:
+            # 读超时保持原类型：外层会映射成 ProviderTimeoutError 并已按“可能已计费”处理。
+            raise
+        except httpx.HTTPError as error:
+            if received:
+                raise _StreamInterrupted(redact_error_text(f"流式响应在传输中中断：{error}")) from error
+            raise
 
     def _complete(self, *, system: str, content: str | list[dict[str, Any]]) -> ProviderResponse:
         try:
@@ -705,6 +858,8 @@ class OpenAICompatibleProvider:
             raise ProviderError("缺少 httpx，请安装 Literature Python 依赖。") from error
         # 代理环境变量在 httpx 创建 Client 时解析，必须先规范化再发请求。
         normalize_proxy_environment()
+        # 密钥只在 https（或本机 loopback http）上发送，不允许明文 HTTP 发往远程主机。
+        assert_key_transport_safe(self.config.base_url, self.api_key)
         url = f"{self.config.base_url.rstrip('/')}/chat/completions"
         headers = {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json", **self.config.extra_headers}
         base_body = {
@@ -731,19 +886,28 @@ class OpenAICompatibleProvider:
                 body["stream"] = True
                 body["stream_options"] = {"include_usage": True}
             handle = self.attempt_hooks[0](prompt_chars) if self.attempt_hooks else None
+            # 本次 attempt 是否已经读到流式数据：决定异常时是否按“可能已计费”对账，
+            # 而不是一律当成“没花钱”释放。
+            stream_progress = {"received": False}
             try:
                 if use_stream:
-                    response, value = self._read_stream(client, url, headers, body, timeouts)
+                    response, value = self._read_stream(client, url, headers, body, timeouts, stream_progress)
                 else:
                     response = client.post(url, headers=headers, json=body, timeout=timeouts)
                     if response.status_code >= 400:
-                        raise _HTTPStatusError(response, response.text)
+                        raise _HTTPStatusError(response, redact_error_text(response.text))
                     # 解码失败也归成 _HTTPStatusError（外层转 ProviderError）：否则
                     # 「200+门户 HTML」不触发连续失败熔断，且调用方捕获不到 ProviderError。
                     try:
                         value = response.json()
                     except ValueError as error:
-                        raise _HTTPStatusError(response, f"响应不是有效 JSON：{error}") from error
+                        raise _HTTPStatusError(response, f"响应不是有效 JSON：{redact_error_text(error)}") from error
+            except (_StreamInterrupted, _SSEErrorEvent) as error:
+                # 已读到内容后才断开 / 服务端在流里回了 error：可能已经计费，也不应自动重发。
+                # final=True 把预留交给调用方按“费用未知”对账（而不是释放成零成本）。
+                if self.attempt_hooks:
+                    self.attempt_hooks[1](handle, None, error, True)
+                raise
             except httpx.TimeoutException as error:
                 if self.attempt_hooks:
                     self.attempt_hooks[1](handle, None, error, True)
@@ -751,14 +915,20 @@ class OpenAICompatibleProvider:
                 # 超时可能已经产生费用，不自动重发；由上层按分块重试。
                 raise ProviderTimeoutError(kind, getattr(timeouts, kind)) from error
             except httpx.HTTPError as error:
-                final = attempt >= self.max_retries
+                # 已读到流式数据后的任意 HTTP 异常都不能按“无费用”重发（读流内部通常已转
+                # _StreamInterrupted；这里是兜底，防上下文进出等路径漏网）。
+                final = attempt >= self.max_retries or bool(stream_progress["received"])
                 if self.attempt_hooks:
                     self.attempt_hooks[1](handle, None, error, final)
                 if not final:
                     time.sleep(self._retry_delay(None, attempt))
                     attempt += 1
                     continue
-                raise ProviderError(f"模型请求失败：{error}") from error
+                # 连接未建立（ConnectError）= 确定不计费；其余（读/写/协议错误）保守按“未知”。
+                raise ProviderError(
+                    f"模型请求失败：{redact_error_text(str(error))}",
+                    possible_charge=False if isinstance(error, httpx.ConnectError) else None,
+                ) from error
             except _StreamUnsupported:
                 # 空事件流：服务端可能不兼容流式协议，关闭流式后同一 attempt 预算内重发。
                 if self.attempt_hooks:
@@ -771,7 +941,7 @@ class OpenAICompatibleProvider:
                 # 否则连续失败熔断对这类响应失效（与「200+门户 HTML」同型缺口）。
                 if self.attempt_hooks:
                     self.attempt_hooks[1](handle, None, error, True)
-                raise ProviderError(f"模型请求失败：{error}") from error
+                raise ProviderError(f"模型请求失败：{redact_error_text(str(error))}", possible_charge=True) from error
             except _HTTPStatusError as error:
                 if error.status_code == 400:
                     # 400 有两种常见原因：服务不支持流式、服务不认思考字段。两者都不能只凭
@@ -811,8 +981,15 @@ class OpenAICompatibleProvider:
                 if self.attempt_hooks:
                     self.attempt_hooks[1](handle, error.response, error, True)
                 raise ProviderError(
-                    f"模型请求失败：{error.detail or error}", status_code=error.status_code,
+                    f"模型请求失败：{redact_error_text(error.detail or error)}", status_code=error.status_code,
                 ) from error
+            except BaseException as error:
+                # 未预期异常（非 httpx、非本模块自定义）：必须归还服务名额与预算预留后原样抛出。
+                # 若流已经开始并读到数据，按“可能已计费”（final=True）交调用方按未知费用对账；
+                # 否则释放成零成本（final=False）。
+                if self.attempt_hooks:
+                    self.attempt_hooks[1](handle, None, error, bool(stream_progress["received"]))
+                raise
             if self.attempt_hooks:
                 self.attempt_hooks[1](handle, response, None, True)
             break
@@ -892,39 +1069,66 @@ class _ProbeResult(NamedTuple):
     stream_disabled: bool
 
 
-def _probe_attempt(provider: Any, *, style: str, effort: str, variant: str) -> _ProbeResult:
-    """发一次极小探测请求；子 provider 的超时与自建连接池都在此收敛。"""
+def _probe_attempt(
+    provider: Any, *, style: str, effort: str, variant: str,
+    on_attempt: Any = None, prepare_child: Any = None, settle: Any = None,
+) -> _ProbeResult:
+    """发一次极小探测请求；子 provider 的超时与自建连接池都在此收敛。
+
+    - ``prepare_child(child)``：为子 provider 挂共享协调层钩子（逐 attempt 预算/并发）。
+    - ``settle(child, response)``：把子 provider 上本次 attempt 的预算预留对账掉。
+    - ``on_attempt(response, error)``：把探测请求纳入用量账本（有 usage 记实际成本，
+      无 usage 且可能已计费记“费用未知”）。**先关闭子 provider 再回调**，
+      回调抛异常也不会漏关连接池。
+    """
     child = provider.with_reasoning(style=style, effort=effort, variant=variant)
     child = child.with_max_output_tokens(PROBE_MAX_TOKENS)
     if hasattr(child, "timeout"):
         # 只收窄单次请求的等待上限，不重建连接池（探测应复用作业的 keep-alive 连接）。
         child.timeout = min(float(child.timeout or PROBE_TIMEOUT_SECONDS), PROBE_TIMEOUT_SECONDS)
+    attempted = False
+    handled_response: Any = None
+    error_to_raise: BaseException | None = None
     try:
-        response = child.complete(system=PROBE_SYSTEM, user=PROBE_USER)
-    except ProviderError as error:
+        if prepare_child is not None:
+            prepare_child(child)
+        attempted = True
+        try:
+            handled_response = child.complete(system=PROBE_SYSTEM, user=PROBE_USER)
+        except ProviderError as error:
+            attached = getattr(error, "response", None)
+            if attached is None:
+                error_to_raise = error
+            else:
+                # “只返回了思维链”这类错误带着完整 usage，仍可作为判定依据。
+                handled_response = attached
+        except BaseException as error:
+            error_to_raise = error
+    finally:
+        # 子 provider 的生命周期与 prepare/settle/callback 全包在同一 finally 内：
+        # prepare 失败、complete 异常、callback 抛错都不会漏关连接池。
         _close_probe_client(provider, child)
-        attached = getattr(error, "response", None)
-        if attached is None:
-            raise
-        # “只返回了思维链”这类错误带着完整 usage，仍可作为判定依据。
-        return _ProbeResult(
-            response=attached,
-            field_rejected=bool(getattr(child, "_drop_reasoning_fields", False)),
-            stream_disabled=bool(getattr(child, "_stream_disabled", False)),
-        )
-    except BaseException:
-        _close_probe_client(provider, child)
-        raise
-    result = _ProbeResult(
-        response=response,
+        if attempted:
+            if settle is not None:
+                try:
+                    settle(child, handled_response)
+                except Exception:
+                    logger.debug("探测对账失败", exc_info=True)
+            if on_attempt is not None:
+                try:
+                    on_attempt(handled_response, error_to_raise)
+                except Exception as error:  # noqa: BLE001 - 回调失败不拖垮探测
+                    logger.warning("探测用量回调失败：%s", redact_error_text(error))
+    if error_to_raise is not None:
+        raise error_to_raise
+    return _ProbeResult(
+        response=handled_response,
         field_rejected=bool(getattr(child, "_drop_reasoning_fields", False)),
         stream_disabled=bool(getattr(child, "_stream_disabled", False)),
     )
-    _close_probe_client(provider, child)
-    return result
 
 
-def _settle_streaming_support(provider: Any) -> bool:
+def _settle_streaming_support(provider: Any, on_attempt: Any = None, prepare_child: Any = None, settle: Any = None) -> bool:
     """先把“服务是否支持流式”定下来，返回是否可继续探测。
 
     用一个**不带任何思考字段**的极小请求：这样任何 400 都不可能归因于字段，而只能来自
@@ -937,7 +1141,7 @@ def _settle_streaming_support(provider: Any) -> bool:
     if getattr(provider, "_stream_disabled", False):
         return True
     try:
-        result = _probe_attempt(provider, style=NO_REASONING_STYLE, effort="", variant="")
+        result = _probe_attempt(provider, style=NO_REASONING_STYLE, effort="", variant="", on_attempt=on_attempt, prepare_child=prepare_child, settle=settle)
     except ProviderError as error:
         logger.warning("关思考探测前置检查失败：%s", error)
         return False
@@ -951,7 +1155,10 @@ def _settle_streaming_support(provider: Any) -> bool:
     return True
 
 
-def probe_thinking_off(provider: Any) -> dict[str, Any] | None:
+def probe_thinking_off(
+    provider: Any, *, on_attempt: Any = None, prepare_child: Any = None, settle: Any = None,
+    should_continue: Any = None,
+) -> dict[str, Any] | None:
     """探测该服务上真正能关闭思考的字段写法，返回可供 ``with_reasoning`` 的参数。
 
     返回值有三种含义，调用方必须区分：
@@ -977,13 +1184,20 @@ def probe_thinking_off(provider: Any) -> dict[str, Any] | None:
     candidates = THINKING_OFF_CANDIDATES.get(style)
     if not candidates:
         return {}
-    if not _settle_streaming_support(provider):
+    if should_continue is not None and not should_continue():
+        # 有限预算下已经出现不可量化的费用（unknown）：停止后续探测，不写策略缓存。
+        logger.info("探测预算/未知费用已阻止继续探测（前置）")
+        return None
+    if not _settle_streaming_support(provider, on_attempt=on_attempt, prepare_child=prepare_child, settle=settle):
         return None
     effort = disabled_reasoning_effort(style)
     undecided = False
     for variant in candidates:
+        if should_continue is not None and not should_continue():
+            logger.info("探测预算/未知费用已阻止继续探测（候选之间）")
+            return None
         try:
-            result = _probe_attempt(provider, style=style, effort=effort, variant=variant)
+            result = _probe_attempt(provider, style=style, effort=effort, variant=variant, on_attempt=on_attempt, prepare_child=prepare_child, settle=settle)
         except ProviderError as error:
             status = int(getattr(error, "status_code", 0) or 0)
             if status in FIELD_REJECTION_STATUS:
@@ -993,6 +1207,11 @@ def probe_thinking_off(provider: Any) -> dict[str, Any] | None:
             return None
         except Exception as error:  # noqa: BLE001 - 探测失败不能拖垮翻译作业
             logger.warning("关思考探测中断（%s）：%s", variant, error)
+            return None
+        if should_continue is not None and not should_continue():
+            # 本次 attempt 产生了不可量化费用（probe_state.stop 已置位）：不采纳、不缓存。
+            # 否则“前置已计量、候选未计量”时仍会把结果写进策略缓存。
+            logger.info("探测预算/未知费用已阻止采纳本次结果（%s）", variant)
             return None
         if result.field_rejected:
             # provider 的安全网已因 400 摘掉字段并重发成功：这个写法不被服务接受。
@@ -1007,6 +1226,9 @@ def probe_thinking_off(provider: Any) -> dict[str, Any] | None:
             return {"style": style, "effort": effort, "variant": variant}
     if undecided:
         logger.warning("关思考探测无法判定（该服务不返回 usage）：不写缓存")
+        return None
+    if should_continue is not None and not should_continue():
+        # 最后一步也要挡：不能把“已因未知费用停止”的轮次写成“所有写法都不生效”的负缓存。
         return None
     return {}
 

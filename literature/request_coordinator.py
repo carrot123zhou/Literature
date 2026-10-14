@@ -28,6 +28,10 @@ class BudgetExhausted(RuntimeError):
     """项目预算（含在途预留）不足以发出下一个请求。"""
 
 
+class ServiceBusyError(RuntimeError):
+    """等待服务级并发名额超时：说明名额没有正常归还（或服务长时间满员）。"""
+
+
 def prompt_cost_estimator(config: Any) -> "Callable[[int], float]":
     """根据 provider 单价估算一次请求的费用（价格未知时返回 0，不作硬预算）。"""
     def estimate(prompt_chars: int) -> float:
@@ -51,9 +55,12 @@ class RequestCoordinator:
     def __init__(
         self, *, default_service_limit: int = 4, cooldown_seconds: float = 5.0,
         spent_loader: "Callable[[str], float] | None" = None,
+        acquire_timeout_seconds: float = 1800.0,
     ) -> None:
         self.default_service_limit = max(1, int(default_service_limit))
         self.cooldown_seconds = max(0.0, float(cooldown_seconds))
+        # 等名额的上限：名额因异常泄漏时不能无限期挂住整本书的作业。
+        self.acquire_timeout_seconds = max(1.0, float(acquire_timeout_seconds))
         # 已花金额由协调层自己维护（进程内唯一来源），首次用时从持久账本 seed 一次；
         # 不能再由各 TranslationService 缓存自己的一份，否则 reserve 会拿到过期标量。
         self._spent_loader = spent_loader
@@ -65,15 +72,6 @@ class RequestCoordinator:
         self._reserved: dict[str, float] = defaultdict(float)
         self._unknown_cost_requests: dict[str, int] = defaultdict(int)
     # ---- 服务级并发与冷却 ------------------------------------------------ #
-
-    def set_service_limit(self, service_id: str, limit: int) -> None:
-        with self._lock:
-            self._service_limits[service_id] = max(1, int(limit))
-            self._semaphores.pop(service_id, None)  # 下次按新上限重建
-
-    def service_limit(self, service_id: str) -> int:
-        with self._lock:
-            return int(self._service_limits.get(service_id, self.default_service_limit))
 
     def raise_service_limit(self, service_id: str, limit: int) -> int:
         """只在需要更大额度时上调服务级并发上限；只升不降，避免压到运行中作业的额度。"""
@@ -117,19 +115,28 @@ class RequestCoordinator:
         finally:
             semaphore.release()
 
-    def acquire_service(self, service_id: str) -> threading.BoundedSemaphore:
-        """等待冷却并占用一个服务级并发额度；返回信号量供 release_service。"""
+    def acquire_service(self, service_id: str, timeout: float | None = None) -> threading.BoundedSemaphore:
+        """等待冷却并占用一个服务级并发额度；返回信号量供 release_service。
+
+        ``timeout`` 默认用实例的 ``acquire_timeout_seconds``；超时抛 ServiceBusyError，
+        而不是无限期等待（避免一个泄漏的名额把同服务的所有请求永久挂死）。
+        """
+        budget = self.acquire_timeout_seconds if timeout is None else max(0.0, float(timeout))
+        deadline = time.monotonic() + budget
         while True:
             with self._lock:
                 until = self._cooldown_until.get(service_id, 0.0)
             remaining = until - time.monotonic()
             if remaining > 0:
+                if time.monotonic() >= deadline:
+                    raise ServiceBusyError(f"等待 {service_id} 的服务并发名额超时（冷却中）。")
                 time.sleep(min(remaining, 0.25))
                 continue
             break
         semaphore = self._semaphore(service_id)
-        semaphore.acquire()
-        return semaphore
+        if semaphore.acquire(timeout=max(0.0, deadline - time.monotonic())):
+            return semaphore
+        raise ServiceBusyError(f"等待 {service_id} 的服务并发名额超时（名额可能未归还）。")
 
     def release_service(self, semaphore: threading.BoundedSemaphore | None) -> None:
         if semaphore is None:
@@ -146,14 +153,18 @@ class RequestCoordinator:
         """把服务级并发/冷却 + 项目预算（预算可在每次 attempt 预留）挂到真实 provider。"""
         def begin(prompt_chars: int = 0) -> Any:
             semaphore = self.acquire_service(service_id)
-            reservation = None
-            if project_id and budget > 0:
-                cost = cost_of(prompt_chars) if cost_of is not None else 0.0
-                reservation = self.reserve(project_id, cost=cost, budget=budget)
-                if reservation is None:
-                    self.release_service(semaphore)
-                    raise BudgetExhausted("项目预算不足，已停止提交新的模型请求")
-            return (semaphore, reservation)
+            try:
+                reservation = None
+                if project_id and budget > 0:
+                    cost = cost_of(prompt_chars) if cost_of is not None else 0.0
+                    reservation = self.reserve(project_id, cost=cost, budget=budget)
+                    if reservation is None:
+                        raise BudgetExhausted("项目预算不足，已停止提交新的模型请求")
+                return (semaphore, reservation)
+            except BaseException:
+                # 任何失败（含预算不足与意外异常）都必须归还名额，不能让一次异常永久漏槽。
+                self.release_service(semaphore)
+                raise
 
         def end(handle: Any, response: Any, error: Exception | None, final: bool = True) -> None:
             semaphore, reservation = handle if isinstance(handle, tuple) else (handle, None)

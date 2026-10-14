@@ -144,7 +144,6 @@ export default function ImportWorkspace({ refreshProjects, openResources, openHi
       .filter(item => !known.has(item.key));
     setPendingFiles(current => [...current, ...additions].slice(0, MAX_BATCH_FILES));
     if (additions.length) {
-      setFileSettingsOpen(true);
       for (const item of additions.filter(value => isPdf(value.file))) {
         if (!(item.file instanceof File)) continue;
         readPdfPageCount(item.file)
@@ -170,7 +169,6 @@ export default function ImportWorkspace({ refreshProjects, openResources, openHi
         const known = new Set(current.map(item => item.key));
         return [...current, ...additions.filter(item => !known.has(item.key))].slice(0, MAX_BATCH_FILES);
       });
-      if (additions.length) setFileSettingsOpen(true);
       if (value.errors.length || paths.length > MAX_BATCH_FILES) setMessage([...value.errors.map(error => error.message), `单批最多 ${MAX_BATCH_FILES} 个文件。`].join("；"));
     } catch (error) { setMessage(String(error)); }
   }, []);

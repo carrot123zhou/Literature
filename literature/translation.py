@@ -13,7 +13,7 @@ from collections.abc import Callable
 
 from .models import Block, TranslationEntry, UsageRecord, block_source_digest, utc_now
 from .providers import ProviderConfig, ProviderError, ProviderResponse, ProviderTimeoutError, TextProvider
-from .request_coordinator import BudgetExhausted, RequestCoordinator
+from .request_coordinator import BudgetExhausted, RequestCoordinator, prompt_cost_estimator
 from .storage import ProjectStore, StorageError
 
 logger = logging.getLogger(__name__)
@@ -477,7 +477,7 @@ def _merge_segment_maps(*maps: dict[str, dict[str, str]]) -> dict[str, dict[str,
 
 
 # 模型以输出长度上限结束时，哪怕标签刚好闭合也不能当作完整结果。
-_TRUNCATED_FINISH_REASONS = {"length", "max_tokens"}
+_TRUNCATED_FINISH_REASONS = {"length", "max_tokens", "incomplete_stream"}
 
 # 输出 token 里思考（reasoning）占比过高时，截断更可能是“预算被思考吃掉”，
 # 而不是真的译文太长；失败提示据此给出可执行的建议。
@@ -998,12 +998,8 @@ class TranslationService:
     # ---- 请求协调（服务并发 + 预算预留 + 未知费用） --------------------- #
 
     def _estimate_request_cost(self, prompt_chars: int) -> float:
-        config = self.provider.config
-        if config.input_price_per_million is None or config.output_price_per_million is None:
-            return 0.0
-        input_tokens = prompt_chars // 2 + 200
-        output_tokens = prompt_chars // 2
-        return (input_tokens * config.input_price_per_million + output_tokens * config.output_price_per_million) / 1_000_000
+        # 与 request_coordinator.prompt_cost_estimator 保持单一实现，避免三处公式漂移。
+        return prompt_cost_estimator(self.provider.config)(prompt_chars)
 
     def _record_response(self, response: ProviderResponse) -> None:
         self.store.record_usage(UsageRecord(
@@ -1111,6 +1107,17 @@ class TranslationService:
                 "partial_segments": {bid: dict(record) for bid, record in self._partial_segments.items()},
                 "partial_meta": {"run_token": self._active_job_id, "refine": bool(self._active_refine), "recorded_at": utc_now()},
             })
+
+    def _partial_snapshot(self) -> dict[str, dict[str, Any]]:
+        """在锁内取一份中间子段快照：工作线程不能再直接引用会变化的主字典。"""
+        with self._partial_lock:
+            return {bid: dict(record) for bid, record in self._partial_segments.items()}
+
+    def _forget_partials(self, block_ids: Iterable[str]) -> None:
+        """在锁内清除已完成的中间子段，避免主线程 pop 与工作线程迭代并发。"""
+        with self._partial_lock:
+            for block_id in block_ids:
+                self._partial_segments.pop(block_id, None)
 
     def _persist_partial_segments(self, project_id: str, job_id: str, outcome: _ChunkOutcome, chunk: list[Block]) -> None:
         """把已付费但未完成的子段落盘为本任务中间证据（同源、同阶段才可使用）。"""
@@ -1308,7 +1315,7 @@ class TranslationService:
             "translate_completed": translate_completed,
             "polish_target_ids": polish_target_ids, "polish_completed": polish_completed,
             "translate_failed": translate_failed, "polish_failed": polish_failed,
-            "partial_segments": {bid: dict(segs) for bid, segs in self._partial_segments.items() if bid not in task_done},
+            "partial_segments": {bid: dict(segs) for bid, segs in self._partial_snapshot().items() if bid not in task_done},
         })
 
         if polish_pending and summary["stop_reason"] is None:
@@ -1386,8 +1393,30 @@ class TranslationService:
         return None
 
     def _apply_frozen_model(self, frozen: dict[str, Any]) -> None:
-        """按冻结快照恢复非敏感模型参数（模型/端点/温度/输出上限）；密钥不在快照内。"""
+        """按冻结快照恢复非敏感模型参数（模型/端点/温度/输出上限）；密钥不在快照内。
+
+        密钥是**运行时从当前服务**读的，因此只有能确认「冻结时与现在指向同一服务地址」
+        才能应用；否则会把新服务的密钥发往旧地址（安全与计费风险）。
+        - 冻结 service_id 与当前不一致 → 拒绝。
+        - 冻结 base_url 与当前不一致 → 拒绝（即使 service_id 相同：地址已被改过，
+          旧地址可能已属于另一个服务，不得拿当前密钥去访问）。
+        - 两者都能确认一致时才应用。
+        """
         config = self.provider.config
+        frozen_service = str(frozen.get("service_id") or "")
+        current_service = str(self.service_id or "")
+        frozen_base = str(frozen.get("base_url") or "").rstrip("/")
+        current_base = str(getattr(config, "base_url", "") or "").rstrip("/")
+        if frozen_service and current_service and frozen_service != current_service:
+            raise ProviderError(
+                f"该任务由模型服务 {frozen_service} 创建，当前为 {current_service}；"
+                "为避免把当前服务的密钥发往旧地址，已拒绝恢复。请改回原服务商，或另建任务。"
+            )
+        if frozen_base and current_base and frozen_base != current_base:
+            raise ProviderError(
+                "该任务的模型地址在当前服务上已改变；为避免把当前密钥发往旧地址，已拒绝恢复。"
+                "请改回原地址，或另建任务。"
+            )
         for name in ("model", "base_url", "temperature", "max_output_tokens"):
             value = frozen.get(name)
             if value is not None:
@@ -1420,6 +1449,8 @@ class TranslationService:
             "target_count": len(target_ids),
             "source_digest": source_digest,
             "prompt_version": PROMPT_VERSION,
+            # 服务身份：恢复时据此确认密钥与地址仍属同一服务，不把当前密钥发往旧地址。
+            "service_id": str(self.service_id or ""),
             # 完整术语快照 + 摘要：恢复时按快照重新组装 prompt，不因用户后来改术语表而变。
             "glossary": glossary,
             "glossary_digest": glossary_digest,
@@ -1631,15 +1662,9 @@ class TranslationService:
         return spent + reserved >= budget
 
     def _estimate_chunk_cost(self, units: list[tuple[Block, list[tuple[str, str]]]]) -> float:
-        """在途请求的保守费用估算；价格未知时返回 0（不冒充硬预算）。"""
-        config = self.provider.config
-        if config.input_price_per_million is None or config.output_price_per_million is None:
-            return 0.0
+        """在途请求的保守费用估算；与单次请求估算共用同一公式（价格未知时返回 0）。"""
         chars = sum(len(text) for _, segments in units for _, text in segments)
-        # 粗估：输入含 prompt 与协议标签（约 chars/2 token + 常数），输出约 chars/2 token。
-        input_tokens = chars // 2 + 200
-        output_tokens = chars // 2
-        return (input_tokens * config.input_price_per_million + output_tokens * config.output_price_per_million) / 1_000_000
+        return prompt_cost_estimator(self.provider.config)(chars)
 
     def _process_blocks(
         self, project_id: str, job_id: str, document: Any, layer: TranslationLayer, blocks: list[Block], *,
@@ -1725,7 +1750,7 @@ class TranslationService:
                         block_languages=block_languages, glossary=glossary,
                         context_before=context_before, context_after=context_after,
                         previous_translation=previous_translation,
-                        partial_map=self._partial_segments,
+                        partial_map=self._partial_snapshot(),
                     )] = (submit_index, chunk_cost)
                     submit_index += 1
                 if not running:
@@ -1751,8 +1776,7 @@ class TranslationService:
                         if outcome.segments:
                             self._apply_outcome(layer, chunk, outcome, refine=refine, model_run_id=outcome.model_run_id, reuse_previous=reuse_previous, run_token=run_token)
                             pending_touched.update(block.block_id for block in chunk if block.block_id in outcome.segments)
-                            for block in chunk:
-                                self._partial_segments.pop(block.block_id, None)
+                            self._forget_partials([block.block_id for block in chunk])
                             commit(force=True)
                         self._persist_partial_segments(project_id, job_id, outcome, chunk)
                         stop_reason = "budget_paused"
@@ -1762,9 +1786,7 @@ class TranslationService:
                     # 用量已在 _complete 中随每次 HTTP 实时写入（含子批/重试），此处不再重复记账。
                     self._apply_outcome(layer, chunk, outcome, refine=refine, model_run_id=outcome.model_run_id, reuse_previous=reuse_previous, run_token=run_token)
                     # 完成的块要清除对应 phase 的中间结果，避免后续阶段错误复用。
-                    for block in chunk:
-                        if block.block_id in outcome.segments:
-                            self._partial_segments.pop(block.block_id, None)
+                    self._forget_partials([block.block_id for block in chunk if block.block_id in outcome.segments])
                     pending_touched.update(block.block_id for block in chunk)
                     commit()
                     handled.update(block.block_id for block in chunk)
@@ -2508,30 +2530,44 @@ class TranslationService:
             self.store.update_job(project_id, job_id, status="failed", error=str(error))
             raise
         truncated = str(getattr(response, "finish_reason", "") or "") in _TRUNCATED_FINISH_REASONS
+        saved_text = _clean_translated_text(response.content.strip())
+        try:
+            if save:
+                if not block_id:
+                    raise StorageError("保存即时翻译需要 block_id。")
+                # 即时翻译只产出单个 text 字段；被截断或面向表格/列表等字段级块时不能冒充完整译文。
+                if truncated:
+                    raise ProviderError("即时翻译被截断，未保存；请缩小选区或稍后重试。")
+                if not saved_text:
+                    raise ProviderError("即时翻译返回空内容，未保存。")
+                block = document.block(block_id)
+                if not block.source_text or block.items or block.caption or block.footnote or block.cells:
+                    raise StorageError("该段落使用字段级译文，请改用划选保存，不要覆盖整块。")
+                lock = self.store.translation_lock(project_id, locale)
+                with lock:
+                    layer = self.store.load_translation(project_id, locale)
+                    previous = layer.entries.get(block_id)
+                    # 人工编辑会自动锁定；即时保存不得静默覆盖锁定/人工译文。
+                    if previous is not None and (previous.locked or previous.status == "edited"):
+                        raise StorageError("该段落已有锁定或人工译文，即时翻译未覆盖；如需替换请先解锁。")
+                    revisions = list(previous.revisions) if previous else []
+                    if previous is not None:
+                        # 把被替换的旧内容写进修订历史，保证可追溯、可恢复。
+                        revisions.append(_entry_snapshot(previous))
+                    layer.entries[block_id] = TranslationEntry(
+                        block_id=block_id, text=saved_text, status="translated",
+                        source_hash=block_source_digest(block), model_run_id=response.request_id,
+                        revisions=revisions,
+                        selection_translations=list(previous.selection_translations) if previous else [],
+                        candidates=list(previous.candidates) if previous else [],
+                        structure_revision=int(getattr(block, "structure_revision", 0) or 0),
+                    )
+                    self.store.save_translation(layer)
+        except Exception as error:
+            self.store.update_job(project_id, job_id, status="failed", error=str(error))
+            raise
         self.store.update_job(project_id, job_id, status="completed", progress=1, result={"provider": response.provider, "model": response.model})
-        if save:
-            if not block_id:
-                raise StorageError("保存即时翻译需要 block_id。")
-            # 即时翻译只产出单个 text 字段；被截断或面向表格/列表等字段级块时不能冒充完整译文。
-            if truncated:
-                raise ProviderError("即时翻译被截断，未保存；请缩小选区或稍后重试。")
-            block = document.block(block_id)
-            if not block.source_text or block.items or block.caption or block.footnote or block.cells:
-                raise StorageError("该段落使用字段级译文，请改用划选保存，不要覆盖整块。")
-            lock = self.store.translation_lock(project_id, locale)
-            with lock:
-                layer = self.store.load_translation(project_id, locale)
-                previous = layer.entries.get(block_id)
-                layer.entries[block_id] = TranslationEntry(
-                    block_id=block_id, text=_clean_translated_text(response.content.strip()), status="translated",
-                    source_hash=block_source_digest(block), model_run_id=response.request_id,
-                    revisions=list(previous.revisions) if previous else [],
-                    selection_translations=list(previous.selection_translations) if previous else [],
-                    candidates=list(previous.candidates) if previous else [],
-                    structure_revision=int(getattr(block, "structure_revision", 0) or 0),
-                )
-                self.store.save_translation(layer)
-        return {"text": _clean_translated_text(response.content.strip()), "job_id": job_id}
+        return {"text": saved_text, "job_id": job_id}
 
     def edit(
         self, project_id: str, block_id: str, text: str | None = None, *, locale: str = "zh-CN",

@@ -114,7 +114,10 @@ export default memo(function OutlinePane(props: Props) {
   return <aside className="sidebar mineru-control-column review-outline">
     <div className="panel-title"><strong>文档目录</strong><span>{flattenToc(document.toc).length} 个标题</span></div>
     <div className="pane-scroll">
-      <details className="outline-section review-assistant" open>
+      <details className="outline-section" open><summary>当前目录</summary>
+        {document.toc.length ? <ul className="toc-tree">{document.toc.map(node => <TocRow key={node.node_id} node={node} selected={selected} activeBlock={activeBlock} onSelect={onSelect}/>)}</ul> : <p className="empty-note">还没有标题。选择右侧正文块，将其设为标题。</p>}
+      </details>
+      <details className="outline-section review-assistant">
         <summary>AI 校准</summary>
         <TaskModelPicker
           label="校对模型"
@@ -145,7 +148,7 @@ export default memo(function OutlinePane(props: Props) {
             ? <p role="alert" className="review-error">{job.error || job.message}</p>
             : <p>{job.message}</p>}
           {summary && <p className="reconciliation-summary">{summary}</p>}
-          <details><summary>详情</summary>
+          <details><summary>诊断详情</summary>
             {coverage && <p>候选 {coverage.candidates} 个 · 第一遍规划定案 {coverage.reused ?? 0} 个 · 第二遍必须定案 {coverage.second_pass ?? 0} 个{coverage.needs_review > 0 ? `，${coverage.needs_review} 个仍需核对` : ""}{qa && `，抽查 ${qa.checked} 项一致性 ${qa.agree}/${qa.checked}`}。</p>}
             {tocExtraction === "local" && <p className="review-hint">目录来自本地解析（有显式目录标记页），层级按编号与标题词推断。</p>}
             {planning?.mode === "adaptive" && <p className="review-hint">规划路径：{planning.fallback ? `回退整体串行（${planning.fallback_reason || "框架不可靠"}）` : `自适应分支 · 框架 ${planning.framework?.state ?? "?"} · 可靠区域 ${planning.reliable_regions ?? 0} · 歧义区域 ${planning.ambiguous_regions ?? 0} · 局部升级 ${planning.local_upgrades ?? 0} · 遗漏 ${planning.missing ?? 0} · 重叠只读 ${planning.overlap_ignored ?? 0}`}</p>}
@@ -208,9 +211,6 @@ export default memo(function OutlinePane(props: Props) {
           </article>;
         })}
       </details>}
-      <details className="outline-section" open><summary>当前目录</summary>
-        {document.toc.length ? <ul className="toc-tree">{document.toc.map(node => <TocRow key={node.node_id} node={node} selected={selected} activeBlock={activeBlock} onSelect={onSelect}/>)}</ul> : <p className="empty-note">还没有标题。选择右侧正文块，将其设为标题。</p>}
-      </details>
       <details className="outline-section structure-queue"><summary>修订历史 · {live.length}</summary>
         {live.length > 1 && <button className="block-button" disabled={blocked} onClick={onRevertAll}>撤销全部修订</button>}
         {patches.slice(0, 40).map(value => <article key={value.patch_id} className={value.reverted_at ? "is-reverted" : ""}>

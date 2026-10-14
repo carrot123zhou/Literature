@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import subprocess
+import tempfile
 import threading
 import uuid
 from dataclasses import asdict, dataclass, field
@@ -24,6 +25,10 @@ logger = logging.getLogger(__name__)
 
 # 探测缓存文件的读改写互斥：两个项目并发翻译同一服务时，避免丢掉对方的条目。
 _POLICY_LOCK = threading.Lock()
+
+# 模型服务清单的读改写互斥：并发 CRUD 会丢失更新，且固定 .tmp 文件名会互相覆盖。
+# RLock 允许 create/update 内部再调 _write。
+_WRITE_LOCK = threading.RLock()
 
 ROLE_STRUCTURE = "structure"
 ROLE_TRANSLATION = "translation"
@@ -183,7 +188,7 @@ class ModelServiceStore:
             return {"service_id": provider["service_id"] if provider else value, "model": model}
         return _empty_role()
 
-    def _read(self) -> dict[str, Any]:
+    def _read(self, *, keep_separate: set[str] | None = None) -> dict[str, Any]:
         try:
             value = json.loads(self.path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
@@ -209,6 +214,9 @@ class ModelServiceStore:
             preset = _clean_text(item.get("preset"), maximum=40) or "custom"
             base_url = _clean_text(item.get("base_url"), maximum=500)
             key = (base_url, preset)
+            if keep_separate and service_id in keep_separate:
+                # 迁移时发现同组服务的密钥不一致：不合并，否则一个密钥会被另一个静默替换。
+                key = (service_id, preset)
             provider = groups.get(key)
             if provider is None:
                 provider = {
@@ -235,9 +243,17 @@ class ModelServiceStore:
     def _write(self, value: dict[str, Any]) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         payload = {"version": 2, "services": value.get("services", []), "roles": value.get("roles", {role: _empty_role() for role in MODEL_ROLES})}
-        temporary = self.path.with_name(self.path.name + ".tmp")
-        temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-        temporary.replace(self.path)
+        # 唯一临时名 + fsync：固定 `.tmp` 名会被并发写者互相覆盖（后者 replace 报 FileNotFoundError）。
+        handle, temporary = tempfile.mkstemp(prefix=f".{self.path.name}-", dir=self.path.parent)
+        try:
+            with os.fdopen(handle, "w", encoding="utf-8") as output:
+                output.write(json.dumps(payload, ensure_ascii=False, indent=2))
+                output.flush()
+                os.fsync(output.fileno())
+            os.replace(temporary, self.path)
+        except Exception:
+            Path(temporary).unlink(missing_ok=True)
+            raise
 
     # ---- 关思考字段变体缓存（非机密，可重建） --------------------------- #
     #
@@ -423,46 +439,103 @@ class ModelServiceStore:
 
     def ensure_migrated(self) -> None:
         """把旧版 v1 扁平配置一次性落盘为 v2（同一个 Base URL 的服务合并成一个服务商）。
-        失败不影响读取（读取时仍按迁移后视图）。"""
+        失败不影响读取（读取时仍按迁移后视图）。
+
+        合并前先核对同组服务的密钥：两个不同的密钥不能被静默合并成一个；
+        被合并掉的服务若持有唯一密钥，则把密钥复制到存活的 service_id 上。
+        """
+        with _WRITE_LOCK:
+            try:
+                raw = json.loads(self.path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                return
+            if isinstance(raw, dict) and raw.get("version") == 2:
+                return
+            try:
+                keep_separate = self._migration_keep_separate(raw)
+                self._write(self._read(keep_separate=keep_separate))
+                self._copy_surviving_keys(raw, keep_separate)
+            except OSError:
+                logger.exception("模型配置 v1→v2 迁移写盘失败（读取仍按迁移后视图）")
+
+    @staticmethod
+    def _v1_merge_groups(raw: Any) -> dict[tuple[str, str], list[str]]:
+        """按 (base_url, preset) 列出 v1 扁平服务；已是 v2 形态的条目不参与。"""
+        groups: dict[tuple[str, str], list[str]] = {}
+        services = raw.get("services") if isinstance(raw, dict) and isinstance(raw.get("services"), list) else []
+        for item in services:
+            if not isinstance(item, dict) or not item.get("service_id") or isinstance(item.get("models"), list):
+                continue
+            key = (
+                _clean_text(item.get("base_url"), maximum=500),
+                _clean_text(item.get("preset"), maximum=40) or "custom",
+            )
+            groups.setdefault(key, []).append(str(item["service_id"]))
+        return groups
+
+    def _migration_keep_separate(self, raw: Any) -> set[str]:
+        """同 Base URL 但密钥不一致的旧服务不合并，避免迁移静默替换/丢失密钥。"""
+        keep: set[str] = set()
+        for members in self._v1_merge_groups(raw).values():
+            if len(members) < 2:
+                continue
+            keys = {self._key_or_empty(service_id) for service_id in members}
+            if len({value for value in keys if value}) > 1:
+                keep.update(members)
+        return keep
+
+    def _copy_surviving_keys(self, raw: Any, keep_separate: set[str]) -> None:
+        """合并后若存活 service_id 没有密钥，把被合并服务中唯一的密钥复制过去。"""
+        for members in self._v1_merge_groups(raw).values():
+            if len(members) < 2 or any(member in keep_separate for member in members):
+                continue
+            survivor = members[0]
+            if self._key_or_empty(survivor):
+                continue
+            donor = next((member for member in members if self._key_or_empty(member)), "")
+            if not donor:
+                continue
+            try:
+                save_service_key(survivor, self._key_or_empty(donor))
+            except ProviderError:
+                logger.warning("迁移时复制密钥失败：%s → %s", donor, survivor)
+
+    def _key_or_empty(self, service_id: str) -> str:
         try:
-            raw = json.loads(self.path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            return
-        if isinstance(raw, dict) and raw.get("version") == 2:
-            return
-        try:
-            self._write(self._read())
-        except OSError:
-            logger.exception("模型配置 v1→v2 迁移写盘失败（读取仍按迁移后视图）")
+            return self.api_key(service_id)
+        except Exception:
+            return ""
 
     def create(self, payload: dict[str, Any]) -> dict[str, Any]:
-        value = self._read()
-        provider = self._build_provider(payload, service_id=uuid.uuid4().hex)
-        value["services"].append(provider.to_dict())
-        # 第一个服务商自动绑定到尚未设置的角色（绑到它的第一个模型），减少首次配置步骤。
-        first_model = provider.models[0].model if provider.models else ""
-        for role in MODEL_ROLES:
-            if not value["roles"].get(role, {}).get("service_id"):
-                value["roles"][role] = {"service_id": provider.service_id, "model": first_model}
-        self._write(value)
-        return provider.to_dict()
+        with _WRITE_LOCK:
+            value = self._read()
+            provider = self._build_provider(payload, service_id=uuid.uuid4().hex)
+            value["services"].append(provider.to_dict())
+            # 第一个服务商自动绑定到尚未设置的角色（绑到它的第一个模型），减少首次配置步骤。
+            first_model = provider.models[0].model if provider.models else ""
+            for role in MODEL_ROLES:
+                if not value["roles"].get(role, {}).get("service_id"):
+                    value["roles"][role] = {"service_id": provider.service_id, "model": first_model}
+            self._write(value)
+            return provider.to_dict()
 
     def update(self, service_id: str, payload: dict[str, Any]) -> dict[str, Any]:
-        value = self._read()
-        for index, item in enumerate(value["services"]):
-            if item.get("service_id") != service_id:
-                continue
-            provider = self._build_provider({**item, **payload}, service_id=service_id)
-            value["services"][index] = provider.to_dict()
-            # 角色里引用的模型已不存在（被删/改名）时，回落到第一个模型，避免悬空绑定。
-            for role in MODEL_ROLES:
-                binding = value["roles"].get(role, _empty_role())
-                if binding.get("service_id") == service_id and not self._model_in(provider, binding.get("model", "")):
-                    value["roles"][role] = {"service_id": service_id, "model": provider.models[0].model if provider.models else ""}
-            self._write(value)
-            self._invalidate_policy(service_id, item, provider)
-            return provider.to_dict()
-        raise ProviderError(f"模型服务不存在：{service_id}")
+        with _WRITE_LOCK:
+            value = self._read()
+            for index, item in enumerate(value["services"]):
+                if item.get("service_id") != service_id:
+                    continue
+                provider = self._build_provider({**item, **payload}, service_id=service_id)
+                value["services"][index] = provider.to_dict()
+                # 角色里引用的模型已不存在（被删/改名）时，回落到第一个模型，避免悬空绑定。
+                for role in MODEL_ROLES:
+                    binding = value["roles"].get(role, _empty_role())
+                    if binding.get("service_id") == service_id and not self._model_in(provider, binding.get("model", "")):
+                        value["roles"][role] = {"service_id": service_id, "model": provider.models[0].model if provider.models else ""}
+                self._write(value)
+                self._invalidate_policy(service_id, item, provider)
+                return provider.to_dict()
+            raise ProviderError(f"模型服务不存在：{service_id}")
 
     @staticmethod
     def _model_in(provider: ModelProvider, model: str) -> bool:
@@ -481,40 +554,42 @@ class ModelServiceStore:
                 self.forget_thinking_policy(service_id, str(model))
 
     def delete(self, service_id: str) -> None:
-        value = self._read()
-        value["services"] = [item for item in value["services"] if item.get("service_id") != service_id]
-        for role in MODEL_ROLES:
-            if value["roles"].get(role, {}).get("service_id") == service_id:
-                value["roles"][role] = _empty_role()
-        self._write(value)
+        with _WRITE_LOCK:
+            value = self._read()
+            value["services"] = [item for item in value["services"] if item.get("service_id") != service_id]
+            for role in MODEL_ROLES:
+                if value["roles"].get(role, {}).get("service_id") == service_id:
+                    value["roles"][role] = _empty_role()
+            self._write(value)
         delete_service_key(service_id)
         self.forget_thinking_policy(service_id)
 
     def set_roles(self, roles: dict[str, Any]) -> dict[str, dict[str, str]]:
-        value = self._read()
-        known = {item.get("service_id"): item for item in value["services"]}
-        for role in MODEL_ROLES:
-            if role not in roles:
-                continue
-            candidate = roles.get(role)
-            if isinstance(candidate, str):
-                candidate = {"service_id": candidate, "model": ""}
-            if not isinstance(candidate, dict):
-                continue
-            service_id = _clean_text(candidate.get("service_id"), maximum=64)
-            model = _clean_text(candidate.get("model"), maximum=200)
-            if not service_id:
-                value["roles"][role] = _empty_role()
-                continue
-            provider = known.get(service_id)
-            if provider is None:
-                raise ProviderError(f"模型服务不存在：{service_id}")
-            models = provider.get("models") or []
-            if model and not any(entry.get("model") == model for entry in models):
-                raise ProviderError(f"模型不存在：{model}")
-            value["roles"][role] = {"service_id": service_id, "model": model or (str(models[0]["model"]) if models else "")}
-        self._write(value)
-        return value["roles"]
+        with _WRITE_LOCK:
+            value = self._read()
+            known = {item.get("service_id"): item for item in value["services"]}
+            for role in MODEL_ROLES:
+                if role not in roles:
+                    continue
+                candidate = roles.get(role)
+                if isinstance(candidate, str):
+                    candidate = {"service_id": candidate, "model": ""}
+                if not isinstance(candidate, dict):
+                    continue
+                service_id = _clean_text(candidate.get("service_id"), maximum=64)
+                model = _clean_text(candidate.get("model"), maximum=200)
+                if not service_id:
+                    value["roles"][role] = _empty_role()
+                    continue
+                provider = known.get(service_id)
+                if provider is None:
+                    raise ProviderError(f"模型服务不存在：{service_id}")
+                models = provider.get("models") or []
+                if model and not any(entry.get("model") == model for entry in models):
+                    raise ProviderError(f"模型不存在：{model}")
+                value["roles"][role] = {"service_id": service_id, "model": model or (str(models[0]["model"]) if models else "")}
+            self._write(value)
+            return value["roles"]
 
     # ---- 密钥与 provider 构造 ------------------------------------------- #
 
@@ -560,13 +635,26 @@ class ModelServiceStore:
         self, *, base_url: str = "", api_key: str = "", service_id: str = "", timeout: float = 30.0,
     ) -> list[dict[str, Any]]:
         """拉取远端 `/v1/models`：可只给 base URL + key（新建服务尚未保存），
-        也可给 service_id 复用已保存的 base URL / Keychain 密钥，缺什么补什么。"""
+        也可给 service_id 复用已保存的 base URL / Keychain 密钥，缺什么补什么。
+
+        带 service_id 时**不会**把已保存的密钥发往调用方给的任意 base_url：
+        地址与服务配置不一致时，要么拒绝，要么使用调用方自带的 key。
+        """
         from .providers import list_remote_models
         resolved_base = _clean_text(base_url, maximum=500)
         resolved_key = (api_key or "").strip()
         if service_id:
             service = self.get(service_id)
-            resolved_base = resolved_base or str(service.get("base_url") or "")
+            stored_base = str(service.get("base_url") or "").strip()
+            if resolved_base and resolved_base.rstrip("/") != stored_base.rstrip("/"):
+                if not resolved_key:
+                    raise ProviderError(
+                        "指定的 service_id 与 Base URL 不一致；为避免把已保存的密钥发往其它地址，已拒绝。"
+                        "请先保存服务配置，或同时提供 API Key。"
+                    )
+                # 调用方自带 key：只使用调用方给的地址与 key，绝不回退到已保存的密钥。
+                return list_remote_models(resolved_base, resolved_key, timeout=timeout)
+            resolved_base = resolved_base or stored_base
             resolved_key = resolved_key or self.api_key(service_id)
         return list_remote_models(resolved_base, resolved_key, timeout=timeout)
 

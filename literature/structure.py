@@ -968,9 +968,12 @@ def run_structure_job(
                      "unlisted_titles": model_payload.get("unlisted_titles") or []},
                     review_mode=review_mode)
             decisions.update(reused_decisions)
-            for value in _decision_suggestions(document, reused_decisions.values()):
+            reused_suggestions = _decision_suggestions(document, reused_decisions.values())
+            for value in reused_suggestions:
                 value["automatic"] = False
                 by_block[value["block_id"]] = value
+            # 模型真正改过的块（产出了建议）；用于否决“模型说无需修改”的本地错误改动。
+            model_changed_ids: set[str] = {value["block_id"] for value in reused_suggestions}
             review_id_set = set(review_ids)
             review_candidates = [item for item in candidates if item["block_id"] in review_id_set]
             # 抽查项只用于一致性指标，绝不能写回建议：与“必须定案”的项分开排队。
@@ -1096,7 +1099,14 @@ def run_structure_job(
                 decisions.update(batch_decisions)
                 for value in values:
                     value["automatic"] = False
+                    model_changed_ids.add(value["block_id"])
                     by_block[value["block_id"]] = value
+            if mode in STRUCTURE_MODES:
+                # 模型明确判断“这里没问题”时，本地规则的错误改动必须被否决：不能因为
+                # 模型对“保持不变”不产出建议，就让本地低置信度改动留在“全部自动应用”里。
+                for block_id, decision in decisions.items():
+                    if decision.get("unchanged") and block_id in by_block and block_id not in model_changed_ids:
+                        by_block.pop(block_id, None)
             qa_report = reasoning.compare_qa_sample(reused_decisions, qa_checked, candidates) if qa_checked else None
             if qa_report:
                 if qa_report["disagree"]:
@@ -1135,7 +1145,14 @@ def run_structure_job(
         store.save_structure_suggestions(project_id, job_id, suggestions, document.updated_at)
         if auto_apply and mode in STRUCTURE_MODES:
             # 用户档位下“全部自动应用”：粗校/精校都直接落地，安全网是可逆补丁 + 修订历史。
-            applied_patches = apply_all_suggestions(store, project_id, suggestions)
+            # 但会合并正文的操作（多个列表项→单个标题/正文）必须先排除：一个不合规项
+            # 不能让整批原子提交失败，更不能把列表合进标题。
+            safe_suggestions = [value for value in suggestions if not _proposal_merges_body(document, value)]
+            blocked_merges = len(suggestions) - len(safe_suggestions)
+            if blocked_merges:
+                emit(f"{blocked_merges} 项会合并多个列表项，已改为待人工确认（不自动执行）",
+                     level="warning", progress=0.95)
+            applied_patches = apply_all_suggestions(store, project_id, safe_suggestions)
         elif auto_apply:
             applied_patches = apply_automatic(store, project_id, suggestions)
         else:
@@ -1728,6 +1745,17 @@ def _assert_block_fresh(block: Block, operation: str, before: Any) -> None:
         raise StorageError("该建议已过时：文本内容已被其它修订修改，请重新校准后再采用。")
 
 
+def _proposal_merges_body(document: Document, proposal: dict[str, Any]) -> bool:
+    """该建议是否会把多个列表项合并成一个单字段（标题/正文）——自动应用必须排除。"""
+    if str(proposal.get("operation")) not in {"set_title", "set_type"}:
+        return False
+    try:
+        block = document.block(str(proposal.get("block_id", "")))
+    except StorageError:
+        return False
+    return block.type == "list" and len([item for item in block.items if str(item).strip()]) > 1
+
+
 def _prepare_patch(document: Document, proposal: dict[str, Any], source: str, *, automatic_policy: str = "strict") -> StructurePatch:
     """校验并就地修改内存文档，不写盘；供单项与批量共用。
 
@@ -1756,6 +1784,10 @@ def _prepare_patch(document: Document, proposal: dict[str, Any], source: str, *,
         # 自动应用只允许“将已有标题降为正文”这类可逆操作，不能自动改成列表/脚注。
         # automatic_policy="all" 是粗校/精校档位下的“全部自动应用”，仍只走可逆补丁。
         raise StorageError("自动应用只允许将标题降为正文。")
+    if automatic_policy == "all" and operation in {"set_title", "set_type"} and block.type == "list" \
+            and len([item for item in block.items if str(item).strip()]) > 1:
+        # 多个列表项 → 单个标题/正文会合并正文，永不自动执行；需人工确认。
+        raise StorageError("自动应用不允许把多个列表项合并成一个标题或正文；请人工确认。")
     before, after_value = handler(block, proposal["after"])
     # 结构改动会改变译文的上下文（角色/层级），让已存在的译文进入 stale 待复核。
     block.structure_revision = int(getattr(block, "structure_revision", 0)) + 1
