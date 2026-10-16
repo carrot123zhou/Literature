@@ -46,7 +46,7 @@ def main() -> None:
     ], cwd=ROOT, check=True)
     source = DIST / f"literature-sidecar{suffix}"
     BINARIES.mkdir(parents=True, exist_ok=True)
-    destination = BINARIES / f"literature-sidecar-{target_triple()}"
+    destination = BINARIES / f"literature-sidecar-{target_triple()}{suffix}"
     shutil.copy2(source, destination)
     if os.name != "nt":
         destination.chmod(0o755)
