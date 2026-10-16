@@ -141,7 +141,7 @@ export type ExportTocNode = {
 };
 export type ExportFile = { name: string; rel_path: string; bytes: number; single_file: boolean };
 export type ExportRecord = {
-  export_id: string; created_at: string; mode: string; locale: string; formats: string[];
+  export_id: string; created_at: string; display_name?: string; mode: string; locale: string; formats: string[];
   path: string; files: ExportFile[]; bytes: number; warnings: string[];
 };
 export type ExportOptions = {

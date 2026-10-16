@@ -35,7 +35,7 @@ const WORK_TABS: { view: WorkView; label: string }[] = [
 export default function HomeTopbar({ active, openHome, openResources, openWork, project, closeProject, openSettings }: Props) {
   return <header className={`intake-topbar home-topbar${project ? " project-topbar" : ""}`}>
     <div className="intake-brand-group">
-      <button className="intake-brand" onClick={openHome}>Literature</button>
+      <button className="intake-brand" onClick={openHome}><img className="topbar-appicon" src="/favicon-32x32.png" alt="" aria-hidden="true"/>Literature</button>
       {project && <span className="project-topbar-title"><strong>{project.title}</strong>{project.subtitle && <small>{project.subtitle}</small>}</span>}
       {project && <button className="project-close-button" title="关闭当前任务" aria-label="关闭当前任务" onClick={closeProject}>✕</button>}
     </div>

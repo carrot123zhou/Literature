@@ -17,7 +17,7 @@ from typing import Any, Callable, Literal
 from fastapi import File, UploadFile
 from pydantic import BaseModel, ConfigDict, Field
 
-from .exporters import create_export, export_options, list_exports, resolve_export_file
+from .exporters import create_export, delete_export, export_options, list_exports, rename_export, resolve_export_file
 from .flow import detect_cross_page_flow
 from .mineru import detect_language, import_mineru
 from .mineru_capabilities import MAX_BATCH_FILES, validate_source
@@ -130,6 +130,10 @@ class ExportRequest(BaseModel):
     block_ids: list[str] = Field(default_factory=list)
     filename: str = Field(default="", max_length=240)
     missing_policy: Literal["fallback_source"] = "fallback_source"
+
+
+class ExportRenameRequest(BaseModel):
+    display_name: str = Field(min_length=1, max_length=200)
 
 
 class MinerUImport(BaseModel):
@@ -1167,7 +1171,7 @@ def create_app(store: ProjectStore | None = None):
             "status": "ok",
             "version": "0.1.0",
             "runtime_revision": RUNTIME_REVISION,
-            "capabilities": ["intake_items_v1", "structure_review_v2", "model_services_v1", "model_services_v2", "model_services_v3", "model_services_v4", "structure_job_v1", "structure_modes_v1", "structure_pause_v1", "structure_vision_v1", "structure_flow_v1", "desktop_resources_v1", "translation_module_v1", "translation_engine_v2", "resource_pipeline_v1", "translation_safety_v1", "parse_lifecycle_v1", "task_history_v1", "parse_backends_v1", "export_v1"],
+            "capabilities": ["intake_items_v1", "structure_review_v2", "model_services_v1", "model_services_v2", "model_services_v3", "model_services_v4", "structure_job_v1", "structure_modes_v1", "structure_pause_v1", "structure_vision_v1", "structure_flow_v1", "desktop_resources_v1", "translation_module_v1", "translation_engine_v2", "resource_pipeline_v1", "translation_safety_v1", "parse_lifecycle_v1", "task_history_v1", "parse_backends_v1", "export_v1", "export_manage_v1"],
         }
 
     @app.get("/parse/backends")
@@ -2082,6 +2086,20 @@ def create_app(store: ProjectStore | None = None):
     @app.get("/projects/{project_id}/exports")
     def exports_list_endpoint(project_id: str):
         return list_exports(store, project_id)
+
+    @app.patch("/projects/{project_id}/exports/{export_id}")
+    def export_rename_endpoint(project_id: str, export_id: str, request: ExportRenameRequest):
+        try:
+            return rename_export(store, project_id, export_id, request.display_name)
+        except FileNotFoundError:
+            raise HTTPException(status_code=404, detail="导出记录不存在。")
+
+    @app.delete("/projects/{project_id}/exports/{export_id}")
+    def export_delete_endpoint(project_id: str, export_id: str):
+        try:
+            return delete_export(store, project_id, export_id)
+        except FileNotFoundError:
+            raise HTTPException(status_code=404, detail="导出记录不存在。")
 
     @app.get("/projects/{project_id}/exports/{export_id}/file")
     def export_file_endpoint(project_id: str, export_id: str, name: str):

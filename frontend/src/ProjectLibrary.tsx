@@ -506,7 +506,12 @@ export default function ProjectLibrary({ projects, currentProjectId, refreshProj
         onOpenReading={project => { setTranslating(null); openView("read", project); }}
         onSubmit={async options => {
           const ok = await onTranslateProject(translating.project_id, options);
-          if (ok) setTranslating(null);
+          if (ok) {
+            // 确认后自动打开该项目：任务已在本地队列，直接进入对照翻译页看进度。
+            const target = translating;
+            setTranslating(null);
+            openView("read", target);
+          }
         }}
       />}
 

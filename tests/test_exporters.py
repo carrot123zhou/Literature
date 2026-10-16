@@ -8,6 +8,7 @@ EPUB 结构校验、DOCX 可打开且含 document.xml、空章节/空文档、ex
 
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 import zipfile
@@ -456,6 +457,118 @@ class ApiExportTests(unittest.TestCase):
         source.write_text("<h1>x</h1>", encoding="utf-8")
         created = self.store.create_project(source, title="No Doc")
         response = self.client.get(f"/projects/{created['project_id']}/export/options", headers=self.headers)
+        self.assertEqual(response.status_code, 400, response.text)
+
+
+class ExportManageTests(unittest.TestCase):
+    """导出管理：删除与重命名只动 exports/ 目录，不影响 raw / document / translations。"""
+
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.root = Path(self.temporary.name)
+        source = self.root / "source.html"
+        source.write_text("<h1>Book</h1>", encoding="utf-8")
+        self.store = ProjectStore(self.root / "library")
+        created = self.store.create_project(source, title="Book")
+        self.project_id = created["project_id"]
+        self.project_dir = Path(created["path"])
+        self.document = _document(self.project_dir)
+        self.document.project_id = self.project_id
+        self.store.save_document(self.document)
+
+        from fastapi.testclient import TestClient
+
+        from literature.api import create_app
+
+        self.client = TestClient(create_app(self.store))
+        self.headers = {"x-literature-token": self.client.app.state.session_token}
+
+    def tearDown(self) -> None:
+        self.client.close()
+        self.temporary.cleanup()
+
+    def _export(self, **payload):
+        return self.client.post(f"/projects/{self.project_id}/export", headers=self.headers, json=payload)
+
+    def test_delete_removes_dir_and_history_and_keeps_sources(self) -> None:
+        created = self._export(formats=["epub"], mode="bilingual")
+        self.assertEqual(created.status_code, 200, created.text)
+        export_id = created.json()["export_id"]
+        exports_dir = self.project_dir / "exports" / export_id
+        self.assertTrue(exports_dir.is_dir())
+
+        response = self.client.delete(f"/projects/{self.project_id}/exports/{export_id}", headers=self.headers)
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json(), {"export_id": export_id, "deleted": True})
+        self.assertFalse(exports_dir.exists())
+        listing = self.client.get(f"/projects/{self.project_id}/exports", headers=self.headers)
+        self.assertEqual(listing.json(), [])
+
+        # 重复删除 → 404；非法标识 → 400（直接打函数层，避免路由层把 .. 规范化）。
+        again = self.client.delete(f"/projects/{self.project_id}/exports/{export_id}", headers=self.headers)
+        self.assertEqual(again.status_code, 404, again.text)
+        from literature.exporters import delete_export as _delete
+
+        from literature.storage import StorageError
+
+        with self.assertRaises(StorageError):
+            _delete(self.store, self.project_id, "../translations")
+        # 源数据不受影响。
+        self.assertEqual(self.store.load_document(self.project_id).blocks[2].source_text, "Hello world.")
+
+    def test_rename_updates_manifest_and_renames_single_file(self) -> None:
+        created = self._export(formats=["epub"], mode="bilingual", filename="custom name")
+        self.assertEqual(created.status_code, 200, created.text)
+        export_id = created.json()["export_id"]
+        old_file = self.project_dir / "exports" / export_id / "custom name.epub"
+        self.assertTrue(old_file.is_file())
+
+        response = self.client.patch(
+            f"/projects/{self.project_id}/exports/{export_id}", headers=self.headers,
+            json={"display_name": "我的书：2026 版"},
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        value = response.json()
+        self.assertEqual(value["display_name"], "我的书：2026 版")
+        self.assertEqual([item["rel_path"] for item in value["files"]], ["我的书：2026 版.epub"])
+        self.assertFalse(old_file.exists())
+        new_file = self.project_dir / "exports" / export_id / "我的书：2026 版.epub"
+        self.assertTrue(new_file.is_file())
+
+        manifest = json.loads((self.project_dir / "exports" / export_id / "export.json").read_text(encoding="utf-8"))
+        self.assertEqual(manifest["display_name"], "我的书：2026 版")
+        listing = self.client.get(f"/projects/{self.project_id}/exports", headers=self.headers)
+        self.assertEqual(listing.json()[0]["display_name"], "我的书：2026 版")
+
+        # 重命名后的产物仍能按新路径下载。
+        download = self.client.get(
+            f"/projects/{self.project_id}/exports/{export_id}/file", headers=self.headers,
+            params={"name": "我的书：2026 版.epub"},
+        )
+        self.assertEqual(download.status_code, 200, download.text)
+
+    def test_rename_renames_all_single_files_with_collision_suffix(self) -> None:
+        # markdown 导出含 assets/ 下两张同名 png：重命名后在同目录碰撞，自动加 " (2)" 后缀。
+        created = self._export(formats=["markdown"], mode="source")
+        self.assertEqual(created.status_code, 200, created.text)
+        export_id = created.json()["export_id"]
+        response = self.client.patch(
+            f"/projects/{self.project_id}/exports/{export_id}", headers=self.headers,
+            json={"display_name": "同名"},
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        rels = sorted(item["rel_path"] for item in response.json()["files"])
+        self.assertEqual(rels, ["assets/同名 (2).png", "assets/同名.png", "同名.md"])
+        for rel in rels:
+            self.assertTrue((self.project_dir / "exports" / export_id / rel).is_file(), rel)
+
+    def test_rename_empty_name_rejected(self) -> None:
+        created = self._export(formats=["markdown"], mode="source")
+        export_id = created.json()["export_id"]
+        response = self.client.patch(
+            f"/projects/{self.project_id}/exports/{export_id}", headers=self.headers,
+            json={"display_name": "   "},
+        )
         self.assertEqual(response.status_code, 400, response.text)
 
 

@@ -15,6 +15,16 @@ export function fetchExports(projectId: string) {
   return api<ExportRecord[]>(`/projects/${projectId}/exports`);
 }
 
+export function renameExport(projectId: string, exportId: string, displayName: string) {
+  return api<ExportRecord>(`/projects/${projectId}/exports/${encodeURIComponent(exportId)}`, {
+    method: "PATCH", body: JSON.stringify({ display_name: displayName }),
+  });
+}
+
+export function deleteExport(projectId: string, exportId: string) {
+  return api<{ export_id: string; deleted: boolean }>(`/projects/${projectId}/exports/${encodeURIComponent(exportId)}`, { method: "DELETE" });
+}
+
 export function exportFileUrl(projectId: string, exportId: string, relPath: string) {
   return apiUrl(`/projects/${projectId}/exports/${encodeURIComponent(exportId)}/file?name=${encodeURIComponent(relPath)}`);
 }

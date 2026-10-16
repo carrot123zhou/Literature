@@ -173,10 +173,13 @@ input[type="radio"] { accent-color: var(--accent); }
 .intake-brand-group {
   display: flex;
   align-items: center;
-  gap: var(--sp-3);
+  gap: var(--sp-4);
   min-width: 0;
 }
 .intake-topbar.home-topbar .intake-brand {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
   flex: none;
   min-height: 0;
   padding: var(--sp-1) 0;
@@ -188,6 +191,14 @@ input[type="radio"] { accent-color: var(--accent); }
   font-weight: var(--fw-semibold);
   letter-spacing: -0.01em;
   line-height: var(--lh-tight);
+}
+/* 软件图标（monogram）：Literature 品牌字前的应用标记 */
+.topbar-appicon {
+  width: 26px;
+  height: 26px;
+  flex: none;
+  border-radius: 6px;
+  object-fit: contain;
 }
 .intake-topbar.home-topbar .intake-brand:hover:where(:not(:disabled)) { background: transparent; color: var(--accent); }
 
@@ -238,13 +249,13 @@ input[type="radio"] { accent-color: var(--accent); }
   align-items: center;
   align-self: center;
   justify-content: center;
-  gap: var(--sp-1);
+  gap: var(--sp-2);
   min-width: 0;
 }
 .intake-topbar.home-topbar nav button,
 .topbar nav button {
-  min-height: 32px;
-  padding: 0 var(--sp-3);
+  min-height: 34px;
+  padding: 0 var(--sp-4);
   border: 0;
   border-radius: var(--r-control);
   background: transparent;
@@ -270,7 +281,7 @@ input[type="radio"] { accent-color: var(--accent); }
   display: flex;
   align-items: center;
   justify-content: flex-end;
-  gap: var(--sp-2);
+  gap: var(--sp-3);
   min-width: 0;
 }
 .settings-button {

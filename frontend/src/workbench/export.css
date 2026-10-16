@@ -51,6 +51,8 @@
 .export-block { padding: var(--sp-4); }
 .export-block h4 { display: flex; align-items: center; gap: var(--sp-2); margin: 0 0 var(--sp-3); color: var(--label); font-size: var(--fs-footnote); font-weight: var(--fw-semibold); }
 .export-block h4 .grow { flex: 1; min-width: 0; }
+/* 卡片内内容永不溢出卡片边框（导出结果行是重灾区） */
+.export-block { overflow: hidden; }
 .export-formats { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--sp-2); }
 .export-chip { display: flex; align-items: flex-start; gap: var(--sp-2); min-width: 0; padding: var(--sp-3); border: 1px solid var(--separator); border-radius: var(--r-card); background: var(--bg-secondary); cursor: pointer; transition: border-color var(--dur-fast) var(--ease), background-color var(--dur-fast) var(--ease); }
 .export-chip:hover { border-color: var(--separator-strong); }
@@ -78,11 +80,11 @@
 .export-summary .export-kv b { min-width: 0; color: var(--label); font-weight: var(--fw-semibold); text-align: right; overflow-wrap: anywhere; }
 .export-warn { margin-top: var(--sp-3); padding: var(--sp-2) var(--sp-3); border-radius: var(--r-control); background: var(--tint-orange); color: var(--on-orange); font-size: var(--fs-caption1); line-height: var(--lh-normal); overflow-wrap: anywhere; }
 .export-ok { padding: var(--sp-1) var(--sp-2); border-radius: var(--r-pill); background: var(--tint-green); color: var(--on-green); font-size: var(--fs-caption2); font-weight: var(--fw-semibold); }
-.export-files { display: flex; flex-direction: column; gap: var(--sp-2); margin-top: var(--sp-2); }
-.export-file { display: flex; align-items: center; gap: var(--sp-2); min-width: 0; padding: var(--sp-2) var(--sp-3); border: 1px solid var(--separator); border-radius: var(--r-control); background: var(--fill-3); }
+.export-files { display: flex; flex-direction: column; gap: var(--sp-2); min-width: 0; max-width: 100%; margin-top: var(--sp-2); }
+.export-file { display: flex; align-items: center; gap: var(--sp-2); flex-wrap: nowrap; min-width: 0; max-width: 100%; padding: var(--sp-2) var(--sp-3); border: 1px solid var(--separator); border-radius: var(--r-control); background: var(--fill-3); }
 .export-file-kind { flex: none; padding: var(--sp-1) var(--sp-2); border-radius: var(--r-pill); background: var(--tint-blue); color: var(--on-blue); font-size: var(--fs-caption2); font-weight: var(--fw-semibold); letter-spacing: 0.03em; }
 .export-file-kind.is-folder { background: var(--tint-purple); color: var(--on-purple); }
-.export-file-name { flex: 1; min-width: 0; font-size: var(--fs-caption1); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.export-file-name { flex: 1 1 0; min-width: 0; font-size: var(--fs-caption1); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .export-file-size { flex: none; color: var(--label-3); font-size: var(--fs-caption2); white-space: nowrap; }
 .export-file-acts { display: flex; flex: none; gap: var(--sp-1); }
 .export-file-acts button,
@@ -90,7 +92,15 @@
 .export-link { color: var(--accent); font-size: var(--fs-caption1); }
 .export-hint { color: var(--label-2); font-size: var(--fs-footnote); }
 .export-hist { margin-top: var(--sp-2); border: 1px solid var(--separator); border-radius: var(--r-control); overflow: hidden; }
-.export-hist-head { display: flex; align-items: baseline; gap: var(--sp-2); width: 100%; border: 0; border-radius: 0; background: var(--fill-3); text-align: left; }
+.export-hist-bar { display: flex; align-items: center; gap: var(--sp-2); min-width: 0; background: var(--fill-3); }
+.export-hist-bar .export-hist-head { flex: 1 1 0; min-width: 0; }
+.export-hist-acts { display: flex; flex: none; gap: var(--sp-1); padding-right: var(--sp-2); }
+.export-hist-acts button { min-height: calc(var(--sp-7) - var(--sp-1)); padding: 0 var(--sp-2); font-size: var(--fs-caption1); }
+.export-hist-acts button.danger { border-color: transparent; background: transparent; color: var(--on-red); }
+.export-hist-acts button.danger:hover { border-color: var(--tint-red); background: var(--tint-red); }
+.export-hist-rename { display: flex; align-items: center; gap: var(--sp-2); padding: var(--sp-2); border-top: 1px solid var(--separator); background: var(--bg-elevated); }
+.export-hist-rename input { flex: 1 1 0; min-width: 0; min-height: calc(var(--sp-8) - var(--sp-2)); padding: 0 var(--sp-3); border: 1px solid var(--separator-strong); border-radius: var(--r-control); background: var(--bg-elevated); color: var(--label); font-size: var(--fs-footnote); }
+.export-hist-head { display: flex; align-items: baseline; gap: var(--sp-2); min-width: 0; width: 100%; padding: var(--sp-2) var(--sp-2) var(--sp-2) var(--sp-3); border: 0; border-radius: 0; background: transparent; text-align: left; }
 .export-hist-head:hover { background: var(--fill-2); }
 .export-hist-head b { color: var(--label); font-size: var(--fs-caption1); font-weight: var(--fw-semibold); }
 .export-hist-head span { color: var(--label-2); font-size: var(--fs-caption1); }

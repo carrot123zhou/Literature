@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { isDesktop, revealPath, saveCopy } from "../desktop";
 import type { ExportFormatId, ExportOptions, ExportRecord, ExportTocNode, Project } from "../types";
-import { createExport, downloadExportFile, fetchExportOptions } from "./exportApi";
+import { createExport, deleteExport, downloadExportFile, fetchExportOptions, renameExport } from "./exportApi";
 import "./export.css";
 
 /* ----------------------------- 工具 ----------------------------- */
@@ -19,6 +19,8 @@ const LOCALE_LABEL: Record<string, string> = {
 function localeLabel(value: string) {
   return LOCALE_LABEL[value] ? `${LOCALE_LABEL[value]}（${value}）` : value;
 }
+
+const MODE_LABEL: Record<string, string> = { source: "原文", translation: "译文", bilingual: "对照版" };
 
 function formatSize(bytes = 0) {
   if (bytes < 1024) return `${bytes} B`;
@@ -101,6 +103,9 @@ export default function ExportDialog({ project, close, onMessage }: {
   const [history, setHistory] = useState<ExportRecord[]>([]);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [openRecord, setOpenRecord] = useState("");
+  const [renamingId, setRenamingId] = useState("");
+  const [renameValue, setRenameValue] = useState("");
+  const [deletingId, setDeletingId] = useState("");
 
   const initialLocale = project.target_language || "zh-CN";
 
@@ -110,16 +115,16 @@ export default function ExportDialog({ project, close, onMessage }: {
       const value = await fetchExportOptions(project.project_id, initialLocale);
       setOptions(value);
       setHistory(value.recent || []);
-      // 默认：EPUB + DOCX（若后端未提供则退化为第一个可用格式）。
+      // 默认：EPUB 对照版；无译文时由下方 mode 逻辑回退原文。
       const available = value.formats.map(item => item.id);
-      const preferred = (["epub", "docx"] as ExportFormatId[]).filter(id => available.includes(id));
+      const preferred = (["epub"] as ExportFormatId[]).filter(id => available.includes(id));
       setFormats(new Set(preferred.length ? preferred : available.slice(0, 1)));
       setLocale(value.default_locale || initialLocale);
       setFilename(value.title);
       const all = flatten(value.toc);
       setChecked(new Set(all.map(node => node.block_id)));
       setExpanded(new Set(value.toc.map(node => node.node_id)));
-      setMode(value.locales.length ? "translation" : "source");
+      setMode(value.locales.length ? "bilingual" : "source");
     } catch (error) {
       setLoadError(error instanceof Error ? error.message : String(error));
     }
@@ -191,6 +196,38 @@ export default function ExportDialog({ project, close, onMessage }: {
   const revealRecord = (record: ExportRecord) => {
     if (isDesktop) void revealPath(record.path).catch(error => onMessage(String(error)));
     else onMessage(record.path);
+  };
+
+  const recordTitle = (record: ExportRecord) => record.display_name || MODE_LABEL[record.mode] || record.mode;
+  const startRename = (record: ExportRecord) => {
+    setDeletingId("");
+    setRenamingId(record.export_id);
+    setRenameValue(recordTitle(record));
+  };
+  const saveRename = async (record: ExportRecord) => {
+    const value = renameValue.trim();
+    if (!value) return;
+    try {
+      const updated = await renameExport(project.project_id, record.export_id, value);
+      setHistory(previous => previous.map(item => item.export_id === updated.export_id ? { ...item, ...updated } : item));
+      setResult(previous => previous && previous.export_id === updated.export_id ? { ...previous, ...updated } : previous);
+      setRenamingId("");
+      onMessage("导出记录已重命名");
+    } catch (error) {
+      onMessage(error instanceof Error ? error.message : String(error));
+    }
+  };
+  const removeRecord = async (record: ExportRecord) => {
+    try {
+      await deleteExport(project.project_id, record.export_id);
+      setHistory(previous => previous.filter(item => item.export_id !== record.export_id));
+      setResult(previous => previous && previous.export_id === record.export_id ? null : previous);
+      if (openRecord === record.export_id) setOpenRecord("");
+      setDeletingId("");
+      onMessage("已删除该次导出的产物与记录");
+    } catch (error) {
+      onMessage(error instanceof Error ? error.message : String(error));
+    }
   };
   const saveFile = (record: ExportRecord, relPath: string) => {
     if (isDesktop) {
@@ -334,11 +371,30 @@ export default function ExportDialog({ project, close, onMessage }: {
                       : !history.length
                         ? <div className="export-hint">还没有导出记录。</div>
                         : history.map(record => <div className="export-hist" key={record.export_id}>
-                            <button className="export-hist-head" onClick={() => setOpenRecord(openRecord === record.export_id ? "" : record.export_id)}>
-                              <b>{record.mode}</b>
-                              <span>{record.formats.join(" · ").toUpperCase()}{record.locale ? ` · ${record.locale}` : ""}</span>
-                              <small>{new Date(record.created_at).toLocaleString()} · {formatSize(record.bytes)}</small>
-                            </button>
+                            <div className="export-hist-bar">
+                              <button className="export-hist-head" onClick={() => setOpenRecord(openRecord === record.export_id ? "" : record.export_id)}>
+                                <b>{recordTitle(record)}</b>
+                                <span>{record.formats.join(" · ").toUpperCase()}{record.locale ? ` · ${record.locale}` : ""}</span>
+                                <small>{new Date(record.created_at).toLocaleString()} · {formatSize(record.bytes)}</small>
+                              </button>
+                              <span className="export-hist-acts">
+                                {isDesktop && <button title="在 Finder 中显示产物" onClick={() => revealRecord(record)}>显示位置</button>}
+                                <button title="重命名这次导出" onClick={() => startRename(record)}>重命名</button>
+                                {deletingId === record.export_id
+                                  ? <>
+                                      <button className="danger" onClick={() => void removeRecord(record)}>确认删除</button>
+                                      <button onClick={() => setDeletingId("")}>取消</button>
+                                    </>
+                                  : <button className="danger" title="删除产物目录与记录" onClick={() => setDeletingId(record.export_id)}>删除</button>}
+                              </span>
+                            </div>
+                            {renamingId === record.export_id && <div className="export-hist-rename">
+                              <input autoFocus value={renameValue} maxLength={200} aria-label="导出名称"
+                                onChange={event => setRenameValue(event.target.value)}
+                                onKeyDown={event => { if (event.key === "Enter") void saveRename(record); }}/>
+                              <button className="primary" onClick={() => void saveRename(record)}>保存</button>
+                              <button onClick={() => setRenamingId("")}>取消</button>
+                            </div>}
                             {openRecord === record.export_id && renderFiles(record)}
                           </div>)}
                   </div>

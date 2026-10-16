@@ -1201,6 +1201,7 @@ def _recent_projection(value: dict[str, Any]) -> dict[str, Any]:
     return {
         "export_id": str(value.get("export_id", "")),
         "created_at": str(value.get("created_at", "")),
+        "display_name": str(value.get("display_name", "")),
         "mode": str(value.get("mode", "")),
         "locale": str(value.get("locale", "")),
         "formats": list(value.get("formats") or []),
@@ -1225,6 +1226,73 @@ def list_exports(store: ProjectStore, project_id: str) -> list[dict[str, Any]]:
                 values.append(_recent_projection(value))
     values.sort(key=lambda item: str(item.get("created_at", "")), reverse=True)
     return values[:50]
+
+
+def _export_record(store: ProjectStore, project_id: str, export_id: str) -> tuple[Path, dict[str, Any]]:
+    """校验 ``export_id`` 并返回 ``(导出目录, manifest)``；非法抛 StorageError，缺失抛 FileNotFoundError。"""
+    if not _EXPORT_ID_RE.match(str(export_id or "")):
+        raise StorageError("非法的导出标识。")
+    project = store.project_path(project_id)
+    exports_root = (project / "exports").resolve()
+    base = (exports_root / export_id).resolve()
+    if base == exports_root or exports_root not in base.parents:
+        raise StorageError("非法的导出标识。")
+    manifest_path = base / "export.json"
+    if not manifest_path.is_file():
+        raise FileNotFoundError(export_id)
+    try:
+        value = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as error:
+        raise StorageError("导出记录已损坏，无法读取 export.json。") from error
+    if not isinstance(value, dict):
+        raise StorageError("导出记录已损坏，无法读取 export.json。")
+    return base, value
+
+
+def delete_export(store: ProjectStore, project_id: str, export_id: str) -> dict[str, Any]:
+    """删除一次导出（含产物目录与历史记录），不影响 raw / document / translations。"""
+    base, _value = _export_record(store, project_id, export_id)
+    shutil.rmtree(base)
+    return {"export_id": export_id, "deleted": True}
+
+
+def rename_export(store: ProjectStore, project_id: str, export_id: str, display_name: str) -> dict[str, Any]:
+    """重命名一次导出：更新 manifest 的 display_name，并把顶层单文件产物改成同名文件。
+
+    文件夹类产物（assets/、分章 HTML）保持原样；名称冲突时自动加 " (n)" 后缀。
+    """
+    base, value = _export_record(store, project_id, export_id)
+    raw = str(display_name or "").strip()
+    if not raw:
+        raise StorageError("导出名称不能为空。")
+    name = safe_name(raw)
+    files = value.get("files")
+    if isinstance(files, list):
+        updated: list[Any] = []
+        for item in files:
+            entry = dict(item) if isinstance(item, dict) else item
+            if isinstance(entry, dict) and entry.get("single_file"):
+                old_rel = str(entry.get("rel_path", ""))
+                try:
+                    old_path = (base / old_rel).resolve()
+                except (OSError, ValueError):
+                    old_path = None
+                if old_path is not None and old_path.is_file() and base in old_path.parents:
+                    parent = old_path.parent
+                    candidate = parent / f"{name}{old_path.suffix}"
+                    index = 2
+                    while candidate.exists() and candidate != old_path:
+                        candidate = parent / f"{name} ({index}){old_path.suffix}"
+                        index += 1
+                    if candidate != old_path:
+                        old_path.rename(candidate)
+                    entry["name"] = candidate.name
+                    entry["rel_path"] = candidate.relative_to(base).as_posix()
+            updated.append(entry)
+        value["files"] = updated
+    value["display_name"] = name
+    atomic_json(base / "export.json", value)
+    return _recent_projection(value)
 
 
 def resolve_export_file(store: ProjectStore, project_id: str, export_id: str, name: str) -> tuple[Path, str]:
