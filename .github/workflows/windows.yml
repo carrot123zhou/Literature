@@ -40,7 +40,7 @@ jobs:
           pnpm --dir frontend build
 
       - name: Build Windows installer (Tauri + NSIS)
-        run: pnpm --dir frontend exec tauri build --config src-tauri/tauri.bundle.conf.json --config src-tauri/tauri.windows.conf.json --config '{"build":{"beforeBuildCommand":""}}'
+        run: frontend/node_modules/.bin/tauri build --config src-tauri/tauri.bundle.conf.json --config src-tauri/tauri.windows.conf.json --config '{"build":{"beforeBuildCommand":""}}'
 
       - name: Collect installer
         run: |
