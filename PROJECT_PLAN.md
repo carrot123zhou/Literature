@@ -140,6 +140,8 @@ Tauri macOS 客户端（单实例）
 
 **导出管理与交互修复（2026-10-17，已打包安装）**：导出记录可管理——`DELETE/PATCH /projects/{id}/exports/{export_id}`（能力 `export_manage_v1`），导出弹窗历史区每条记录可删除（两步确认）与重命名（同步改单文件产物名），不碰 raw/document/translations；翻译确认后自动打开对照翻译页；顶栏 60px + 主导航加宽 + 品牌字前加应用图标；导出结果行限制在卡片内；导出默认 EPUB + 对照版。全量 pytest 612 passed；隔离浏览器验收 14 + 5 项全 PASS；冻结冒烟 15/15。已打包安装到 `launcher/Literature.app`（sidecar `600164e1…` / sha256 `94c8b3b5…`，内嵌前端 `index-DCZcdqbt.js`；旧包备份 `launcher/.rollback-Literature-20261017031104.app`）。未启动客户端、待真机验收。
 
+**开源发布（2026-10-17）**：仓库已推送 `https://github.com/carrot123zhou/Literature.git`（main），README 首页含宣传海报与界面截图；**Release v0.1.0** 提供 Windows x64 NSIS 安装包（GitHub Actions `windows.yml`：PyInstaller + Vite + Tauri/NSIS，`workflow_dispatch`/`v*` 标签触发），包内含 Windows sidecar 与同版本前端；Rust 外壳/密钥存储/sidecar 构建脚本已做 Windows 适配（macOS 行为不变）。未在真机 Windows 运行验收；macOS 仍按本机构建流程交付。
+
 **能力标记**：以 `/health` 的 `capabilities` 为唯一事实来源（`literature/api.py`）——当前含 `intake_items_v1`、`structure_review_v2`、`model_services_v1/v2/v3/v4`、`structure_modes_v1`、`structure_pause_v1`、`structure_flow_v1`、`translation_engine_v2`、`translation_safety_v1`、`parse_lifecycle_v1`、`task_history_v1`、`export_v1`、`export_manage_v1` 等。前端启动时校验关键标记，不静默复用旧后端。注：导出模块（`exporters.py`、`export_v1`）为重新引入版本（与 §2.5 的「已移除」历史决定冲突，待归档计划文本），已于 2026-10-17 随工作区一并提交（`13f3bfd`）；2026-10-17 已重做 EPUB 排版（出版级 CSS：两端对齐+首行缩进+段间距+serif 栈、对照去竖线、导航目录原文·译文/译文纯译文、原书 PDF 首页封面），已重新打包安装（sidecar `4441cacd…`，快照 `.rollback-Literature-20261017024354.app`），未真机验收。
 
 **尚未完成或尚未真实验收（不混写）**：

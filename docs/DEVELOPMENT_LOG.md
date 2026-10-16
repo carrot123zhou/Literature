@@ -5,6 +5,16 @@
 > 条目为「最新在上」。2026-10-14 前的手工「第N轮」编号是遗留标记（历史上出现过重复，已用 `·` 后缀消歧），不再续编；新条目用 `## YYYY-MM-DD · 主题`，引用时以上文日期与主题为准。
 
 
+## 2026-10-17 · GitHub 开源发布：仓库推送、README 海报、Windows 安装包（CI 构建）
+状态：已编码 / 全量 pytest 612 passed / macOS 冻结冒烟不适用（未改 sidecar 后重新验证）/ **仓库与 v0.1.0 Release 已推送 GitHub**；Windows 安装包已构建并通过内容校验，**未在真机 Windows 运行验收**。
+
+- **仓库推送**：`origin` 指向 `https://github.com/carrot123zhou/Literature.git`，main 分支全部历史已推送；仓库 README 首页嵌入宣传海报（`docs/showcase/literature-poster.jpg`）与两张模块截图，并修正过时的「导出已移除」描述。冗余文件处理：`launcher/` 显式入 `.gitignore`；showcase 超大 PNG 原图（8MB/4.4MB）改为本地保留（`docs/showcase/*.png` 忽略），仓库只保留 JPG；`library/`、运行数据、sidecar 二进制、构建产物本就在忽略清单。
+- **Windows 支持（代码）**：`src-tauri/src/lib.rs` 条件编译——`reveal_path` Windows 走 `explorer /select,`（文件）/直开（目录）；`stop_backend` Windows 用 `taskkill /T /F`（PyInstaller onefile 是引导器+子进程两级）并保留 unix 进程组逻辑；日志目录 Windows 用 `app_log_dir()`（`%LOCALAPPDATA%/{identifier}/logs`），macOS 保持 `~/Library/Logs/Literature`；sidecar 文件名带 `EXE_SUFFIX`；开发态 python 路径按平台区分。`literature/providers.py`：非 macOS 平台 API Key 落到运行目录 `api-keys.json`（0600，空则删除；`LITERATURE_RUNTIME` 优先），macOS 仍走 Keychain。`scripts/build_sidecar.py`：PyInstaller `--add-data` 分隔符按平台（Windows `;`）、输出名带 `.exe`、目标名 `literature-sidecar-<triple>.exe`。
+- **Windows 打包（CI）**：`.github/workflows/windows.yml`（`workflow_dispatch` + `v*` 标签触发，`windows-latest`）——Python 3.12 + pip `.[packaging]` + PyInstaller sidecar + pnpm 10 前端 + Tauri NSIS（`tauri.windows.conf.json`：targets `nsis`、`installMode currentUser`、简中/英）；产物上传 artifact，标签触发时附带 Release。调试修复三处：`frontend/pnpm-workspace.yaml` 补 `packages: ["."]`（pnpm 9+ 要求，本地 pnpm 10 + frozen-lockfile 实测通过）；tauri build 从仓库根调 frontend 的 CLI（`--dir` 会改变 cwd 使相对配置路径失效）；Windows sidecar 产物名补 `.exe`；工作流补 `permissions: contents: write`（默认 token 无法建 Release）。
+- **验收证据**：CI run 38957952899（main，7m44s）与 38959215590（v0.1.0 标签）构建成功；下载 artifact 解包 NSIS 验证：内嵌 `literature.exe`（前端 `index-DCZcdqbt.js`，与 macOS 安装包同版本）+ `literature-sidecar.exe`（43MB Windows PyInstaller 单文件）。Release **v0.1.0** 已发布：`https://github.com/carrot123zhou/Literature/releases/tag/v0.1.0`（`Literature_0.1.0_x64-setup.exe`，45.5MB）。Rust 侧 `cargo check` macOS 通过；本机 Homebrew Rust 无 rustup，无法本地交叉检查 Windows target，Windows 编译由 CI 实证。
+- **边界**：未在真机 Windows 上安装/运行（文件对话框、拖放、WebView2、任务栏图标等原生行为未验收）；MinerU/模型服务在 Windows 上未联调；macOS 未在 Release 附包（本机构建流程不变）。
+
+
 ## 2026-10-17 · 导出管理与交互修复（删除/重命名、确认后自动打开、顶栏、溢出、默认 EPUB 对照版）
 状态：已编码 / 全量 pytest 612 passed（含新增 8 项）/ 前端 tsc + Vite 生产构建通过 / 隔离真实浏览器验收（导出管理 14 项 + 翻译自动打开 5 项全 PASS、0 脚本错误，截图 `tmp/export-manage.png`、`tmp/translate-open.png`）/ 冻结冒烟 15/15 / **已重新打包安装到 `launcher/Literature.app`（用户授权「打包安装」，未启动客户端）**；未真机验收。回滚快照：`launcher/.rollback-Literature-20261017031104.app`（上一版 sidecar `4441cacd…`）。
 
