@@ -63,6 +63,10 @@ LITERATURE_SESSION_TOKEN=literature-dev .venv/bin/python -m literature.api
 VITE_LITERATURE_TOKEN=literature-dev pnpm --dir frontend dev
 ```
 
+## 致谢
+
+- [MinerU](https://github.com/opendatalab/MinerU)（OpenDataLab）——Literature 的文档解析引擎。MinerU 负责将 PDF / Office / 图片 / HTML 转为带版面结构的 Markdown 与 JSON，Literature 在其不可变输出之上构建规范文档、结构校对与翻译工作流。感谢 MinerU 项目与社区的出色工作。
+
 ## 边界
 
 - MinerU 是唯一文档解析主服务，不重复实现 OCR 模型。默认走远端 API（`mineru_remote`）；本地 MinerU 仅预留后端接入点，本版本未安装、未实现，不会显示为可点击功能。
