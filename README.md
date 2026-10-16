@@ -8,6 +8,11 @@ Literature 是本地优先的结构化文献客户端：MinerU 解析文档，Li
 
 当前交付是 **Tauri macOS 客户端**。React/PDF.js 工作区和自包含 Python/FastAPI 后端都装在 `.app` 内，运行不需要浏览器、Vite、Node、Python 或源码仓库。当前本机构建为 Apple Silicon，最低 macOS 15。
 
+## 下载
+
+- **Windows**（x64）：从 [Releases](https://github.com/carrot123zhou/Literature/releases) 下载 `Literature_<版本>_x64-setup.exe`（NSIS 安装器，按当前用户安装，不需要管理员权限；内置 Python 后端与全部前端资源）。由 GitHub Actions 在 `windows-latest` 上构建（见 `.github/workflows/windows.yml`），打 `v*` 标签或在 Actions 页手动触发均可重新构建。
+- **macOS**（Apple Silicon）：当前尚未在 Release 发布，按下方「开发与构建」在本机构建并安装到 `launcher/Literature.app`。
+
 ## 界面
 
 | | |
