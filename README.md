@@ -1,8 +1,20 @@
 # Literature
 
-Literature 是本地优先的结构化文献客户端：MinerU 解析文档，Literature 保留不可变证据、规范文档与稳定 block/cell ID，并提供目录校对、阅读翻译与人工修订。
+<div align="center">
+  <img src="docs/showcase/literature-poster.jpg" alt="Literature 宣传海报：解析、校对、翻译、导出一条可恢复、可追溯的工作流" width="720"/>
+</div>
+
+Literature 是本地优先的结构化文献客户端：MinerU 解析文档，Literature 保留不可变证据、规范文档与稳定 block/cell ID，并提供目录校对、阅读翻译、多格式导出与人工修订。
 
 当前交付是 **Tauri macOS 客户端**。React/PDF.js 工作区和自包含 Python/FastAPI 后端都装在 `.app` 内，运行不需要浏览器、Vite、Node、Python 或源码仓库。当前本机构建为 Apple Silicon，最低 macOS 15。
+
+## 界面
+
+| | |
+|---|---|
+| ![四模块总览](docs/showcase/literature-overview.jpg) | ![导入与解析](docs/showcase/literature-intro.jpg) |
+
+左：导入、解析、结构校对、对照翻译四页合一总览；右：导入与解析设置。
 
 ## 使用
 
@@ -50,5 +62,5 @@ VITE_LITERATURE_TOKEN=literature-dev pnpm --dir frontend dev
 
 - MinerU 是唯一文档解析主服务，不重复实现 OCR 模型。默认走远端 API（`mineru_remote`）；本地 MinerU 仅预留后端接入点，本版本未安装、未实现，不会显示为可点击功能。
 - raw 永不被规范化或翻译改写；译文按稳定 ID 挂接。
-- 2026-10-13 起已整体移除内置多格式导出与外部 TBL 接力；已存在的 `exports/` 文件、原件、raw、document 与 translations 全部保留，不做自动清理。
+- 内置导出（2026-10-17 重新引入）：EPUB / Word DOCX / Markdown / 分页 HTML，支持原文、译文与对照版三种内容版本，产物写入项目 `exports/` 并可在导出弹窗中管理（重命名/删除）；外部 TBL 接力保持移除。
 - 旧 Litera 项目保持独立。

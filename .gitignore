@@ -73,3 +73,9 @@ opendesign-projects/
 docs/prototypes/
 docs/*.png
 docs/verification/*.png
+
+# Installed client and rollback snapshots (launcher/ only holds built .app bundles)
+launcher/
+
+# Showcase posters: JPG versions are tracked for README; heavy PNG masters stay local
+docs/showcase/*.png
