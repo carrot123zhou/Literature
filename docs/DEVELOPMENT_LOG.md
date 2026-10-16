@@ -6,7 +6,7 @@
 
 
 ## 2026-10-17 · 导出管理与交互修复（删除/重命名、确认后自动打开、顶栏、溢出、默认 EPUB 对照版）
-状态：已编码 / 全量 pytest 612 passed（含新增 8 项）/ 前端 tsc + Vite 生产构建通过 / 已在隔离真实浏览器验收（导出管理 14 项 + 翻译自动打开 5 项全 PASS、0 脚本错误，截图 `tmp/export-manage.png`、`tmp/translate-open.png`）；**未重打包客户端、未真机验收、未提交**。
+状态：已编码 / 全量 pytest 612 passed（含新增 8 项）/ 前端 tsc + Vite 生产构建通过 / 隔离真实浏览器验收（导出管理 14 项 + 翻译自动打开 5 项全 PASS、0 脚本错误，截图 `tmp/export-manage.png`、`tmp/translate-open.png`）/ 冻结冒烟 15/15 / **已重新打包安装到 `launcher/Literature.app`（用户授权「打包安装」，未启动客户端）**；未真机验收。回滚快照：`launcher/.rollback-Literature-20261017031104.app`（上一版 sidecar `4441cacd…`）。
 
 - **导出管理（需求 2）**：后端 `literature/exporters.py` 新增 `delete_export`（整目录删除该次导出的产物与 `export.json` 记录，不碰 raw/document/translations）与 `rename_export`（更新 manifest `display_name`，并把该次导出的单文件产物同步改名，同名冲突自动加 " (n)" 后缀；文件夹类产物保持原样）；`_recent_projection` 带 `display_name`。API 新增 `PATCH/DELETE /projects/{id}/exports/{export_id}`（非法标识 400、缺失 404；能力标记 `export_manage_v1`）。前端在导出弹窗「导出历史」每条记录上加「显示位置（桌面端）/ 重命名 / 删除（两步确认）」，重命名行内编辑。选择此 UI 的理由：导出弹窗同时呈现本次导出与全部历史，文件资源页「导出…」按钮即达，无需新增第二个管理入口。
 - **翻译确认后自动打开（需求 1）**：文件资源页「开始/继续/重试翻译」弹窗确认成功后，除建任务外自动 `openView("read", project)` 进入对照翻译页（与「去选章节」路径行为一致）。
@@ -15,6 +15,7 @@
 - **默认 EPUB 对照版（需求 5）**：导出弹窗默认只勾选 EPUB，内容版本默认「对照版」（无译文时回退原文）。
 - **证据**：`tests/test_exporters.py` 新增 `ExportManageTests` 4 项（删除/重命名/碰撞后缀/空名拒绝）；`tests/manual/export_manage_browser_check.py` + `export_manage_check.cjs` 14 项；`tests/manual/translate_open_browser_check.py` + `translate_open_check.cjs` 5 项（MockProvider 离线完成翻译作业）。全量 pytest 612 passed；tsc/Vite 通过（`index-DCZcdqbt.js` / `index-D1dBHIbk.css`）。
 - **边界**：重命名只改 manifest 与单文件产物名，文件夹类产物（分页 HTML/assets）内部文件名不变；浏览器态无「显示位置」（桌面端专属）；未重打包客户端，全部待用户真机验收；本轮已先按用户要求提交此前积压的工作区（`13f3bfd`），本轮改动待验收后提交。
+- **打包安装（用户授权，2026-10-17）**：重建 sidecar + Tauri bundle，adhoc 签名校验通过；冻结冒烟 15/15。sidecar revision `600164e1421ec4c6fc9d`、sha256 `94c8b3b5c1d786734b2de2ca2717233e2095b87f6daf4dff4c35ae749568e93e`、47891360 字节，与 `src-tauri/binaries/manifest.json` 及 `.app` 内嵌副本一致；内嵌前端 `index-DCZcdqbt.js`（`index-D1dBHIbk.css`）与 `frontend/dist` 同名；安装包 `Contents/Resources/icon.icns` 与仓库一致（`1c39aa2a…`）。安装前客户端未运行，旧包完整备份 `launcher/.rollback-Literature-20261017031104.app`（签名校验通过）。未启动客户端，由用户真机验收。
 
 
 ## 2026-10-17 · EPUB 导出排版重做（出版级 CSS + 对照导航）与封面/译文目录增强
