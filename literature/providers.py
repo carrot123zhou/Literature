@@ -5,6 +5,7 @@ import logging
 import os
 import re
 import subprocess
+import sys
 import threading
 import time
 import uuid
@@ -480,10 +481,61 @@ def reasoning_request_fields(config: Any) -> dict[str, Any]:
     return {}
 
 
+def _key_store_file() -> Path:
+    """非 macOS 平台的密钥文件（用户目录默认仅当前用户可读）。"""
+    configured = os.environ.get("LITERATURE_RUNTIME", "").strip()
+    if configured:
+        root = Path(configured).expanduser()
+    elif sys.platform == "win32":
+        base = os.environ.get("APPDATA") or str(Path.home() / "AppData" / "Roaming")
+        root = Path(base) / "Literature"
+    else:
+        root = Path.home() / "Library" / "Application Support" / "Literature"
+    return root / "api-keys.json"
+
+
+_KEY_STORE_LOCK = threading.Lock()
+
+
+def _read_file_keys() -> dict[str, str]:
+    path = _key_store_file()
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return {str(k): str(v) for k, v in value.items()} if isinstance(value, dict) else {}
+
+
+def _write_file_keys(keys: dict[str, str]) -> None:
+    path = _key_store_file()
+    if not keys:
+        # 全部删除后把文件也清掉，不留空密钥文件。
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(".tmp")
+    temporary.write_text(json.dumps(keys, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    try:
+        os.chmod(temporary, 0o600)
+    except OSError:
+        pass
+    os.replace(temporary, path)
+
+
 def save_api_key(provider: str, api_key: str) -> None:
     api_key = api_key.strip()
     if not api_key:
         raise ProviderError("API key 不能为空。")
+    if sys.platform != "darwin":
+        # Windows/Linux 没有封装好的系统钥匙串：落到运行目录的用户专属文件。
+        with _KEY_STORE_LOCK:
+            keys = _read_file_keys()
+            keys[provider] = api_key
+            _write_file_keys(keys)
+        return
     result = subprocess.run(
         ["/usr/bin/security", "add-generic-password", "-U", "-s", KEYCHAIN_SERVICE, "-a", provider, "-w", api_key],
         capture_output=True, text=True, check=False,
@@ -496,6 +548,9 @@ def get_api_key(provider: str) -> str:
     environment = os.environ.get(f"LITERATURE_{provider.upper()}_API_KEY", "").strip()
     if environment:
         return environment
+    if sys.platform != "darwin":
+        with _KEY_STORE_LOCK:
+            return _read_file_keys().get(provider, "")
     result = subprocess.run(
         ["/usr/bin/security", "find-generic-password", "-s", KEYCHAIN_SERVICE, "-a", provider, "-w"],
         capture_output=True, text=True, check=False,
@@ -504,6 +559,12 @@ def get_api_key(provider: str) -> str:
 
 
 def delete_api_key(provider: str) -> None:
+    if sys.platform != "darwin":
+        with _KEY_STORE_LOCK:
+            keys = _read_file_keys()
+            if keys.pop(provider, None) is not None:
+                _write_file_keys(keys)
+        return
     subprocess.run(
         ["/usr/bin/security", "delete-generic-password", "-s", KEYCHAIN_SERVICE, "-a", provider],
         capture_output=True, text=True, check=False,

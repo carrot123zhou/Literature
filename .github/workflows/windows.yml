@@ -1,0 +1,62 @@
+name: Windows installer
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+jobs:
+  build:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Install Python dependencies
+        run: pip install -e ".[packaging]"
+
+      - name: Build Python sidecar (PyInstaller)
+        run: python scripts/build_sidecar.py
+
+      - name: Build frontend
+        run: |
+          pnpm --dir frontend install --frozen-lockfile
+          pnpm --dir frontend build
+
+      - name: Build Windows installer (Tauri + NSIS)
+        run: pnpm --dir frontend exec tauri build --config src-tauri/tauri.bundle.conf.json --config src-tauri/tauri.windows.conf.json --config '{"build":{"beforeBuildCommand":""}}'
+
+      - name: Collect installer
+        run: |
+          mkdir -p installer
+          cp src-tauri/target/release/bundle/nsis/*.exe installer/
+          ls -la installer/
+
+      - name: Upload installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Literature-windows-installer
+          path: installer/*.exe
+          if-no-files-found: error
+
+      - name: Attach installer to release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: installer/*.exe

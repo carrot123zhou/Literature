@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 use std::{
     fs::{self, OpenOptions},
     net::TcpListener,
@@ -68,19 +70,49 @@ fn managed_path(info: &RuntimeInfo, path: &Path) -> Result<PathBuf, String> {
 #[tauri::command]
 fn reveal_path(path: PathBuf, state: State<RuntimeState>) -> Result<(), String> {
     let path = managed_path(&state.info, &path)?;
-    let mut command = Command::new("/usr/bin/open");
-    if path.is_file() {
-        command.arg("-R");
+    #[cfg(target_os = "macos")]
+    {
+        let mut command = Command::new("/usr/bin/open");
+        if path.is_file() {
+            command.arg("-R");
+        }
+        let status = command
+            .arg("--")
+            .arg(&path)
+            .status()
+            .map_err(|e| e.to_string())?;
+        if status.success() {
+            Ok(())
+        } else {
+            Err("Finder 无法打开此位置。".into())
+        }
     }
-    let status = command
-        .arg("--")
-        .arg(path)
-        .status()
-        .map_err(|e| e.to_string())?;
-    if status.success() {
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        let status = Command::new("xdg-open")
+            .arg(&path)
+            .status()
+            .map_err(|e| e.to_string())?;
+        if status.success() {
+            Ok(())
+        } else {
+            Err("无法打开此位置。".into())
+        }
+    }
+    #[cfg(windows)]
+    {
+        // 文件用 /select, 在资源管理器中定位；目录直接打开。
+        let mut command = Command::new("explorer");
+        if path.is_file() {
+            command.arg(format!("/select,{}", path.display()));
+        } else {
+            command.arg(&path);
+        }
+        // explorer 对成功也返回非零码，不能按 exit status 判定。
+        command
+            .status()
+            .map_err(|e| e.to_string())?;
         Ok(())
-    } else {
-        Err("Finder 无法打开此位置。".into())
     }
 }
 
@@ -173,12 +205,18 @@ fn backend_command() -> Result<(PathBuf, Vec<String>, PathBuf), String> {
         }
         let python = std::env::var_os("LITERATURE_PYTHON")
             .map(PathBuf::from)
-            .unwrap_or_else(|| root.join(".venv/bin/python"));
+            .unwrap_or_else(|| {
+                if cfg!(windows) {
+                    root.join(".venv/Scripts/python.exe")
+                } else {
+                    root.join(".venv/bin/python")
+                }
+            });
         return Ok((python, vec!["-m".into(), "literature.api".into()], root));
     }
     let executable = std::env::current_exe().map_err(|e| e.to_string())?;
     let directory = executable.parent().ok_or("应用位置无效")?.to_path_buf();
-    let sidecar = directory.join("literature-sidecar");
+    let sidecar = directory.join(format!("literature-sidecar{}", std::env::consts::EXE_SUFFIX));
     if !sidecar.is_file() {
         return Err("应用缺少内置后端，请重新构建完整客户端。".into());
     }
@@ -195,7 +233,12 @@ fn start_backend(app: &tauri::AppHandle) -> Result<RuntimeState, Box<dyn std::er
     let runtime = std::env::var_os("LITERATURE_RUNTIME")
         .map(PathBuf::from)
         .unwrap_or(support);
-    let logs = app.path().home_dir()?.join("Library/Logs/Literature");
+    let logs = if cfg!(windows) {
+        // Windows：%LOCALAPPDATA%/{identifier}/logs（macOS 保持 ~/Library/Logs/Literature）。
+        app.path().app_log_dir().map_err(|e| e.to_string())?
+    } else {
+        app.path().home_dir()?.join("Library/Logs/Literature")
+    };
     fs::create_dir_all(&runtime)?;
     fs::create_dir_all(&logs)?;
     let location = runtime.join("library-location.json");
@@ -274,23 +317,37 @@ fn start_backend(app: &tauri::AppHandle) -> Result<RuntimeState, Box<dyn std::er
 
 fn stop_backend(state: &RuntimeState) {
     if let Some(mut child) = state.child.lock().unwrap().take() {
-        let group = format!("-{}", child.id());
-        let _ = Command::new("/bin/kill")
-            .args(["-TERM", "--", &group])
-            .stderr(Stdio::null())
-            .status();
-        let deadline = Instant::now() + Duration::from_secs(2);
-        while Instant::now() < deadline {
-            if child.try_wait().ok().flatten().is_some() {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(50));
+        #[cfg(windows)]
+        {
+            // PyInstaller onefile 在 Windows 上是「引导器 + 子进程」两级；/T 连带杀整棵进程树。
+            let _ = Command::new("taskkill")
+                .args(["/PID", &child.id().to_string(), "/T", "/F"])
+                .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
+                .stderr(Stdio::null())
+                .status();
+            let _ = child.kill();
+            let _ = child.wait();
         }
-        let _ = Command::new("/bin/kill")
-            .args(["-KILL", "--", &group])
-            .stderr(Stdio::null())
-            .status();
-        let _ = child.wait();
+        #[cfg(not(windows))]
+        {
+            let group = format!("-{}", child.id());
+            let _ = Command::new("/bin/kill")
+                .args(["-TERM", "--", &group])
+                .stderr(Stdio::null())
+                .status();
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while Instant::now() < deadline {
+                if child.try_wait().ok().flatten().is_some() {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            let _ = Command::new("/bin/kill")
+                .args(["-KILL", "--", &group])
+                .stderr(Stdio::null())
+                .status();
+            let _ = child.wait();
+        }
     }
 }
 
