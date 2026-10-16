@@ -69,6 +69,7 @@ MinerU 官方精准解析 API 当前公开的本地批量上传设置：
 - 翻译前可草拟并冻结术语表；任务保存术语表快照。
 - 人工编辑的译文自动锁定，批量重译和润色默认跳过。
 - 支持 OpenAI、DeepSeek、智谱 GLM、Qwen/百炼和自定义 OpenAI-compatible 服务；记录真实 usage 和估算费用。
+- **明文 HTTP 只能逐服务显式放行**（2026-10-15）：Base URL 用 `http://` 且非本机 loopback 时默认拒绝携带 API Key（防止密钥在链路上明文暴露）；内网/自建 MaaS 可在「设置 → 模型服务」勾选「允许明文 HTTP」后使用，放行会写 warning 日志，公网地址默认仍拦截。
 
 ### 2.5 导出（已于 2026-10-13 移除）
 
@@ -131,9 +132,13 @@ Tauri macOS 客户端（单实例）
 
 **当前里程碑**：M1 客户端导入与 MinerU 全能力接入。M2 结构校对（粗校/精校）与 M3 结构化翻译已具备可用纵向切片，见 §6。
 
-**当前交付（2026-10-15）**：后端安全/数据保护、探测预算与前端交互优化已打包安装到 `launcher/Literature.app`（sidecar `e1ed2b4c7ac4496e7851`）。全量 pytest 567 passed；tsc/Vite 通过；冻结冒烟 15/15，安装内容与构建包一致。真实服务与原生交互待用户验收；交付证据见开发日志。
+**当前交付（2026-10-15）**：后端安全/数据保护、探测预算与前端交互优化，以及「逐服务显式确认的明文 HTTP」（`model_services_v4`）已打包安装到 `launcher/Literature.app`（sidecar `9934ab4b55881b2e9148`）。全量 pytest 598 passed；tsc/Vite 通过；冻结冒烟 15/15，安装内容与构建包一致。真实服务与原生交互待用户验收；交付证据见开发日志。
 
-**能力标记**：以 `/health` 的 `capabilities` 为唯一事实来源（`literature/api.py`）——当前含 `intake_items_v1`、`structure_review_v2`、`model_services_v1/v2/v3`、`structure_modes_v1`、`structure_pause_v1`、`translation_engine_v2`、`translation_safety_v1`、`parse_lifecycle_v1`、`task_history_v1` 等。前端启动时校验关键标记，不静默复用旧后端。
+**前端交付（2026-10-16）**：设置空白页、导入页待处理队列对齐与内滚动、资源页翻译行去导出、校对状态统一「已校对」、模块更名「对照翻译」、目录进度环溢出、翻译单键切换、任务选择列表标题被 grid 压扁不可见——已随本轮重建打包安装到 `launcher/Literature.app`（sidecar `9934ab4b55881b2e9148`，内嵌前端 `index-BSNt2f9U.js` / `index-D2bDGs6A.css`）；冻结冒烟 15/15，旧包备份至 `launcher/.rollback-Literature-B5rqP2lv-20261016.app`。未启动客户端，待真机验收。
+
+**结构校对·对照观看（2026-10-17，已打包安装）**：跨页续接按 **MinerU 原生标记**只读派生 `flow_links`——读回不可变 `content_list_v2`，用 MinerU 在续页留下的空 `paragraph` 占位块作为续行区域，挂到上一页承载整段的 block（`{block_id: {next_region: {page_index, bbox}}}`；`literature/flow.py`；`/projects/{id}/document`、`PATCH /projects/{id}`、`mineru/import` 三处返回，已导入项目无需重新解析）。原页承载块与续页区域都按普通正文块同样式渲染（无额外颜色/角标），两块间用 MinerU 式**虚线折线 + 两端圆点**连接：从源块左下角沿页缝空白折到续页区域右上角，不穿过正文。**框体尺寸修复**：`.pdf-overlay .bbox` 显式 `min-height:0`，不再被全局 `button{min-height:32px}` 撑高（目录/脚注矮行不再堆叠）；三栏 `SplitPane` 设 `minPx=[200,360,280]`，分栏不可被拖到 0 而遮挡。Markdown 页签按块渲染并与 PDF 双向同步高亮；类型图例改为「图例」按需浮层；右侧块列表已移除常驻「N 个内容块」提示行。**顶部三栏头部统一**：`.panel-title`/`.viewer-toolbar`/`.result-tabs` 统一 52px 高、同一底边，一级文字统一 14px；中栏工具栏 `flex-wrap: nowrap`，控制区 `overflow-x:auto` 横向滚动、图例钉在行尾（浮层不被裁剪），拉窄不再换行。全量 pytest 605 passed；tsc/Vite 通过；隔离浏览器 23 + 11 项验收、0 脚本错误（截图 `tmp/structure-flow-review.png`、`tmp/toc-overlay-wide.png`、`tmp/toc-overlay.png`）。已打包安装到 `launcher/Literature.app`（内嵌前端 `index-__nO-9dI.js` / `index-Cz8XKgc8.css`；sidecar `8e505fd1c6e616dd8a93` / sha256 `315945c9…`；旧包备份 `launcher/.rollback-Literature-20261017015852.app`）。**应用图标**换成定稿 monogram（粗体「L」+ 波浪书口的书形底 + 两点）：源图存 `assets/brand/monogram.png`，`scripts/build_icons.py` 新增 `mark` 渲染器（位图墨迹→alpha 蒙版→macOS squircle），默认打包该套，`cards`/矢量 `monogram` 作为备选。未启动客户端、未由用户真机验收、未提交；legacy `content_list` 与纯 Markdown 导入不产出续接。
+
+**能力标记**：以 `/health` 的 `capabilities` 为唯一事实来源（`literature/api.py`）——当前含 `intake_items_v1`、`structure_review_v2`、`model_services_v1/v2/v3/v4`、`structure_modes_v1`、`structure_pause_v1`、`structure_flow_v1`、`translation_engine_v2`、`translation_safety_v1`、`parse_lifecycle_v1`、`task_history_v1`、`export_v1` 等。前端启动时校验关键标记，不静默复用旧后端。注：导出模块（`exporters.py`、`export_v1`）为工作区未提交的重新引入版本，与 §2.5 的「已移除」历史决定冲突，待用户拍板后归档计划文本；2026-10-17 已重做 EPUB 排版（出版级 CSS：两端对齐+首行缩进+段间距+serif 栈、对照去竖线、导航目录原文·译文/译文纯译文、原书 PDF 首页封面），已重新打包安装（sidecar `4441cacd…`，快照 `.rollback-Literature-20261017024354.app`），未真机验收。
 
 **尚未完成或尚未真实验收（不混写）**：
 

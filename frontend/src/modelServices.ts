@@ -7,6 +7,8 @@ export type ModelServicePayload = {
   name: string;
   preset: string;
   base_url: string;
+  /** 用户显式确认：内网/自建服务允许用明文 HTTP 携带 API Key（默认 false）。 */
+  allow_plaintext_http: boolean;
   models: ModelEntry[];
 };
 
@@ -27,7 +29,7 @@ export type ModelServicesApi = {
   saveKey: (serviceId: string, value: string) => Promise<void>;
   check: (serviceId: string, model?: string) => Promise<{ ok: boolean; model: string; latency_ms: number; sample: string }>;
   /** 拉取远端 `/v1/models`；新建服务商尚未保存时传 base_url + api_key 即可。 */
-  fetchModels: (params: { base_url?: string; api_key?: string; service_id?: string }) => Promise<RemoteModel[]>;
+  fetchModels: (params: { base_url?: string; api_key?: string; service_id?: string; allow_plaintext_http?: boolean | null }) => Promise<RemoteModel[]>;
   setRoles: (roles: Partial<ModelRoles>) => Promise<void>;
 };
 
@@ -119,7 +121,7 @@ export function useModelServices(): ModelServicesApi {
   const check = useCallback(async (serviceId: string, model?: string) =>
     api<{ ok: boolean; model: string; latency_ms: number; sample: string }>(`/model-services/${serviceId}/check`, { method: "POST", body: JSON.stringify(model ? { model } : {}) }), []);
 
-  const fetchModels = useCallback(async (params: { base_url?: string; api_key?: string; service_id?: string }) => {
+  const fetchModels = useCallback(async (params: { base_url?: string; api_key?: string; service_id?: string; allow_plaintext_http?: boolean | null }) => {
     const value = await api<{ models: RemoteModel[] }>("/model-services/models", { method: "POST", body: JSON.stringify(params) });
     return value.models;
   }, []);

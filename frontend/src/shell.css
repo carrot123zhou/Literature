@@ -1,0 +1,445 @@
+/* =============================================================================
+ * UI v3 · 全局外壳覆盖层
+ * -----------------------------------------------------------------------------
+ * 归属：worker `ui-shell`
+ * 职责：应用外壳（.app-shell / .home-topbar / .statusbar / 主导航）、
+ *       全局按钮与输入的旧基线收敛（覆盖 styles.css / mineru.css 里的历史声明）、
+ *       公共弹层 / 吐司、断点对齐、滚动与溢出治理。
+ * 原因：styles.css 在载入顺序里排第 1，无法覆盖 mineru.css；所有全局覆盖
+ *       必须写在 base.css 之后的这一层。
+ * 约束：只写样式，不改业务逻辑；只消费 theme.css 令牌，不新增 hex / 圆角 / 间距。
+ * 断点：≥1180 完整 · 900–1180 收窄 · <900 单列 / 抽屉（UI_DESIGN §5）。
+ * ========================================================================== */
+
+/* ============================ 1. 全局控件基线 ============================ */
+/* 旧「描边 + 7px 圆角 + 7/11 padding」统一收敛到 u-btn 观感：
+ * 填充底、无描边、6px 圆角。带自有类名的按钮（列表项 / 标签 / 图标钮）
+ * 由各自选择器的更高优先级保留自己的版式。 */
+
+button {
+  min-height: 32px;
+  padding: var(--sp-1) var(--sp-3);
+  border: 1px solid transparent;
+  border-radius: var(--r-control);
+  background: var(--fill-2);
+  color: var(--label);
+  font-size: var(--fs-footnote);
+  font-weight: var(--fw-medium);
+  line-height: var(--lh-tight);
+  cursor: pointer;
+  transition: background-color var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease),
+    box-shadow var(--dur-fast) var(--ease), transform var(--dur-fast) var(--ease);
+  -webkit-user-select: none;
+  user-select: none;
+}
+button:hover:where(:not(:disabled)) {
+  background: var(--fill-1);
+  border-color: transparent;
+}
+button:active:where(:not(:disabled)) { transform: scale(0.985); }
+button:disabled {
+  opacity: 0.42;
+  cursor: not-allowed;
+  transform: none;
+}
+
+/* 主按钮：Apple 蓝填充 */
+.primary {
+  background: var(--accent);
+  border-color: transparent;
+  color: var(--on-accent);
+  font-weight: var(--fw-semibold);
+}
+.primary:hover:where(:not(:disabled)) { background: var(--accent-hover); border-color: transparent; }
+.primary:active:where(:not(:disabled)) { background: var(--accent-press); }
+
+/* 文字链按钮 */
+.link-button {
+  min-height: 0;
+  padding: var(--sp-1) var(--sp-2);
+  border: 0;
+  background: transparent;
+  color: var(--accent);
+  font-size: var(--fs-caption1);
+  font-weight: var(--fw-medium);
+}
+.link-button:hover:where(:not(:disabled)) { background: var(--accent-tint); }
+
+/* 危险文字按钮 */
+.danger-text { color: var(--on-red); }
+.danger-text:hover:where(:not(:disabled)) { background: var(--tint-red); }
+.danger-text:disabled { color: var(--on-red); }
+
+/* 输入控件：u-input / u-select 观感。:where 压平类型排除项的权重，
+ * 让带自有类名的输入（搜索框、行内编辑）继续用自己的样式。 */
+input:where(:not([type="checkbox"], [type="radio"], [type="range"], [type="file"], [type="color"], [type="hidden"])),
+select,
+textarea {
+  min-height: 32px;
+  padding: 0 var(--sp-3);
+  border: 1px solid var(--separator-strong);
+  border-radius: var(--r-control);
+  background: var(--bg-elevated);
+  color: var(--label);
+  font-size: var(--fs-footnote);
+  transition: border-color var(--dur-fast) var(--ease), box-shadow var(--dur-fast) var(--ease);
+}
+textarea {
+  padding: var(--sp-2) var(--sp-3);
+  line-height: var(--lh-normal);
+}
+select {
+  -webkit-appearance: none;
+  appearance: none;
+  padding-right: var(--sp-6);
+  background-image: linear-gradient(45deg, transparent 50%, var(--label-2) 50%),
+    linear-gradient(135deg, var(--label-2) 50%, transparent 50%);
+  background-position: right 14px center, right 9px center;
+  background-size: 5px 5px, 5px 5px;
+  background-repeat: no-repeat;
+}
+input:where(:not([type="checkbox"], [type="radio"], [type="range"], [type="file"], [type="color"], [type="hidden"])):hover,
+select:hover,
+textarea:hover { border-color: var(--label-3); }
+input:where(:not([type="checkbox"], [type="radio"], [type="range"], [type="file"], [type="color"], [type="hidden"])):focus,
+select:focus,
+textarea:focus {
+  border-color: var(--accent);
+  box-shadow: var(--focus-ring);
+  outline: none;
+}
+input:disabled,
+select:disabled,
+textarea:disabled {
+  background-color: var(--fill-3);
+  color: var(--label-3);
+  cursor: not-allowed;
+}
+input::placeholder,
+textarea::placeholder { color: var(--label-3); }
+input[type="checkbox"],
+input[type="radio"] { accent-color: var(--accent); }
+
+.eyebrow {
+  font-size: var(--fs-caption2);
+  font-weight: var(--fw-semibold);
+  letter-spacing: 0.08em;
+  color: var(--label-2);
+}
+.empty-note { color: var(--label-2); font-size: var(--fs-caption1); line-height: var(--lh-normal); }
+.grow { flex: 1; min-width: 0; }
+
+/* ============================ 2. 应用外壳 ============================ */
+/* 三行：52 顶栏 / 主区 / 状态栏。列用 minmax(0,1fr)，任何子项都不能把外壳撑宽。
+ * overflow:hidden 只作兜底——主区内部各自带滚动容器（page-scroll / pane-scroll）。 */
+
+.app-shell {
+  height: 100vh;
+  display: grid;
+  grid-template-rows: var(--topbar-h) minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 1fr);
+  background: var(--bg);
+  overflow: hidden;
+}
+.app-shell > * { min-width: 0; min-height: 0; }
+.page-scroll {
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+/* --- 顶栏：材质 + 发丝线 --- */
+.topbar,
+.intake-topbar.home-topbar {
+  position: relative;
+  z-index: 5;
+  height: var(--topbar-h);
+  min-width: 0;
+  padding: 0 var(--sp-5);
+  border-bottom: 1px solid var(--separator);
+  background: var(--material-bg);
+  -webkit-backdrop-filter: var(--material-blur);
+  backdrop-filter: var(--material-blur);
+  box-shadow: none;
+}
+.intake-topbar.home-topbar {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  align-items: center;
+  gap: var(--sp-4);
+}
+
+.intake-brand-group {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  min-width: 0;
+}
+.intake-topbar.home-topbar .intake-brand {
+  flex: none;
+  min-height: 0;
+  padding: var(--sp-1) 0;
+  border: 0;
+  background: transparent;
+  color: var(--label);
+  font-family: var(--font-ui);
+  font-size: var(--fs-title3);
+  font-weight: var(--fw-semibold);
+  letter-spacing: -0.01em;
+  line-height: var(--lh-tight);
+}
+.intake-topbar.home-topbar .intake-brand:hover:where(:not(:disabled)) { background: transparent; color: var(--accent); }
+
+.project-topbar-title {
+  display: grid;
+  min-width: 0;
+  gap: var(--sp-1);
+  padding-left: var(--sp-3);
+  border-left: 1px solid var(--separator);
+  font-family: var(--font-ui);
+}
+.project-topbar-title strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--fs-subhead);
+  font-weight: var(--fw-semibold);
+  line-height: var(--lh-tight);
+}
+.project-topbar-title small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--label-2);
+  font: var(--fw-regular) var(--fs-caption1) / var(--lh-tight) var(--font-ui);
+  margin: 0;
+}
+.project-close-button {
+  flex: none;
+  width: 24px;
+  min-width: 24px;
+  height: 24px;
+  min-height: 24px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--r-pill);
+  background: transparent;
+  color: var(--label-2);
+  font-size: var(--fs-caption1);
+  line-height: 1;
+}
+.project-close-button:hover:where(:not(:disabled)) { background: var(--tint-red); color: var(--on-red); }
+
+/* --- 主导航：单一强调色。选中 = 浅蓝底衬 + 蓝字；无粗色条 --- */
+.intake-topbar.home-topbar nav,
+.topbar nav {
+  display: flex;
+  align-items: center;
+  align-self: center;
+  justify-content: center;
+  gap: var(--sp-1);
+  min-width: 0;
+}
+.intake-topbar.home-topbar nav button,
+.topbar nav button {
+  min-height: 32px;
+  padding: 0 var(--sp-3);
+  border: 0;
+  border-radius: var(--r-control);
+  background: transparent;
+  color: var(--label-2);
+  font-size: var(--fs-footnote);
+  font-weight: var(--fw-medium);
+  white-space: nowrap;
+}
+.intake-topbar.home-topbar nav button:hover:where(:not(:disabled)),
+.topbar nav button:hover:where(:not(:disabled)) { background: var(--fill-3); color: var(--label); }
+.intake-topbar.home-topbar nav button.active,
+.topbar nav button.active {
+  background: var(--accent-tint);
+  color: var(--accent);
+  font-weight: var(--fw-semibold);
+}
+.intake-topbar.home-topbar nav button.is-hint { color: var(--label-3); }
+.intake-topbar.home-topbar nav button.is-hint:hover:where(:not(:disabled)) { color: var(--label-2); }
+.intake-topbar.home-topbar nav button.active.is-hint { color: var(--accent); }
+.intake-topbar.home-topbar nav button:disabled { opacity: 0.42; }
+
+.project-topbar-right {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--sp-2);
+  min-width: 0;
+}
+.settings-button {
+  flex: none;
+  white-space: nowrap;
+}
+/* 用量徽标：可收缩 + 省略，永远不把顶栏撑破 */
+.usage {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: var(--sp-1) var(--sp-2);
+  border-radius: var(--r-pill);
+  background: var(--tint-gray);
+  color: var(--on-gray);
+  font-size: var(--fs-caption1);
+  font-variant-numeric: tabular-nums;
+}
+
+/* --- 状态栏：材质 + 发丝线 --- */
+.statusbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-4);
+  min-height: var(--statusbar-h);
+  min-width: 0;
+  padding: 0 var(--sp-5);
+  border-top: 1px solid var(--separator);
+  background: var(--material-bg);
+  -webkit-backdrop-filter: var(--material-blur);
+  backdrop-filter: var(--material-blur);
+  color: var(--label-2);
+  font-size: var(--fs-caption1);
+  font-variant-numeric: tabular-nums;
+}
+.statusbar > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* 末段不参与收缩，前面各段让位给它 */
+.statusbar > span:last-child { flex: none; overflow: visible; }
+.statusbar-fail { color: var(--on-red); font-weight: var(--fw-semibold); }
+
+/* --- 空态 / 任务选择：与 u-empty 同一套排版 --- */
+.workspace-state {
+  grid-row: 2;
+  min-height: 0;
+  display: grid;
+  place-content: center;
+  justify-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-8) var(--sp-5);
+  text-align: center;
+  color: var(--label-2);
+  overflow-y: auto;
+}
+.workspace-state h2 {
+  font-family: var(--font-ui);
+  font-size: var(--fs-title2);
+  font-weight: var(--fw-semibold);
+  color: var(--label);
+}
+.workspace-state p { max-width: 56ch; margin: 0 0 var(--sp-2); font-size: var(--fs-footnote); }
+
+.client-startup {
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-3);
+  padding: var(--sp-9);
+  background: var(--bg);
+  color: var(--label-2);
+  text-align: center;
+}
+.client-startup h1 { font-size: var(--fs-large); }
+
+/* --- 可拖拽分栏手柄：发丝线，悬停 / 拖动时加粗为强调色 --- */
+.split-handle:focus-visible { box-shadow: none; outline: none; }
+.split-handle::before {
+  width: 1px;
+  background: var(--separator);
+  transition: background-color var(--dur-fast) var(--ease), width var(--dur-fast) var(--ease);
+}
+.split-handle:hover::before,
+.split-handle:focus-visible::before,
+body.is-resizing .split-handle::before { width: 3px; background: var(--accent); }
+
+/* ============================ 3. 公共弹层 / 吐司 ============================ */
+/* 与 base.css 的 u-backdrop / u-modal / u-sheet 同一视觉；旧类名各屏仍在用，
+ * 这里一处收敛，Esc / 点遮罩关闭等行为由各 TSX 自带，不在 CSS 里改。 */
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: grid;
+  place-items: center;
+  padding: var(--sp-6);
+  background: rgba(0, 0, 0, 0.32);
+  -webkit-backdrop-filter: blur(2px);
+  backdrop-filter: blur(2px);
+  animation: u-fade var(--dur) var(--ease);
+}
+/* 右侧抽屉（术语表等）：贴右、满高 */
+.modal-backdrop:has(> .settings:not(.settings-v2)) {
+  padding: 0;
+  place-items: stretch end;
+}
+.settings {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+  width: min(440px, 100%);
+  height: 100vh;
+  padding: var(--sp-5);
+  border-left: 1px solid var(--separator);
+  background: var(--bg-elevated);
+  box-shadow: var(--shadow-overlay);
+  overflow: auto;
+  animation: u-slide var(--dur) var(--ease);
+}
+
+.toast {
+  position: fixed;
+  left: 50%;
+  bottom: calc(var(--statusbar-h) + var(--sp-4));
+  z-index: 60;
+  transform: translateX(-50%);
+  max-width: min(620px, calc(100vw - 48px));
+  min-height: 0;
+  padding: var(--sp-3) var(--sp-4);
+  border: 0;
+  border-radius: var(--r-card);
+  background: var(--label);
+  color: var(--bg-elevated);
+  font-size: var(--fs-footnote);
+  font-weight: var(--fw-regular);
+  line-height: var(--lh-normal);
+  text-align: left;
+  overflow-wrap: anywhere;
+  box-shadow: var(--shadow-overlay);
+  animation: u-rise var(--dur) var(--ease);
+}
+.toast:hover:where(:not(:disabled)) { background: var(--label); }
+.toast:active:where(:not(:disabled)) { transform: translateX(-50%); }
+
+/* ============================ 4. 断点 ============================ */
+/* 900–1180：顶栏收紧，用量徽标让位。 */
+@media (max-width: 1180px) {
+  .topbar,
+  .intake-topbar.home-topbar { padding: 0 var(--sp-4); }
+  .intake-topbar.home-topbar { gap: var(--sp-3); }
+  .intake-topbar.home-topbar nav button { padding: 0 var(--sp-2); }
+  .usage { max-width: 180px; }
+  .statusbar { padding: 0 var(--sp-4); }
+}
+
+/* < 900：单列。项目副标题与分隔线收起，导航保留全部四个标签（不再隐藏）。 */
+@media (max-width: 899px) {
+  .intake-topbar.home-topbar { gap: var(--sp-2); padding: 0 var(--sp-3); }
+  .project-topbar-title { padding-left: 0; border-left: 0; }
+  .project-topbar-title small { display: none; }
+  .usage { max-width: 120px; }
+  .modal-backdrop { padding: var(--sp-3); }
+}

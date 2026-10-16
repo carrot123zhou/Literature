@@ -289,23 +289,29 @@ async function main() {
   checks.push(["阅读与翻译页可渲染", readText.includes("Chapter on page 5") || readText.includes("阅读")]);
   await page.screenshot({ path: path.join(shotDir, "reading-narrow.png") });
 
-  // ---- I：旧导出路由回退 + 无导出/TBL 入口 ----
+  // ---- I：旧导出路由回退 + 导出能力（2026-10-15 恢复）+ TBL 边界 ----
   await page.goto(`${web}/#/p/${locate.project_id}/export`, { waitUntil: "networkidle" });
   await page.waitForTimeout(2500);
   const exportRouteText = await page.innerText("body");
   checks.push(["旧 #/p/<id>/export 回退到阅读与翻译（不白屏）",
     exportRouteText.includes("阅读") && !exportRouteText.includes("EXPORT CENTER") && !exportRouteText.includes("生成所选格式")]);
   const navText = await page.locator("nav[aria-label='主导航']").innerText();
-  checks.push(["主导航不再暴露导出标签", !navText.includes("导出") && navText.includes("阅读与翻译")]);
+  checks.push(["主导航不暴露导出标签（入口在文件资源页）", !navText.includes("导出") && navText.includes("阅读与翻译")]);
   await page.goto(`${web}/#/export`, { waitUntil: "networkidle" });
   await page.waitForTimeout(1500);
-  checks.push(["旧 #/export 不显示导出中心", !(await page.innerText("body")).includes("EXPORT CENTER")]);
+  checks.push(["旧 #/export 不显示导出中心（导出以弹窗提供）", !(await page.innerText("body")).includes("EXPORT CENTER")]);
   const tblStatus = await fetch(`${api}/tbl/config`, { headers }).then(r => r.status).catch(() => 0);
   checks.push(["TBL 接口已废止（410）", tblStatus === 410]);
-  const exportStatus = await fetch(`${api}/projects/${locate.project_id}/exports`, {
+  const healthExports = await fetch(`${api}/health`).then(r => r.json()).catch(() => ({}));
+  checks.push(["能力包含 export_v1", Array.isArray(healthExports.capabilities) && healthExports.capabilities.includes("export_v1")]);
+  const exportOptions = await fetch(`${api}/projects/${locate.project_id}/export/options`, { headers })
+    .then(r => (r.ok ? r.json() : null)).catch(() => null);
+  checks.push(["导出选项接口可用（四格式）", Boolean(exportOptions)
+    && ["epub", "docx", "markdown", "html"].every(id => (exportOptions.formats || []).some(f => f.id === id))]);
+  const legacyExportStatus = await fetch(`${api}/projects/${locate.project_id}/exports`, {
     method: "POST", headers: { ...headers, "content-type": "application/json" }, body: JSON.stringify({ mode: "source" }),
   }).then(r => r.status).catch(() => 0);
-  checks.push(["导出接口已废止（410）", exportStatus === 410]);
+  checks.push(["旧 /exports 端点不再是 410（已由 /export 取代）", legacyExportStatus !== 410]);
 
   // ---- J：大书阅读页窗口化（1000+ blocks） ----
   const bigBook = await projectByTitle("Big Book");

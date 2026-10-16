@@ -21,7 +21,7 @@ export default function GlossaryEditor({ entries, setEntries, versions, close, f
     setEntries(parsed);
     freeze(parsed);
   };
-  return <div className="modal-backdrop" onClick={close}><section className="settings glossary-editor" role="dialog" aria-modal="true" aria-label="冻结术语表" onClick={event => event.stopPropagation()}>
+  return <div className="modal-backdrop glossary-backdrop u-backdrop" onClick={close}><section className="settings glossary-editor u-modal" role="dialog" aria-modal="true" aria-label="冻结术语表" onClick={event => event.stopPropagation()}>
     <div className="panel-title"><h2>术语表</h2><button onClick={close}>关闭</button></div>
     <p>每行一个术语，原文和译文用 Tab 或 <code>=&gt;</code> 分隔。冻结后随翻译任务保存快照。</p>
     <textarea value={text} onChange={event => setText(event.target.value)} placeholder={'Paradigm\t范式'} />

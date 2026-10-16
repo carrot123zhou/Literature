@@ -1,0 +1,549 @@
+/* =============================================================================
+ * Literature UI v3 — 基础层（全局重置 + 组件基元）
+ * -----------------------------------------------------------------------------
+ * 载入顺序：styles.css → mineru.css → resource.css → review.css → reading.css
+ *           → export.css → theme.css → base.css → intake.css → app-settings.css
+ * base.css 必须在旧表之后载入，才能压过 styles.css / mineru.css 里的历史声明。
+ *
+ * 内容分三段：
+ *   A. 全局重置与排版 / 滚动 / 焦点 / 动效
+ *   B. 组件基元（u-* 前缀，新代码一律使用；旧类名由各屏按屏迁移）
+ *   C. 防溢出护栏（布局硬规则）
+ * ========================================================================== */
+
+/* ============================ A. 全局 ============================ */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+html {
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+}
+
+body {
+  margin: 0;
+  min-width: var(--min-app-width);
+  min-height: 100%;
+  background: var(--bg);
+  color: var(--label);
+  font-family: var(--font-ui);
+  font-size: var(--fs-footnote);
+  line-height: var(--lh-normal);
+  font-synthesis: none;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  /* 覆盖 mineru.css 的橙色径向渐晕底 */
+  background-image: none;
+}
+
+::selection {
+  background: var(--accent-tint-strong);
+}
+
+h1, h2, h3, h4, h5, h6 {
+  margin: 0;
+  font-family: var(--font-ui);
+  font-weight: var(--fw-semibold);
+  color: var(--label);
+  line-height: var(--lh-tight);
+  letter-spacing: -0.01em;
+}
+
+p { margin: 0; }
+
+button, input, textarea, select {
+  font: inherit;
+  color: inherit;
+}
+
+/* 全局焦点可见：键盘用户永远能看到焦点 */
+:focus { outline: none; }
+:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+  border-radius: var(--r-control);
+  position: relative;
+  z-index: 1;
+}
+
+/* 尊重系统「减弱动态效果」 */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* 滚动条：浅色面板上保持克制，深浅色自适应 */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--label-4) transparent;
+}
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  border: 3px solid transparent;
+  border-radius: 8px;
+  background: var(--label-4);
+  background-clip: content-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--label-3);
+  background-clip: content-box;
+}
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+/* 数值对齐（任务进度、用量、页码） */
+.u-num {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum" 1;
+}
+
+/* ======================= B. 组件基元 ======================= */
+
+/* --- 按钮：filled / tinted / plain / danger，4 态齐全 --- */
+.u-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-2);
+  min-height: 32px;
+  padding: 0 var(--sp-3);
+  border: 1px solid transparent;
+  border-radius: var(--r-control);
+  background: var(--fill-2);
+  color: var(--label);
+  font-size: var(--fs-footnote);
+  font-weight: var(--fw-medium);
+  line-height: 1;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background-color var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease), box-shadow var(--dur-fast) var(--ease),
+    transform var(--dur-fast) var(--ease);
+  -webkit-user-select: none;
+  user-select: none;
+}
+.u-btn:hover { background: var(--fill-1); }
+.u-btn:active { transform: scale(0.985); }
+.u-btn:disabled,
+.u-btn[aria-disabled="true"] {
+  opacity: 0.42;
+  cursor: not-allowed;
+  transform: none;
+}
+.u-btn--primary {
+  background: var(--accent);
+  color: var(--on-accent);
+  font-weight: var(--fw-semibold);
+}
+.u-btn--primary:hover { background: var(--accent-hover); }
+.u-btn--primary:active { background: var(--accent-press); }
+.u-btn--tinted {
+  background: var(--accent-tint);
+  color: var(--accent);
+  font-weight: var(--fw-semibold);
+}
+.u-btn--tinted:hover { background: var(--accent-tint-strong); }
+.u-btn--plain {
+  background: transparent;
+  color: var(--accent);
+  padding: 0 var(--sp-2);
+}
+.u-btn--plain:hover { background: var(--accent-tint); }
+.u-btn--danger {
+  background: var(--tint-red);
+  color: var(--on-red);
+  font-weight: var(--fw-semibold);
+}
+.u-btn--danger:hover { background: rgba(255, 59, 48, 0.20); }
+.u-btn--sm { min-height: 26px; padding: 0 var(--sp-2); font-size: var(--fs-caption1); }
+.u-btn--lg { min-height: 40px; padding: 0 var(--sp-4); font-size: var(--fs-body); }
+.u-btn--block { width: 100%; }
+.u-btn--icon {
+  width: 28px;
+  min-width: 28px;
+  height: 28px;
+  min-height: 28px;
+  padding: 0;
+  border-radius: var(--r-control);
+  background: transparent;
+  color: var(--label-2);
+  font-size: var(--fs-subhead);
+}
+.u-btn--icon:hover { background: var(--fill-2); color: var(--label); }
+
+/* --- 输入控件 --- */
+.u-input,
+.u-select,
+.u-textarea {
+  width: 100%;
+  min-height: 32px;
+  padding: 0 var(--sp-3);
+  border: 1px solid var(--separator-strong);
+  border-radius: var(--r-control);
+  background: var(--bg-elevated);
+  color: var(--label);
+  font-size: var(--fs-footnote);
+  transition: border-color var(--dur-fast) var(--ease), box-shadow var(--dur-fast) var(--ease);
+}
+.u-textarea {
+  padding: var(--sp-2) var(--sp-3);
+  line-height: var(--lh-normal);
+  resize: vertical;
+}
+.u-select {
+  -webkit-appearance: none;
+  appearance: none;
+  padding-right: var(--sp-6);
+  background-image: linear-gradient(45deg, transparent 50%, var(--label-2) 50%),
+    linear-gradient(135deg, var(--label-2) 50%, transparent 50%);
+  background-position: right 14px center, right 9px center;
+  background-size: 5px 5px, 5px 5px;
+  background-repeat: no-repeat;
+}
+.u-input:hover,
+.u-select:hover,
+.u-textarea:hover { border-color: var(--label-3); }
+.u-input:focus,
+.u-select:focus,
+.u-textarea:focus {
+  border-color: var(--accent);
+  box-shadow: var(--focus-ring);
+  outline: none;
+}
+.u-input:disabled,
+.u-select:disabled,
+.u-textarea:disabled {
+  background: var(--fill-3);
+  color: var(--label-3);
+  cursor: not-allowed;
+}
+.u-input::placeholder,
+.u-textarea::placeholder { color: var(--label-3); }
+
+.u-field {
+  display: grid;
+  gap: var(--sp-2);
+  font-size: var(--fs-caption1);
+  color: var(--label-2);
+}
+.u-field > span:first-child,
+.u-field > label:first-child {
+  font-weight: var(--fw-medium);
+}
+
+.u-check {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  font-size: var(--fs-caption1);
+  color: var(--label-2);
+  cursor: pointer;
+}
+.u-check input[type="checkbox"],
+.u-check input[type="radio"] {
+  width: 15px;
+  height: 15px;
+  min-width: 15px;
+  margin: 0;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+/* --- 分段控件（tab / 档位切换统一用它） --- */
+.u-segmented {
+  display: inline-flex;
+  gap: 2px;
+  padding: 2px;
+  border-radius: var(--r-control);
+  background: var(--fill-2);
+}
+.u-segmented > button {
+  flex: 1;
+  min-width: 0;
+  min-height: 26px;
+  padding: 0 var(--sp-3);
+  border: 0;
+  border-radius: calc(var(--r-control) - 1px);
+  background: transparent;
+  color: var(--label-2);
+  font-size: var(--fs-caption1);
+  font-weight: var(--fw-medium);
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background-color var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease);
+}
+.u-segmented > button:hover { color: var(--label); }
+.u-segmented > button[aria-selected="true"],
+.u-segmented > button.is-active {
+  background: var(--bg-elevated);
+  color: var(--label);
+  font-weight: var(--fw-semibold);
+  box-shadow: var(--shadow-card);
+}
+.u-segmented--fill { display: flex; }
+
+/* --- 容器：卡片 / 面板 --- */
+/* 注意：这里**故意不设** overflow。base.css 在第 8 顺位载入，晚于各屏 CSS；
+ * 早先 `.u-card{overflow:hidden}` 会同权重盖掉 reading.css 里
+ * `.instant-card` / `.review-candidate` 的 `overflow:auto`，导致长内容被裁且无法滚动。
+ * 需要裁边的复合组件请把 overflow 放在自己的屏级规则里（.u-panel 仍保留裁边）。 */
+.u-card {
+  border: 1px solid var(--separator);
+  border-radius: var(--r-card);
+  background: var(--bg-elevated);
+  box-shadow: var(--shadow-card);
+}
+.u-panel {
+  border: 1px solid var(--separator);
+  border-radius: var(--r-card);
+  background: var(--bg-elevated);
+  overflow: hidden;
+}
+.u-panel__head {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  min-height: 40px;
+  padding: 0 var(--sp-4);
+  border-bottom: 1px solid var(--separator);
+  background: var(--bg-elevated);
+  font-size: var(--fs-caption1);
+  font-weight: var(--fw-semibold);
+  color: var(--label-2);
+}
+.u-panel__body { padding: var(--sp-4); }
+
+/* --- 工具栏 / 顶栏（苹果式材质） --- */
+.u-toolbar {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  min-height: var(--toolbar-h);
+  padding: 0 var(--sp-4);
+  border-bottom: 1px solid var(--separator);
+  background: var(--material-bg);
+  -webkit-backdrop-filter: var(--material-blur);
+  backdrop-filter: var(--material-blur);
+}
+.u-toolbar--wrap { flex-wrap: wrap; }
+
+/* --- 模态 / 表单类覆盖层 --- */
+.u-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: grid;
+  place-items: center;
+  padding: var(--sp-6);
+  background: var(--scrim);
+  -webkit-backdrop-filter: blur(2px);
+  backdrop-filter: blur(2px);
+  animation: u-fade var(--dur) var(--ease);
+}
+.u-modal {
+  display: flex;
+  flex-direction: column;
+  width: min(680px, 100%);
+  max-height: min(80vh, 100%);
+  border-radius: var(--r-sheet);
+  background: var(--bg-elevated);
+  box-shadow: var(--shadow-overlay);
+  overflow: hidden;
+  animation: u-rise var(--dur) var(--ease);
+}
+.u-modal--lg { width: min(1000px, 100%); }
+.u-modal--sm { width: min(440px, 100%); }
+.u-modal__head {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sp-4);
+  padding: var(--sp-5) var(--sp-6);
+  border-bottom: 1px solid var(--separator);
+}
+.u-modal__head h2 {
+  font-size: var(--fs-title2);
+  font-weight: var(--fw-semibold);
+}
+.u-modal__head p {
+  margin-top: var(--sp-1);
+  color: var(--label-2);
+  font-size: var(--fs-caption1);
+  line-height: var(--lh-normal);
+}
+.u-modal__close { margin-left: auto; flex: none; }
+.u-modal__body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: var(--sp-5) var(--sp-6);
+}
+.u-modal__foot {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-3) var(--sp-6);
+  border-top: 1px solid var(--separator);
+  background: var(--bg-elevated);
+}
+.u-modal__foot .u-grow { flex: 1; }
+
+/* 右侧抽屉（表单类） */
+.u-backdrop--drawer { justify-items: end; padding: 0; place-items: stretch end; }
+.u-sheet {
+  display: flex;
+  flex-direction: column;
+  width: min(440px, 100%);
+  height: 100%;
+  background: var(--bg-elevated);
+  border-left: 1px solid var(--separator);
+  box-shadow: var(--shadow-overlay);
+  animation: u-slide var(--dur) var(--ease);
+}
+
+@keyframes u-fade { from { opacity: 0; } to { opacity: 1; } }
+@keyframes u-rise { from { opacity: 0; transform: translateY(8px) scale(0.995); } to { opacity: 1; transform: none; } }
+@keyframes u-slide { from { transform: translateX(16px); opacity: 0.6; } to { transform: none; opacity: 1; } }
+
+/* --- 状态徽标 --- */
+.u-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: 2px var(--sp-2);
+  border-radius: var(--r-pill);
+  background: var(--tint-gray);
+  color: var(--on-gray);
+  font-size: var(--fs-caption2);
+  font-weight: var(--fw-semibold);
+  white-space: nowrap;
+}
+.u-badge::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  flex: none;
+}
+.u-badge--plain::before { display: none; }
+.u-badge--done { background: var(--tint-green); color: var(--on-green); }
+.u-badge--run { background: var(--tint-orange); color: var(--on-orange); }
+.u-badge--act { background: var(--tint-blue); color: var(--on-blue); }
+.u-badge--fail { background: var(--tint-red); color: var(--on-red); }
+.u-badge--stale { background: var(--tint-purple); color: var(--on-purple); }
+.u-badge--lock { background: var(--tint-teal); color: var(--on-teal); }
+
+/* --- 空态 / 加载 --- */
+.u-empty {
+  display: grid;
+  place-content: center;
+  justify-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-8) var(--sp-5);
+  text-align: center;
+  color: var(--label-2);
+}
+.u-empty h2 {
+  font-size: var(--fs-title3);
+  font-weight: var(--fw-semibold);
+  color: var(--label);
+}
+.u-empty p { font-size: var(--fs-footnote); max-width: 46ch; }
+
+.u-skeleton {
+  border-radius: var(--r-control);
+  background: linear-gradient(90deg, var(--fill-3) 25%, var(--fill-2) 37%, var(--fill-3) 63%);
+  background-size: 400% 100%;
+  animation: u-shimmer 1.4s ease infinite;
+}
+@keyframes u-shimmer { from { background-position: 100% 0; } to { background-position: 0 0; } }
+
+.u-spinner {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  border: 2px solid var(--fill-1);
+  border-top-color: var(--accent);
+  animation: u-spin 0.7s linear infinite;
+}
+@keyframes u-spin { to { transform: rotate(360deg); } }
+
+/* --- 吐司 --- */
+.u-toast {
+  position: fixed;
+  left: 50%;
+  bottom: var(--sp-8);
+  z-index: 60;
+  transform: translateX(-50%);
+  max-width: min(560px, calc(100vw - 48px));
+  padding: var(--sp-3) var(--sp-4);
+  border-radius: var(--r-card);
+  background: rgba(28, 28, 30, 0.92);
+  color: #fff;
+  font-size: var(--fs-footnote);
+  box-shadow: var(--shadow-overlay);
+  -webkit-backdrop-filter: var(--material-blur);
+  backdrop-filter: var(--material-blur);
+  animation: u-rise var(--dur) var(--ease);
+}
+
+/* ======================= C. 防溢出护栏 ======================= */
+
+/* 任何滚动区：必须 min-height/min-width 归零，否则会撑破父容器 */
+.u-scroll {
+  min-height: 0;
+  min-width: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+.u-scroll-y {
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.u-clip {
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+/* 文本一律可截断，禁止把容器撑宽 */
+.u-truncate {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.u-wrap-anywhere { overflow-wrap: anywhere; }
+
+/* 通用行/列布局 */
+.u-row { display: flex; align-items: center; gap: var(--sp-3); min-width: 0; }
+.u-col { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+.u-grow { flex: 1; min-width: 0; }
+.u-spacer { flex: 1; }
+
+/* 防溢出：媒体与画布不得超出容器（PDF canvas 由自身容器控制尺寸，不在此列） */
+img, svg, video, iframe { max-width: 100%; }

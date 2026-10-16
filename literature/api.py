@@ -17,6 +17,8 @@ from typing import Any, Callable, Literal
 from fastapi import File, UploadFile
 from pydantic import BaseModel, ConfigDict, Field
 
+from .exporters import create_export, export_options, list_exports, resolve_export_file
+from .flow import detect_cross_page_flow
 from .mineru import detect_language, import_mineru
 from .mineru_capabilities import MAX_BATCH_FILES, validate_source
 from .mineru_workflow import MinerUClient, WorkflowError
@@ -118,6 +120,16 @@ class ProjectUpdate(BaseModel):
     target_language: str | None = None
     chapter_language_overrides: dict[str, Literal["en", "ja", "fr", "de"]] | None = None
     budget_usd: float | None = Field(default=None, ge=0)
+
+
+class ExportRequest(BaseModel):
+    formats: list[Literal["epub", "docx", "markdown", "html"]] = Field(default_factory=lambda: ["epub"])
+    mode: Literal["source", "translation", "bilingual"] = "translation"
+    locale: str = "zh-CN"
+    chapters: list[str] = Field(default_factory=list)
+    block_ids: list[str] = Field(default_factory=list)
+    filename: str = Field(default="", max_length=240)
+    missing_policy: Literal["fallback_source"] = "fallback_source"
 
 
 class MinerUImport(BaseModel):
@@ -223,6 +235,8 @@ class ProviderInput(BaseModel):
     reasoning_style: str = ""
     reasoning_effort: str = ""
     reasoning_budget: int = 0
+    # 向后兼容的随请求 ProviderInput（主路径已改为模型服务库）：同样默认拦截明文 HTTP。
+    allow_plaintext_http: bool = False
 
     def config(self) -> ProviderConfig:
         if self.provider not in PROVIDER_PRESETS:
@@ -235,6 +249,7 @@ class ProviderInput(BaseModel):
             output_price_per_million=self.output_price_per_million,
             reasoning_style=self.reasoning_style, reasoning_effort=self.reasoning_effort,
             reasoning_budget=self.reasoning_budget,
+            allow_plaintext_http=self.allow_plaintext_http,
         )
 
 
@@ -327,6 +342,9 @@ class ModelServiceInput(BaseModel):
     name: str = ""
     preset: str = "custom"
     base_url: str = ""
+    # 用户显式确认：该地址是内网/自建服务，允许用明文 HTTP 携带 API Key。
+    # 默认 False，公网 http 地址会被 providers.assert_key_transport_safe 拦截。
+    allow_plaintext_http: bool = False
     models: list[ModelEntryInput] = Field(default_factory=list)
     # v1 兼容字段（仅在 models 为空时生效）。
     model: str = ""
@@ -360,6 +378,8 @@ class ModelProbeInput(BaseModel):
     base_url: str = ""
     api_key: str = ""
     service_id: str = ""
+    # 新建服务时随表单提交的“允许明文 HTTP”选项（已保存服务缺省用服务上的配置）。
+    allow_plaintext_http: bool | None = None
 
 
 class TranslationJobInput(BaseModel):
@@ -1147,7 +1167,7 @@ def create_app(store: ProjectStore | None = None):
             "status": "ok",
             "version": "0.1.0",
             "runtime_revision": RUNTIME_REVISION,
-            "capabilities": ["intake_items_v1", "structure_review_v2", "model_services_v1", "model_services_v2", "model_services_v3", "structure_job_v1", "structure_modes_v1", "structure_pause_v1", "structure_vision_v1", "desktop_resources_v1", "translation_module_v1", "translation_engine_v2", "resource_pipeline_v1", "translation_safety_v1", "parse_lifecycle_v1", "task_history_v1", "parse_backends_v1"],
+            "capabilities": ["intake_items_v1", "structure_review_v2", "model_services_v1", "model_services_v2", "model_services_v3", "model_services_v4", "structure_job_v1", "structure_modes_v1", "structure_pause_v1", "structure_vision_v1", "structure_flow_v1", "desktop_resources_v1", "translation_module_v1", "translation_engine_v2", "resource_pipeline_v1", "translation_safety_v1", "parse_lifecycle_v1", "task_history_v1", "parse_backends_v1", "export_v1"],
         }
 
     @app.get("/parse/backends")
@@ -1267,7 +1287,7 @@ def create_app(store: ProjectStore | None = None):
                     changes["chapter_language_overrides"] = document.chapter_language_overrides
                 store.save_document(document)
                 manifest = store.update_manifest(project_id, **changes) if changes else store.load_manifest(project_id)
-            return {**document.to_dict(), "budget_usd": manifest.get("budget_usd", 0)}
+            return {**document.to_dict(), "budget_usd": manifest.get("budget_usd", 0), "flow_links": detect_cross_page_flow(document, project_path)}
         if changes:
             store.update_manifest(project_id, **changes)
         return store.describe_project(project_id)
@@ -1281,7 +1301,9 @@ def create_app(store: ProjectStore | None = None):
 
     @app.get("/projects/{project_id}/document")
     def document(project_id: str):
-        return store.load_document(project_id).to_dict()
+        value = store.load_document(project_id)
+        # flow_links 是只读派生视图元数据（跨页续接），不写回 document.json。
+        return {**value.to_dict(), "flow_links": detect_cross_page_flow(value, store.project_path(project_id))}
 
     @app.get("/projects/{project_id}/source.pdf")
     def source_pdf(project_id: str):
@@ -1332,7 +1354,8 @@ def create_app(store: ProjectStore | None = None):
 
     @app.post("/projects/{project_id}/mineru/import")
     def mineru_import(project_id: str, request: MinerUImport):
-        return import_mineru(store, project_id, request.paths).to_dict()
+        value = import_mineru(store, project_id, request.paths)
+        return {**value.to_dict(), "flow_links": detect_cross_page_flow(value, store.project_path(project_id))}
 
     @app.get("/projects/{project_id}/mineru/verify")
     def mineru_verify(project_id: str):
@@ -1854,7 +1877,10 @@ def create_app(store: ProjectStore | None = None):
 
     @app.post("/model-services/models")
     def model_service_probe_models(request: ModelProbeInput):
-        return {"models": models.probe_models(base_url=request.base_url, api_key=request.api_key, service_id=request.service_id)}
+        return {"models": models.probe_models(
+            base_url=request.base_url, api_key=request.api_key, service_id=request.service_id,
+            allow_plaintext_http=request.allow_plaintext_http,
+        )}
 
     @app.post("/model-services/{service_id}/models")
     def model_service_models(service_id: str):
@@ -2040,14 +2066,31 @@ def create_app(store: ProjectStore | None = None):
     def usage_records(project_id: str):
         return store.usage_records(project_id)
 
-    @app.post("/projects/{project_id}/exports")
-    def exports(project_id: str):
-        # 导出模块已整体移除；保留路径返回 410，让旧前端/旧书签得到明确提示而不是裸 404。
-        raise HTTPException(status_code=410, detail="Literature 已移除内置导出；原文/解析证据/译文仍保留在项目中。")
+    @app.get("/projects/{project_id}/export/options")
+    def export_options_endpoint(project_id: str, locale: str = "zh-CN"):
+        return export_options(store, project_id, locale)
 
-    @app.get("/projects/{project_id}/export/readiness")
-    def export_readiness_endpoint(project_id: str, locale: str = "zh-CN"):
-        raise HTTPException(status_code=410, detail="Literature 已移除内置导出与完整性预检。")
+    @app.post("/projects/{project_id}/export")
+    def export_create_endpoint(project_id: str, request: ExportRequest):
+        return create_export(
+            store, project_id,
+            formats=request.formats, mode=request.mode, locale=request.locale,
+            chapters=request.chapters, block_ids=request.block_ids,
+            filename=request.filename, missing_policy=request.missing_policy,
+        )
+
+    @app.get("/projects/{project_id}/exports")
+    def exports_list_endpoint(project_id: str):
+        return list_exports(store, project_id)
+
+    @app.get("/projects/{project_id}/exports/{export_id}/file")
+    def export_file_endpoint(project_id: str, export_id: str, name: str):
+        from fastapi.responses import FileResponse
+        try:
+            path, media_type = resolve_export_file(store, project_id, export_id, name)
+        except FileNotFoundError:
+            raise HTTPException(status_code=404, detail="导出文件不存在。")
+        return FileResponse(path, media_type=media_type, filename=path.name)
 
     @app.post("/projects/{project_id}/tbl/prepare")
     def tbl_prepare(project_id: str):

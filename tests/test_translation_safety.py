@@ -1478,10 +1478,10 @@ class TranslationSafetyTests(unittest.TestCase):
         self.assertEqual(edited.json()["cells"]["c2"], "译：second")
         # 已移除的内置导出必须明确拒绝，而不能返回半套产物。
         exported = client.post(
-            f"/projects/{project_id}/exports", headers=headers,
-            json={"mode": "translation", "locale": "zh-CN", "strategy": "keep_source", "formats": ["md+json"]},
+            f"/projects/{project_id}/export", headers=headers,
+            json={"mode": "translation", "locale": "zh-CN", "formats": ["markdown"]},
         )
-        self.assertEqual(exported.status_code, 410, exported.text)
+        self.assertEqual(exported.status_code, 200, exported.text)
         client.close()
 
     def test_instant_save_refuses_field_block_and_truncation(self):

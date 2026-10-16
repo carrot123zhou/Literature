@@ -206,11 +206,14 @@ def _is_loopback_host(host: str) -> bool:
         return False
 
 
-def plaintext_http_blocked(base_url: str) -> bool:
+def plaintext_http_blocked(base_url: str, *, allow_plaintext: bool = False) -> bool:
     """地址是明文 ``http://`` 且主机不是本机 loopback 时返回 True。
 
     API Key 走 ``Authorization`` 头；对远程主机用明文 HTTP 会把密钥暴露在链路上。
     本地网关/开发服务（localhost、127.0.0.0/8、[::1]）保留 http 契约，不受限制。
+
+    ``allow_plaintext=True`` 表示用户已经对这个服务显式确认过风险
+    （内网/自建 MaaS 常常没有 https），此时不再拦截；调用方负责在日志里留痕。
     """
     try:
         from urllib.parse import urlparse
@@ -219,15 +222,21 @@ def plaintext_http_blocked(base_url: str) -> bool:
         return False
     if (parsed.scheme or "").lower() != "http":
         return False
+    if allow_plaintext:
+        return False
     return not _is_loopback_host((parsed.hostname or "").lower())
 
 
-def assert_key_transport_safe(base_url: str, api_key: str) -> None:
-    """在携带密钥发请求前调用；阻止把密钥发往明文 HTTP 的远程地址。"""
-    if (api_key or "").strip() and plaintext_http_blocked(base_url):
+def assert_key_transport_safe(base_url: str, api_key: str, *, allow_plaintext: bool = False) -> None:
+    """在携带密钥发请求前调用；阻止把密钥发往明文 HTTP 的远程地址。
+
+    默认拦截（安全默认）；只有用户在服务配置里显式允许明文 HTTP 时才放行。
+    """
+    if (api_key or "").strip() and plaintext_http_blocked(base_url, allow_plaintext=allow_plaintext):
         raise ProviderError(
             "为避免 API Key 经明文 HTTP 泄露，远程服务必须使用 https:// 地址；"
             "本机 loopback（localhost / 127.0.0.1 / [::1]）不受限制。"
+            "若这是自建/内网服务，请在「设置 → 模型服务」里勾选「允许明文 HTTP」后重试。"
         )
 
 
@@ -284,6 +293,10 @@ class ProviderConfig:
     # 不同 OpenAI 兼容服务接受不同写法（顶层 enable_thinking / chat_template_kwargs 等），
     # 空值表示用该风格的默认写法。仅在“关思考”时生效，开思考时始终走标准协议。
     reasoning_field_variant: str = ""
+    # 用户显式确认「该服务是内网/自建服务，允许用明文 HTTP 发送 API Key」。
+    # 默认 False：公网明文 http 依旧被 assert_key_transport_safe 拦截，
+    # 否则一次误填就会把密钥暴露在链路上。
+    allow_plaintext_http: bool = False
 
     @classmethod
     def preset(cls, provider: str, **overrides: Any) -> "ProviderConfig":
@@ -601,14 +614,16 @@ def _model_list_urls(base_url: str) -> list[str]:
     return [f"{base}/v1/models", f"{base}/models"]
 
 
-def list_remote_models(base_url: str, api_key: str, *, timeout: float = 30.0) -> list[dict[str, Any]]:
+def list_remote_models(
+    base_url: str, api_key: str, *, timeout: float = 30.0, allow_plaintext_http: bool = False,
+) -> list[dict[str, Any]]:
     """拉取 OpenAI 兼容的 `/v1/models`，并解析出模型 ID、上下文窗口、输出上限与单价。"""
     base_url = (base_url or "").strip()
     if not base_url:
         raise ProviderError("请填写 Base URL。")
     if not (api_key or "").strip():
         raise ProviderError("请先填写 API Key。")
-    assert_key_transport_safe(base_url, api_key)
+    assert_key_transport_safe(base_url, api_key, allow_plaintext=allow_plaintext_http)
     try:
         import httpx
     except ImportError as error:
@@ -671,6 +686,8 @@ class OpenAICompatibleProvider:
         # 探测（probe_thinking_off）是主路径；这里保证即使探测被跳过（离线/测试），
         # 一个不认 enable_thinking 的服务也不会把整本书翻译直接 400 掉。
         self._drop_reasoning_fields = False
+        # 明文 HTTP 放行的日志只打一次（按用户显式配置放行，仍要留痕）。
+        self._plaintext_warned = False
         # 可选：每次真实 HTTP attempt 进入公共协调层（预算预留/并发/退避）。
         # begin(prompt_chars) 在发请求前调用并返回句柄；end(handle, response, error, final) 在 attempt 后处理。
         # final=True 时预算预留不在 end 释放，而是留在线程本地，由调用方写账后原子 reconcile。
@@ -858,8 +875,22 @@ class OpenAICompatibleProvider:
             raise ProviderError("缺少 httpx，请安装 Literature Python 依赖。") from error
         # 代理环境变量在 httpx 创建 Client 时解析，必须先规范化再发请求。
         normalize_proxy_environment()
-        # 密钥只在 https（或本机 loopback http）上发送，不允许明文 HTTP 发往远程主机。
-        assert_key_transport_safe(self.config.base_url, self.api_key)
+        # 密钥只在 https（或本机 loopback http，或用户显式允许明文的内网服务）上发送，
+        # 不允许明文 HTTP 静默发往远程主机。
+        assert_key_transport_safe(
+            self.config.base_url, self.api_key, allow_plaintext=self.config.allow_plaintext_http,
+        )
+        if (
+            self.config.allow_plaintext_http
+            and plaintext_http_blocked(self.config.base_url)
+            and not self._plaintext_warned
+        ):
+            # 每次任务只提示一次，避免翻译几千块时日志刷屏；但必须留痕。
+            self._plaintext_warned = True
+            logger.warning(
+                "按服务配置允许明文 HTTP 发送 API Key：%s（链路上不加密，请仅在可信内网使用）",
+                self.config.base_url,
+            )
         url = f"{self.config.base_url.rstrip('/')}/chat/completions"
         headers = {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json", **self.config.extra_headers}
         base_body = {

@@ -62,7 +62,7 @@ class ModelEntry:
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
-    def config(self, *, provider_id: str, base_url: str) -> ProviderConfig:
+    def config(self, *, provider_id: str, base_url: str, allow_plaintext_http: bool = False) -> ProviderConfig:
         return ProviderConfig(
             provider=provider_id, model=self.model, base_url=base_url,
             temperature=self.temperature, max_output_tokens=self.max_output_tokens,
@@ -70,6 +70,7 @@ class ModelEntry:
             output_price_per_million=self.output_price_per_million,
             reasoning_style=self.reasoning_style or "", reasoning_effort=self.reasoning_effort or "",
             reasoning_budget=self.reasoning_budget or 0,
+            allow_plaintext_http=allow_plaintext_http,
         )
 
 
@@ -82,6 +83,9 @@ class ModelProvider:
     preset: str = "custom"
     base_url: str = ""
     models: list[ModelEntry] = field(default_factory=list)
+    # 用户显式确认“该地址是内网/自建服务，允许明文 HTTP 携带密钥”。
+    # 默认 False：公网 http 地址仍被 providers.assert_key_transport_safe 拦截。
+    allow_plaintext_http: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -89,6 +93,7 @@ class ModelProvider:
             "name": self.name,
             "preset": self.preset,
             "base_url": self.base_url,
+            "allow_plaintext_http": self.allow_plaintext_http,
             "models": [entry.to_dict() for entry in self.models],
         }
 
@@ -175,6 +180,7 @@ class ModelServiceStore:
             "name": _clean_text(item.get("name"), maximum=120) or preset,
             "preset": preset,
             "base_url": _clean_text(item.get("base_url"), maximum=500),
+            "allow_plaintext_http": bool(item.get("allow_plaintext_http", False)),
             "models": [entry for entry in entries if entry["model"]],
         }
 
@@ -224,6 +230,7 @@ class ModelServiceStore:
                     "name": _clean_text(item.get("name"), maximum=120) or preset,
                     "preset": preset,
                     "base_url": base_url,
+                    "allow_plaintext_http": bool(item.get("allow_plaintext_http", False)),
                     "models": [],
                 }
                 groups[key] = provider
@@ -393,6 +400,7 @@ class ModelServiceStore:
             preset=preset,
             base_url=base_url,
             models=models,
+            allow_plaintext_http=bool(payload.get("allow_plaintext_http", False)),
         )
 
     # ---- 查询 ----------------------------------------------------------- #
@@ -624,6 +632,7 @@ class ModelServiceStore:
             raise ProviderError("该服务商还没有可用的模型，请先在模型配置里添加。")
         config = ModelEntry(**{key: entry.get(key) for key in ModelEntry.__dataclass_fields__}).config(
             provider_id=service_id, base_url=str(provider.get("base_url") or ""),
+            allow_plaintext_http=bool(provider.get("allow_plaintext_http", False)),
         )
         return OpenAICompatibleProvider(config, api_key=self.api_key(service_id), timeout=timeout)
 
@@ -632,7 +641,8 @@ class ModelServiceStore:
         return self.probe_models(service_id=service_id, timeout=timeout)
 
     def probe_models(
-        self, *, base_url: str = "", api_key: str = "", service_id: str = "", timeout: float = 30.0,
+        self, *, base_url: str = "", api_key: str = "", service_id: str = "",
+        allow_plaintext_http: bool | None = None, timeout: float = 30.0,
     ) -> list[dict[str, Any]]:
         """拉取远端 `/v1/models`：可只给 base URL + key（新建服务尚未保存），
         也可给 service_id 复用已保存的 base URL / Keychain 密钥，缺什么补什么。
@@ -646,6 +656,11 @@ class ModelServiceStore:
         if service_id:
             service = self.get(service_id)
             stored_base = str(service.get("base_url") or "").strip()
+            # 未显式传入时用服务上保存的开关（新建服务/确定地址时由调用方传入）。
+            allow_plaintext = (
+                bool(service.get("allow_plaintext_http", False))
+                if allow_plaintext_http is None else bool(allow_plaintext_http)
+            )
             if resolved_base and resolved_base.rstrip("/") != stored_base.rstrip("/"):
                 if not resolved_key:
                     raise ProviderError(
@@ -653,10 +668,16 @@ class ModelServiceStore:
                         "请先保存服务配置，或同时提供 API Key。"
                     )
                 # 调用方自带 key：只使用调用方给的地址与 key，绝不回退到已保存的密钥。
-                return list_remote_models(resolved_base, resolved_key, timeout=timeout)
+                return list_remote_models(
+                    resolved_base, resolved_key, timeout=timeout, allow_plaintext_http=allow_plaintext,
+                )
             resolved_base = resolved_base or stored_base
             resolved_key = resolved_key or self.api_key(service_id)
-        return list_remote_models(resolved_base, resolved_key, timeout=timeout)
+        else:
+            allow_plaintext = bool(allow_plaintext_http)
+        return list_remote_models(
+            resolved_base, resolved_key, timeout=timeout, allow_plaintext_http=allow_plaintext,
+        )
 
 
 def save_service_key(service_id: str, api_key: str) -> None:

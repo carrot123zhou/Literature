@@ -1,6 +1,7 @@
 import { memo, useEffect, useMemo, useRef } from "react";
-import type { Block } from "../types";
+import type { Block, FlowLink, FlowLinks } from "../types";
 import { useVirtualWindow } from "../workbench/useVirtualWindow";
+import { blockMarkdown } from "./projection";
 
 const EDITABLE_TYPES = ["title", "paragraph", "list", "footnote"];
 const TYPE_LABELS: Record<string, string> = { paragraph: "正文", list: "列表", footnote: "脚注" };
@@ -27,6 +28,7 @@ type Props = {
   jsonValue: unknown;
   follow: boolean;
   onFollow: (value: boolean) => void;
+  flowLinks: FlowLinks;
 };
 
 function summary(block: Block): string {
@@ -39,12 +41,13 @@ function summary(block: Block): string {
   return "(空块)";
 }
 
-const BlockCard = memo(function BlockCard({ block, selected, active, checked, busy, onSelect, onCheck, onPatch }: {
+const BlockCard = memo(function BlockCard({ block, selected, active, checked, busy, flow, onSelect, onCheck, onPatch }: {
   block: Block;
   selected: boolean;
   active: boolean;
   checked: boolean;
   busy: boolean;
+  flow?: FlowLink;
   onSelect: (blockId: string) => void;
   onCheck: (blockId: string, range: boolean) => void;
   onPatch: (proposal: PatchProposal) => void;
@@ -52,6 +55,7 @@ const BlockCard = memo(function BlockCard({ block, selected, active, checked, bu
   const isTitle = block.type === "title";
   const editable = EDITABLE_TYPES.includes(block.type);
   const currentValue = isTitle ? String(block.level) : block.type;
+  const flowChip = flow?.next_region ? "续下页" : "";
   return (
     <article
       className={`block-card${selected ? " selected" : ""}${active && !selected ? " active" : ""}${checked ? " checked" : ""}`}
@@ -65,6 +69,7 @@ const BlockCard = memo(function BlockCard({ block, selected, active, checked, bu
         <span className={`type type-${block.type}`}>{isTitle ? `标题 H${block.level}` : ({ paragraph: "正文", table: "表格", image: "图片", list: "列表", equation: "公式", footnote: "脚注", code: "代码" } as Record<string, string>)[block.type] || block.type}</span>
         <span className="block-card-meta">
           <em>p{block.page_index + 1}</em>
+          {flowChip && <em className="flow-chip" title="跨页续接：与相邻页的同一段落">{flowChip}</em>}
           {editable && <input type="checkbox" aria-label={`选择第 ${block.page_index + 1} 页的${isTitle ? "标题" : "正文"}块`} checked={checked} onClick={event => event.stopPropagation()} onChange={() => onCheck(block.block_id, false)}/>}
         </span>
       </div>
@@ -92,8 +97,9 @@ const BlockCard = memo(function BlockCard({ block, selected, active, checked, bu
 
 /** 右侧解析结果栏：结构块 / Markdown / JSON 三个视图，负责与左侧双向定位。 */
 export default memo(function ResultPane(props: Props) {
-  const { blocks, busy, selected, activeBlock, checked, tab, onTab, onSelect, onCheck, onClearChecks, onPatch, onBatchPatch, markdown, jsonValue, follow, onFollow } = props;
+  const { blocks, busy, selected, activeBlock, checked, tab, onTab, onSelect, onCheck, onClearChecks, onPatch, onBatchPatch, markdown, jsonValue, follow, onFollow, flowLinks } = props;
   const listRef = useRef<HTMLDivElement>(null);
+  const markdownRef = useRef<HTMLDivElement>(null);
   const scrolledTo = useRef("");
   const blockIds = useMemo(() => blocks.map(block => block.block_id), [blocks]);
   const pinned = useMemo(() => [selected, activeBlock].filter(Boolean), [selected, activeBlock]);
@@ -106,6 +112,14 @@ export default memo(function ResultPane(props: Props) {
     scrolledTo.current = target;
     vw.scrollToBlock(target);
   }, [follow, activeBlock, selected, tab, vw.scrollToBlock]);
+
+  // Markdown 页签与 PDF 双向：选中的块自动滚到可视区，强调其位置。
+  useEffect(() => {
+    if (tab !== "markdown") return;
+    const target = selected || activeBlock;
+    if (!target) return;
+    markdownRef.current?.querySelector<HTMLElement>(`[data-md-block-id="${target}"]`)?.scrollIntoView({ block: "center" });
+  }, [tab, selected, activeBlock]);
 
 
   const audit = jsonValue as { visual_evidence?: { image_url: string; kind: string; block_id?: string; page_index: number }[] } | null;
@@ -120,9 +134,8 @@ export default memo(function ResultPane(props: Props) {
         {tab === "blocks" && <label className="follow-toggle" title="PDF 滚动时自动跟随当前块"><input type="checkbox" checked={follow} onChange={event => onFollow(event.target.checked)}/>跟随</label>}
       </div>
       {tab === "blocks" && <>
-        <div className="result-toolbar">
-          <span>{blocks.length} 个内容块 · 点击后调整层级</span>
-          {checked.size > 0 && <div className="batch-actions">
+        {checked.size > 0 && <div className="result-toolbar">
+          <div className="batch-actions">
             <strong>已选 {checked.size}</strong>
             <select aria-label="批量调整结构" value="" disabled={busy} onChange={event => {
               const raw = event.target.value;
@@ -132,8 +145,8 @@ export default memo(function ResultPane(props: Props) {
               <option value="" disabled>调整为…</option><option value="paragraph">正文</option><option value="list">列表</option><option value="footnote">脚注</option>{[1, 2, 3, 4, 5, 6].map(level => <option key={level} value={level}>H{level} 标题</option>)}
             </select>
             <button onClick={onClearChecks}>清空</button>
-          </div>}
-        </div>
+          </div>
+        </div>}
         <div className="block-list" ref={node => { listRef.current = node; vw.scrollerRef.current = node; }} onScroll={vw.onScroll}>
           <div style={{ position: "relative", minHeight: vw.totalHeight }}>
             <div style={{ height: blocks[vw.rangeStart] ? vw.offsets[blocks[vw.rangeStart].block_id] : 0 }}/>
@@ -144,6 +157,7 @@ export default memo(function ResultPane(props: Props) {
                 selected={selected === block.block_id}
                 active={activeBlock === block.block_id}
                 checked={checked.has(block.block_id)}
+                flow={flowLinks[block.block_id]}
                 onSelect={onSelect}
                 onCheck={onCheck}
                 onPatch={onPatch}
@@ -160,6 +174,7 @@ export default memo(function ResultPane(props: Props) {
                   selected={selected === block.block_id}
                   active={activeBlock === block.block_id}
                   checked={checked.has(block.block_id)}
+                  flow={flowLinks[block.block_id]}
                   onSelect={onSelect}
                   onCheck={onCheck}
                   onPatch={onPatch}
@@ -169,7 +184,19 @@ export default memo(function ResultPane(props: Props) {
           </div>
         </div>
       </>}
-      {tab === "markdown" && <pre className="result-code markdown-code">{markdown}</pre>}
+      {tab === "markdown" && <div className="result-code markdown-code" ref={markdownRef}>
+        {blocks.map(block => {
+          const text = blockMarkdown(block);
+          if (!text) return null;
+          return <span
+            key={block.block_id}
+            data-md-block-id={block.block_id}
+            className={`md-block${selected === block.block_id ? " selected" : activeBlock === block.block_id ? " active" : ""}`}
+            title={`定位到第 ${block.page_index + 1} 页`}
+            onClick={() => onSelect(block.block_id)}
+          >{text}{"\n\n"}</span>;
+        })}
+      </div>}
       {tab === "json" && <div className="review-audit"><div className="review-evidence">{images.map((item, index) => <figure key={index}><figcaption>{item.kind === "toc" ? "目录原页" : "标题裁片"} · 第 {item.page_index + 1} 页</figcaption><img src={item.image_url} alt={`将发送的第 ${item.page_index + 1} 页${item.kind === "toc" ? "目录" : "标题"}`}/></figure>)}</div><pre className="result-code">{JSON.stringify(detail, null, 2)}</pre></div>}
     </aside>
   );

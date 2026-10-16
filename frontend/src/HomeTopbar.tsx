@@ -27,10 +27,10 @@ type Props = {
 
 const WORK_TABS: { view: WorkView; label: string }[] = [
   { view: "review", label: "结构校对" },
-  { view: "read", label: "阅读与翻译" },
+  { view: "read", label: "对照翻译" },
 ];
 
-// 主导航是全部页面共用的唯一外壳：首页 → 文件资源 → 结构校对 → 阅读与翻译。
+// 主导航是全部页面共用的唯一外壳：首页 → 文件资源 → 结构校对 → 对照翻译。
 // 打开项目后两个工作区标签激活；未打开项目时点击会得到“先去文件资源打开任务”的引导。
 export default function HomeTopbar({ active, openHome, openResources, openWork, project, closeProject, openSettings }: Props) {
   return <header className={`intake-topbar home-topbar${project ? " project-topbar" : ""}`}>

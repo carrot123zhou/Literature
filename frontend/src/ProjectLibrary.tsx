@@ -3,6 +3,7 @@ import { api } from "./api";
 import { isDesktop, revealPath } from "./desktop";
 import type { WorkView } from "./HomeTopbar";
 import type { OcrJob, Project, ProjectReviewSummary, ProjectTranslateSummary } from "./types";
+import ExportDialog from "./workbench/ExportDialog";
 import "./resource.css";
 
 type Props = {
@@ -20,7 +21,8 @@ type SortKey = "updated_at" | "created_at" | "title" | "source_size";
 type Tone = "done" | "run" | "act" | "fail" | "off";
 type Stage = { tone: Tone; label: string; progress?: number | null };
 
-const TINT: Record<string, string> = { pdf: "#b8503f", docx: "#3f6fb8", pptx: "#c47a2c", xlsx: "#3f8a5c", image: "#7a5cc0", html: "#5f6b64" };
+const TINT: Record<string, string> = { pdf: "var(--system-red)", docx: "var(--system-blue)", pptx: "var(--system-orange)", xlsx: "var(--system-green)", image: "var(--system-purple)", html: "var(--system-gray)" };
+const TINT_FALLBACK = "var(--system-gray)";
 
 const percent = (value?: number | null) => (value == null ? "" : `${Math.round(value * 100)}%`);
 
@@ -150,8 +152,8 @@ function migrateReasonText(reason: string): string {
 function reviewStage(project: Project): Stage {
   const review = reviewOf(project);
   if (review.state === "confirm") return { tone: "act", label: `待确认 ${review.pending}` };
-  if (review.state === "done") return { tone: "done", label: "已校对" };
-  if (review.state === "partial") return { tone: "run", label: "部分校对" };
+  // 只要 AI 校对程序跑过（done：已确认全量；partial：已有补丁/处理过建议），就显示“已校对”。
+  if (review.state === "done" || review.state === "partial") return { tone: "done", label: "已校对" };
   return { tone: "off", label: project.has_document ? "未开始" : "—" };
 }
 function translateStage(project: Project): Stage {
@@ -174,16 +176,17 @@ function badge(project: Project, job?: OcrJob): { tone: Tone; label: string } {
   if (project.parse_coverage?.state === "partial") return { tone: "act", label: `部分解析 ${project.parse_coverage.covered_pages}/${project.parse_coverage.source_page_count}` };
   if (reviewOf(project).state === "confirm") return { tone: "act", label: "待确认" };
   if (translate.state === "running" || translate.state === "partial") return { tone: "run", label: "翻译中" };
-  if (project.has_document && reviewOf(project).state !== "done") return { tone: "act", label: "待校对" };
+  if (project.has_document && !["done", "partial"].includes(reviewOf(project).state)) return { tone: "act", label: "待校对" };
   if (!project.has_document) return { tone: "off", label: "未解析" };
   return { tone: "done", label: "已完成" };
 }
 
+const BADGE_TONE: Record<Tone, string> = { done: " u-badge--done", run: " u-badge--run", act: " u-badge--act", fail: " u-badge--fail", off: "" };
 function StatusPill({ tone, label }: { tone: Tone; label: string }) {
-  return <span className={`res-status ${tone}`}><i className="dot"/>{label}</span>;
+  return <span className={`res-status u-badge u-badge--plain${BADGE_TONE[tone]} ${tone}`}><i className="dot"/>{label}</span>;
 }
 function Strip({ name, stage }: { name: string; stage: Stage }) {
-  return <div className={`res-strip ${stage.tone}`}><span className="k">{name}</span><span className="v"><i className="dot"/>{stage.label}</span></div>;
+  return <div className={`res-strip ${stage.tone}`}><span className="k">{name}</span><span className="v" title={stage.label}><i className="dot"/>{stage.label}</span></div>;
 }
 function Strips({ project, job }: { project: Project; job?: OcrJob }) {
   return <div className="res-strips">
@@ -210,6 +213,7 @@ export default function ProjectLibrary({ projects, currentProjectId, refreshProj
   const [deleting, setDeleting] = useState<Project | null>(null);
   const [continuing, setContinuing] = useState<Project | null>(null);
   const [starting, setStarting] = useState<Project | null>(null);
+  const [exporting, setExporting] = useState<Project | null>(null);
   const [busy, setBusy] = useState(false);
 
   const refreshJobs = useCallback(async () => {
@@ -243,7 +247,7 @@ export default function ProjectLibrary({ projects, currentProjectId, refreshProj
     return [
       { key: "all", label: "全部资源", test: () => true },
       { key: "extract", label: "解析中", test: (project: Project) => extractStage(project, jobsByProject.get(project.project_id)).tone === "run" },
-      { key: "review", label: "待校对", test: (project: Project) => Boolean(project.has_document) && reviewOf(project).state !== "done" },
+      { key: "review", label: "待校对", test: (project: Project) => Boolean(project.has_document) && ["todo", "confirm"].includes(reviewOf(project).state) },
       { key: "translate", label: "翻译中", test: (project: Project) => ["running", "partial"].includes(translateOf(project).state) },
       { key: "failed", label: "有失败", test: failed },
     ];
@@ -275,6 +279,11 @@ export default function ProjectLibrary({ projects, currentProjectId, refreshProj
     setMenu(null);
     if (!project.has_document) { onMessage("提取完成后即可开始翻译。"); return; }
     setTranslating(project);
+  };
+  const startExport = (project: Project) => {
+    setMenu(null);
+    if (!project.has_document) { onMessage("提取完成后即可导出。"); return; }
+    setExporting(project);
   };
   const openMenu = (event: React.MouseEvent<HTMLElement>, project: Project) => {
     event.stopPropagation();
@@ -425,14 +434,14 @@ export default function ProjectLibrary({ projects, currentProjectId, refreshProj
           <label className="res-search"><span>⌕</span><input value={query} onChange={event => setQuery(event.target.value)} placeholder="搜索资源名称或原始文件名"/></label>
           <select aria-label="文件类型筛选" value={type} onChange={event => setType(event.target.value)}><option value="all">全部类型</option>{kinds.map(value => <option key={value} value={value}>{value.toUpperCase()}</option>)}</select>
           <select aria-label="排序依据" value={sortKey} onChange={event => setSortKey(event.target.value as SortKey)}><option value="updated_at">最近修改</option><option value="created_at">创建时间</option><option value="title">资源名称</option><option value="source_size">文件大小</option></select>
-          <div className="res-seg"><button className={view === "grid" ? "on" : ""} onClick={() => { setView("grid"); setExpanded(""); }}>网格</button><button className={view === "list" ? "on" : ""} onClick={() => { setView("list"); setModal(""); }}>列表</button></div>
+          <div className="res-seg u-segmented"><button className={view === "grid" ? "on" : ""} onClick={() => { setView("grid"); setExpanded(""); }}>网格</button><button className={view === "list" ? "on" : ""} onClick={() => { setView("list"); setModal(""); }}>列表</button></div>
         </div>
         <div className="res-summary"><span>{filtered.length} 项资源</span><span>{query || type !== "all" || filter !== "all" ? `已从 ${projects.length} 项资源中筛选` : "全部阶段"}</span></div>
         <div className="res-body">
           {!filtered.length
             ? <div className="res-empty"><div className="big">⌕</div><h2>{projects.length ? "没有符合条件的资源" : "还没有文件资源"}</h2><p>{projects.length ? "调整关键词、阶段或类型筛选后再试。" : "在首页上传并开始处理后，任务和生成的标准化文档资源会统一出现在这里。"}</p></div>
             : view === "grid"
-              ? <div className="res-grid">{filtered.map(project => <Card key={project.project_id} project={project} job={jobsByProject.get(project.project_id)} current={project.project_id === currentProjectId} onOpen={() => setModal(project.project_id)} onMenu={event => openMenu(event, project)}/>)}</div>
+              ? <div className="res-grid">{filtered.map(project => <Card key={project.project_id} project={project} job={jobsByProject.get(project.project_id)} current={project.project_id === currentProjectId} onOpen={() => setModal(project.project_id)} onExport={() => startExport(project)} onMenu={event => openMenu(event, project)}/>)}</div>
               : <div className="res-list">
                   <div className="res-lhead"><span>资源名称</span><span>提取</span><span>结构校对</span><span>翻译</span><span>更新时间</span><span>状态</span></div>
                   {filtered.map(project => <Row
@@ -443,13 +452,14 @@ export default function ProjectLibrary({ projects, currentProjectId, refreshProj
                     expanded={expanded === project.project_id}
                     onToggle={() => { setMenu(null); setExpanded(expanded === project.project_id ? "" : project.project_id); }}
                     onMenu={event => openMenu(event, project)}
+                    onExport={() => startExport(project)}
                     detail={<Workstreams project={project} job={jobsByProject.get(project.project_id)} slicesOpen={slicesFor === project.project_id} onToggleSlices={() => setSlicesFor(slicesFor === project.project_id ? "" : project.project_id)} onRetry={() => retryExtract(project)} onContinue={() => { setMenu(null); setExpanded(""); setContinuing(project); }} onResume={() => resumeExtract(project)} onReorder={position => reorderExtract(project, position)} onMigrate={() => migrateExtract(project)} onProgress={onGoHome} onStart={() => { setMenu(null); setExpanded(""); setStarting(project); }} onOpen={openView} onTranslate={startTranslate} busy={busy}/>}
                     footer={<>
                       <button onClick={() => reveal(project)}>在 Finder 中显示</button>
                       <button onClick={() => { setMenu(null); setRenameValue(project.title); setRenaming(project); }}>重命名</button>
                       <button className="danger-out" onClick={() => { setMenu(null); setDeleting(project); }}>移出资源库</button>
                       <span className="grow"/>
-                      <span style={{ color: "var(--faint)", fontSize: 12 }}>{project.path}</span>
+                      <span className="res-path">{project.path}</span>
                     </>}
                   />)}
                 </div>}
@@ -460,6 +470,7 @@ export default function ProjectLibrary({ projects, currentProjectId, refreshProj
         {(() => { const project = activeProject(menu.id)!; return <>
           <button onClick={() => openView("review", project)}>结构校对</button>
           <button onClick={() => startTranslate(project)}>翻译…</button>
+          <button onClick={() => startExport(project)}>导出…</button>
           <button onClick={() => reveal(project)}>在 Finder 中显示</button>
           <hr/>
           <button onClick={() => { setMenu(null); setRenameValue(project.title); setRenaming(project); }}>重命名</button>
@@ -481,6 +492,7 @@ export default function ProjectLibrary({ projects, currentProjectId, refreshProj
         onStart={() => { setModal(""); setStarting(activeProject(modal)!); }}
         onOpen={openView}
         onTranslate={startTranslate}
+        onExport={startExport}
         busy={busy}
         onClose={() => setModal("")}
         onReveal={reveal}
@@ -497,6 +509,8 @@ export default function ProjectLibrary({ projects, currentProjectId, refreshProj
           if (ok) setTranslating(null);
         }}
       />}
+
+      {exporting && <ExportDialog project={exporting} close={() => setExporting(null)} onMessage={onMessage}/>}
 
       {continuing && <ContinueDialog
         project={continuing}
@@ -525,46 +539,52 @@ export default function ProjectLibrary({ projects, currentProjectId, refreshProj
   </>;
 }
 
-function Card({ project, job, current, onOpen, onMenu }: { project: Project; job?: OcrJob; current?: boolean; onOpen: () => void; onMenu: (event: React.MouseEvent<HTMLElement>) => void }) {
+function Card({ project, job, current, onOpen, onExport, onMenu }: { project: Project; job?: OcrJob; current?: boolean; onOpen: () => void; onExport: () => void; onMenu: (event: React.MouseEvent<HTMLElement>) => void }) {
   const value = badge(project, job);
   return <article className={`res-card${current ? " is-current" : ""}`} tabIndex={0} onClick={onOpen} onKeyDown={event => { if (event.key === "Enter") onOpen(); }}>
     <div className="res-chead">
-      <span className="res-mono" style={{ background: TINT[typeOf(project)] || "#5f6b64" }}>{extension(project)}</span>
+      <span className="res-mono" style={{ background: TINT[typeOf(project)] || TINT_FALLBACK }}>{extension(project)}</span>
       <div className="res-ctitle"><h3 title={project.title}>{project.title}{current && <span className="res-cur-tag">当前任务</span>}</h3><p className="src" title={project.source_name}>{project.source_name || "本地文件"}</p></div>
       <div className="res-card-actions">
         <StatusPill tone={value.tone} label={value.label}/>
-        <button className="res-menu-btn" aria-label={`${project.title} 的操作`} onClick={onMenu} onKeyDown={event => event.stopPropagation()}>•••</button>
+        <div className="res-card-tools">
+          <button className="res-mini-btn" title="导出为 EPUB / DOCX / Markdown / 分页 HTML" onClick={event => { event.stopPropagation(); onExport(); }} onKeyDown={event => event.stopPropagation()}>导出</button>
+          <button className="res-menu-btn" aria-label={`${project.title} 的操作`} onClick={onMenu} onKeyDown={event => event.stopPropagation()}>•••</button>
+        </div>
       </div>
     </div>
     <Strips project={project} job={job}/>
   </article>;
 }
 
-function Row({ project, job, current, expanded, onToggle, onMenu, detail, footer }: {
+function Row({ project, job, current, expanded, onToggle, onExport, onMenu, detail, footer }: {
   project: Project; job?: OcrJob; current?: boolean; expanded: boolean;
-  onToggle: () => void; onMenu: (event: React.MouseEvent<HTMLElement>) => void; detail: ReactNode; footer: ReactNode;
+  onToggle: () => void; onExport: () => void; onMenu: (event: React.MouseEvent<HTMLElement>) => void; detail: ReactNode; footer: ReactNode;
 }) {
   const value = badge(project, job);
   return <>
     <div className={`res-lrow${current ? " is-current" : ""}`} onClick={onToggle}>
       <div className="res-lcell res-lname">
-        <span className="res-mono" style={{ background: TINT[typeOf(project)] || "#5f6b64" }}>{extension(project)}</span>
+        <span className="res-mono" style={{ background: TINT[typeOf(project)] || TINT_FALLBACK }}>{extension(project)}</span>
         <span className="tx"><b>{project.title}{current ? " · 当前" : ""}</b><small>{project.source_name || "本地文件"} · {formatSize(project.source_size)} · {job?.page_count ? `${job.page_count} 页` : project.has_document ? "已标准化" : "—"}</small></span>
       </div>
       <StageCell stage={extractStage(project, job)}/>
       <StageCell stage={reviewStage(project)}/>
       <StageCell stage={translateStage(project)}/>
-      <span className="res-lcell" style={{ color: "var(--muted)", fontSize: 12 }}>{formatDate(project.updated_at)}</span>
-      <span className="res-lcell" style={{ display: "flex", alignItems: "center", gap: 6, justifyContent: "space-between" }}>
+      <span className="res-lcell res-ldate">{formatDate(project.updated_at)}</span>
+      <span className="res-lcell res-lstatus">
         <StatusPill tone={value.tone} label={value.label}/>
-        <button className="res-menu-btn" aria-label={`${project.title} 的操作`} onClick={event => { event.stopPropagation(); onMenu(event); }}>•••</button>
+        <span className="res-card-tools">
+          <button className="res-mini-btn" title="导出为 EPUB / DOCX / Markdown / 分页 HTML" onClick={event => { event.stopPropagation(); onExport(); }}>导出</button>
+          <button className="res-menu-btn" aria-label={`${project.title} 的操作`} onClick={event => { event.stopPropagation(); onMenu(event); }}>•••</button>
+        </span>
       </span>
     </div>
-    {expanded && <div className="res-expand"><div className="res-wf" style={{ paddingTop: 6 }}>{detail}</div><div className="res-foot">{footer}</div></div>}
+    {expanded && <div className="res-expand"><div className="res-wf res-wf--expand">{detail}</div><div className="res-foot">{footer}</div></div>}
   </>;
 }
 function StageCell({ stage }: { stage: Stage }) {
-  return <span className={`res-lcell res-stg ${stage.tone}`}><i className="dot"/>{stage.label}</span>;
+  return <span className={`res-lcell res-stg ${stage.tone}`} title={stage.label}><i className="dot"/>{stage.label}</span>;
 }
 
 function Slices({ job }: { job: OcrJob }) {
@@ -598,7 +618,7 @@ function Workstreams({ project, job, slicesOpen, onToggleSlices, onRetry, onCont
   const resumable = job?.state === "waiting" || job?.state === "interrupted";
   const extractActive = Boolean(job && !["completed", "failed"].includes(job.state));
   const partial = canContinueParse(project) && !extractActive;
-  const reviewKind: Tone = !gate ? "off" : review.state === "done" ? "done" : review.state === "confirm" || review.state === "partial" ? "act" : "off";
+  const reviewKind: Tone = !gate ? "off" : review.state === "done" || review.state === "partial" ? "done" : review.state === "confirm" ? "act" : "off";
   const translateKind: Tone = !gate ? "off" : translate.state === "done" ? "done" : translate.state === "failed" ? "fail" : ["running", "partial"].includes(translate.state) ? "run" : "off";
   return <div className="res-wf">
     <div className={`res-wfrow ${extractKind}`}>
@@ -627,10 +647,10 @@ function Workstreams({ project, job, slicesOpen, onToggleSlices, onRetry, onCont
     <div className={`res-wfrow ${reviewKind}`}>
       <span className="ico">{reviewKind === "done" ? "✓" : 2}</span>
       <div className="txt">
-        <div className="t"><b>结构校对</b><span className="st">{!gate ? "等待提取" : review.state === "done" ? "已完成" : review.state === "confirm" ? `${review.pending} 项待确认` : review.state === "partial" ? "部分校对（未确认全量）" : "未开始"}</span></div>
-        <p>{!gate ? "提取完成后即可校对，无需先翻译。" : review.state === "done" ? "目录与标题层级已确认；结构补丁历史可撤销。" : "AI 与本地校准给出的标题层级建议需人工确认后应用。"}</p>
+        <div className="t"><b>结构校对</b><span className="st">{!gate ? "等待提取" : review.state === "done" || review.state === "partial" ? "已校对" : review.state === "confirm" ? `${review.pending} 项待确认` : "未开始"}</span></div>
+        <p>{!gate ? "提取完成后即可校对，无需先翻译。" : review.state === "done" || review.state === "partial" ? "已经过 AI 校对；结构补丁历史可随时撤销。" : "AI 与本地校准给出的标题层级建议需人工确认后应用。"}</p>
       </div>
-      <div className="side">{gate && <button className={review.state === "done" ? "" : "primary"} onClick={() => onOpen("review", project)}>{review.state === "done" ? "查看记录" : "进入校对"}</button>}</div>
+      <div className="side">{gate && <button className={review.state === "done" || review.state === "partial" ? "" : "primary"} onClick={() => onOpen("review", project)}>{review.state === "done" || review.state === "partial" ? "查看记录" : "进入校对"}</button>}</div>
     </div>
     <div className={`res-wfrow ${translateKind}`}>
       <span className="ico">{translateKind === "done" ? "✓" : translateKind === "fail" ? "!" : 3}</span>
@@ -641,7 +661,7 @@ function Workstreams({ project, job, slicesOpen, onToggleSlices, onRetry, onCont
         {["running", "partial"].includes(translate.state) && translate.progress != null && <div className="res-mini-prog"><i style={{ width: `${Math.round(translate.progress * 100)}%` }}/></div>}
       </div>
       <div className="side">{gate && (translate.state === "done"
-        ? <><button onClick={() => onOpen("read", project)}>阅读与翻译</button><button onClick={() => onTranslate(project)}>重译…</button></>
+        ? <><button onClick={() => onOpen("read", project)}>对照翻译</button><button onClick={() => onTranslate(project)}>重译…</button></>
         : <button className={translate.state === "failed" ? "warn" : "primary"} onClick={() => onTranslate(project)}>{translate.state === "none" ? "开始翻译" : translate.state === "failed" ? "重试翻译" : "继续翻译"}</button>)}</div>
     </div>
     <div className="res-meta">
@@ -652,12 +672,12 @@ function Workstreams({ project, job, slicesOpen, onToggleSlices, onRetry, onCont
   </div>;
 }
 
-function DetailDialog({ project, job, slicesOpen, onToggleSlices, onRetry, onContinue, onResume, onReorder, onMigrate, onProgress, onStart, onOpen, onTranslate, busy, onClose, onReveal, onRename, onRemove }: {
+function DetailDialog({ project, job, slicesOpen, onToggleSlices, onRetry, onContinue, onResume, onReorder, onMigrate, onProgress, onStart, onOpen, onTranslate, onExport, busy, onClose, onReveal, onRename, onRemove }: {
   project: Project; job?: OcrJob; slicesOpen: boolean; onToggleSlices: () => void;
   onRetry: () => void; onContinue: () => void; onResume: () => void;
   onReorder: (position: "top" | "up" | "down") => void;
   onMigrate: () => void; onProgress: () => void; onStart: () => void; onOpen: (view: WorkView, project: Project) => void;
-  onTranslate: (project: Project) => void; busy: boolean; onClose: () => void;
+  onTranslate: (project: Project) => void; onExport: (project: Project) => void; busy: boolean; onClose: () => void;
   onReveal: (project: Project) => void; onRename: (project: Project) => void; onRemove: (project: Project) => void;
 }) {
   const value = badge(project, job);
@@ -669,8 +689,8 @@ function DetailDialog({ project, job, slicesOpen, onToggleSlices, onRetry, onCon
   return <div className="res-pop" onClick={event => { if (event.target === event.currentTarget) onClose(); }}>
     <section className="res-dialog" role="dialog" aria-modal="true" aria-label={`${project.title} 详情`}>
       <div className="res-dialog-head">
-        <span className="res-mono" style={{ background: TINT[typeOf(project)] || "#5f6b64" }}>{extension(project)}</span>
-        <div style={{ flex: 1, minWidth: 0 }}><h2>{project.title}</h2><p className="src">{project.source_name || "本地文件"}</p></div>
+        <span className="res-mono" style={{ background: TINT[typeOf(project)] || TINT_FALLBACK }}>{extension(project)}</span>
+        <div className="res-dialog-title"><h2>{project.title}</h2><p className="src">{project.source_name || "本地文件"}</p></div>
         <StatusPill tone={value.tone} label={value.label}/>
         <button className="res-iconbtn" aria-label="关闭" onClick={onClose}>✕</button>
       </div>
@@ -678,6 +698,7 @@ function DetailDialog({ project, job, slicesOpen, onToggleSlices, onRetry, onCon
         <Workstreams project={project} job={job} slicesOpen={slicesOpen} onToggleSlices={onToggleSlices} onRetry={onRetry} onContinue={onContinue} onResume={onResume} onReorder={onReorder} onMigrate={onMigrate} onProgress={onProgress} onStart={onStart} onOpen={onOpen} onTranslate={onTranslate} busy={busy}/>
       </div>
       <div className="res-dialog-foot">
+        <button onClick={() => onExport(project)}>导出…</button>
         <button onClick={() => onReveal(project)}>在 Finder 中显示</button>
         <button onClick={() => onRename(project)}>重命名</button>
         <button className="danger-out" onClick={() => onRemove(project)}>移出资源库</button>
@@ -712,7 +733,7 @@ function TranslateDialog({ project, close, onOpenReading, onSubmit }: {
     ...(translate.done > 0 ? [{ value: "untranslated", title: "仅未翻译段落", note: `继续剩余 ${Math.max(0, translate.total - translate.done)} 段，适合中断后接续` }] : []),
     ...(translate.stale > 0 ? [{ value: "stale", title: "仅待复核段落", note: `结构变化后需要复核的 ${translate.stale} 段，已锁定的人工译文保留` }] : []),
     ...(translate.failed > 0 ? [{ value: "failed", title: "仅重试失败段落", note: `重试 ${translate.failed} 个失败分块` }] : []),
-    { value: "blocks", title: "选定章节", note: "先进入阅读与翻译页勾选章节后再启动" },
+    { value: "blocks", title: "选定章节", note: "先进入对照翻译页勾选章节后再启动" },
   ];
   const submit = async () => {
     if (scope === "blocks") { onOpenReading(project); return; }
@@ -722,12 +743,12 @@ function TranslateDialog({ project, close, onOpenReading, onSubmit }: {
   };
   return <div className="res-pop" onClick={event => { if (event.target === event.currentTarget) close(); }}>
     <section className="res-dialog res-form" role="dialog" aria-modal="true" aria-label={`翻译 ${project.title}`}>
-      <div className="res-dialog-head" style={{ alignItems: "center" }}>
-        <div style={{ flex: 1 }}><h2 style={{ fontSize: 17 }}>翻译 · {project.title}</h2></div>
+      <div className="res-dialog-head">
+        <div className="res-dialog-title"><h2>翻译 · {project.title}</h2></div>
         <button className="res-iconbtn" aria-label="关闭" onClick={close}>✕</button>
       </div>
-      <div className="res-dialog-body" style={{ padding: "16px 19px" }}>
-        <div className="pc" style={{ padding: 0 }}>
+      <div className="res-dialog-body">
+        <div className="pc">
           <div className="res-field"><label>目标语言</label><select value={locale} onChange={event => setLocale(event.target.value)}>{LOCALES.map(item => <option key={item.value} value={item.value}>{item.label}</option>)}</select></div>
           <div className="res-field"><label>翻译范围 · 每次都需要手动选择</label><div className="res-radio">
             {options.map(item => <label key={item.value} className={scope === item.value ? "on" : ""}>
@@ -759,12 +780,12 @@ function ContinueDialog({ project, busy, close, onSubmit }: {
   const coveredText = (coverage?.ranges || []).map(item => item[0] === item[1] ? `${item[0]}` : `${item[0]}-${item[1]}`).join("、");
   return <div className="res-pop" onClick={event => { if (event.target === event.currentTarget) close(); }}>
     <section className="res-dialog res-form" role="dialog" aria-modal="true" aria-label={`继续解析 ${project.title}`}>
-      <div className="res-dialog-head" style={{ alignItems: "center" }}>
-        <div style={{ flex: 1 }}><h2 style={{ fontSize: 17 }}>继续解析 · {project.title}</h2></div>
+      <div className="res-dialog-head">
+        <div className="res-dialog-title"><h2>继续解析 · {project.title}</h2></div>
         <button className="res-iconbtn" aria-label="关闭" onClick={close}>✕</button>
       </div>
-      <div className="res-dialog-body" style={{ padding: "16px 19px" }}>
-        <div className="res-field"><label>当前已合并</label><p style={{ margin: 0 }}>{covered}/{total} 页{coveredText ? `（${coveredText}）` : ""}</p></div>
+      <div className="res-dialog-body">
+        <div className="res-field"><label>当前已合并</label><p>{covered}/{total} 页{coveredText ? `（${coveredText}）` : ""}</p></div>
         <div className="res-field"><label>还要解析的页码</label>
           <input autoFocus value={value} maxLength={2000} onChange={event => setValue(event.target.value)} placeholder={`留空解析剩余 ${Math.max(0, total - covered)} 页，例如 101-300 或 5,7-9`}/>
         </div>
@@ -800,21 +821,21 @@ function StartParseDialog({ project, busy, close, onSubmit }: {
     : `${extension(project)} 文件（由 MinerU 转换后解析）`;
   return <div className="res-pop" onClick={event => { if (event.target === event.currentTarget) close(); }}>
     <section className="res-dialog res-form" role="dialog" aria-modal="true" aria-label={`开始解析 ${project.title}`}>
-      <div className="res-dialog-head" style={{ alignItems: "center" }}>
-        <div style={{ flex: 1 }}><h2 style={{ fontSize: 17 }}>开始解析 · {project.title}</h2></div>
+      <div className="res-dialog-head">
+        <div className="res-dialog-title"><h2>开始解析 · {project.title}</h2></div>
         <button className="res-iconbtn" aria-label="关闭" onClick={close}>✕</button>
       </div>
-      <div className="res-dialog-body" style={{ padding: "16px 19px" }}>
-        <div className="res-field"><label>源文件</label><p style={{ margin: 0 }}>{project.source_name || "本地文件"} · {pageText}</p></div>
+      <div className="res-dialog-body">
+        <div className="res-field"><label>源文件</label><p>{project.source_name || "本地文件"} · {pageText}</p></div>
         <div className="res-field"><label>要解析的页码</label>
           <input autoFocus value={value} maxLength={2000} disabled={!isPdf || !total} onChange={event => setValue(event.target.value)} placeholder={isPdf && total ? `留空解析全部 ${total} 页，例如 1-200 或 1,3-5` : "非 PDF 或不支持指定页码"}/>
         </div>
         <div className="res-field"><label>解析参数（本次任务）</label>
-          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          <div className="res-inline">
             <select aria-label="解析模型" value={modelVersion} onChange={event => setModelVersion(event.target.value)}><option value="vlm">MinerU VLM（推荐）</option><option value="pipeline">MinerU Pipeline</option></select>
             <select aria-label="文档语言包" value={language} onChange={event => setLanguage(event.target.value)}><option value="ch">中英文（默认）</option><option value="ch_server">繁体／手写体</option><option value="en">纯英文</option><option value="japan">日文为主</option><option value="korean">韩文</option><option value="chinese_cht">繁体中文为主</option><option value="latin">拉丁语系</option><option value="cyrillic">西里尔语系</option></select>
           </div>
-          <div className="res-checkline" style={{ display: "flex", gap: 12, marginTop: 6, fontSize: 12 }}>
+          <div className="res-checkline">
             <label><input type="checkbox" checked={isOcr} onChange={event => setIsOcr(event.target.checked)}/> OCR</label>
             <label><input type="checkbox" checked={enableTable} onChange={event => setEnableTable(event.target.checked)}/> 表格</label>
             <label><input type="checkbox" checked={enableFormula} onChange={event => setEnableFormula(event.target.checked)}/> 公式</label>
@@ -837,8 +858,8 @@ function Dialog({ title, close, children }: { title: string; close: () => void; 
   }, [close]);
   return <div className="res-pop" onClick={event => { if (event.target === event.currentTarget) close(); }}>
     <section className="res-dialog res-form" role="dialog" aria-modal="true" aria-label={title} onClick={event => event.stopPropagation()}>
-      <div className="res-dialog-head"><div style={{ flex: 1 }}><h2 style={{ fontSize: 17 }}>{title}</h2></div><button className="res-iconbtn" aria-label="关闭" onClick={close}>✕</button></div>
-      <div className="res-dialog-body" style={{ padding: "16px 19px" }}>{children}</div>
+      <div className="res-dialog-head"><div className="res-dialog-title"><h2>{title}</h2></div><button className="res-iconbtn" aria-label="关闭" onClick={close}>✕</button></div>
+      <div className="res-dialog-body">{children}</div>
     </section>
   </div>;
 }

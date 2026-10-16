@@ -68,8 +68,9 @@ export default function Settings({ projectId, document, selected, instructions, 
     onMessage(value > 0 ? `项目预算设为 $${value.toFixed(2)}` : "项目预算限制已关闭");
   };
   const selectedTitle = document?.blocks.find(block => block.block_id === selected && block.type === "title");
-  const needsProject = (body: ReactNode) => projectId
-    ? body
+  // 传入函数而不是节点：未打开任务时 document 为 null，若在这里提前构造 JSX 会读到 document! 并让整棵 React 树崩溃（空白页）。
+  const needsProject = (render: () => ReactNode) => projectId && document
+    ? render()
     : <p className="settings-hint">这一项属于当前任务：请先在「文件资源」打开一个任务，再回来调整。</p>;
 
   return <div className="modal-backdrop settings-backdrop" onClick={close}>
@@ -87,7 +88,7 @@ export default function Settings({ projectId, document, selected, instructions, 
         <div className="settings-content">
           {section === "general" && <>
             <h3>语言</h3>
-            {needsProject(<>
+            {needsProject(() => <>
               <label>全局源语言<select value={document!.source_language_mode || document!.source_language} onChange={e => updateLanguage(e.target.value)}><option value="auto">自动检测（当前 {document!.source_language}）</option><option value="en">英语</option><option value="ja">日语</option><option value="fr">法语</option><option value="de">德语</option></select></label>
               {selectedTitle && <label>当前章节覆盖<select value={document!.chapter_language_overrides[selected] || ""} onChange={e => updateLanguage(document!.source_language_mode || document!.source_language, e.target.value)}><option value="">继承全局</option><option value="en">英语</option><option value="ja">日语</option><option value="fr">法语</option><option value="de">德语</option></select></label>}
             </>)}
@@ -124,7 +125,7 @@ export default function Settings({ projectId, document, selected, instructions, 
 
           {section === "usage" && <>
             <h3>用量与预算</h3>
-            {needsProject(<label>任务预算（USD，0 为不限）<input type="number" min="0" step="0.1" defaultValue={document?.budget_usd || 0} onBlur={e => updateBudget(Number(e.target.value))}/></label>)}
+            {needsProject(() => <label>任务预算（USD，0 为不限）<input type="number" min="0" step="0.1" defaultValue={document?.budget_usd || 0} onBlur={e => updateBudget(Number(e.target.value))}/></label>)}
             <hr/>
             <h3>用量明细</h3>
             <div className="usage-ledger">{usageRecords.length === 0 ? <p>尚无模型调用。</p> : usageRecords.slice(0, 50).map(record => <article key={record.usage_id}><strong>{record.provider} · {record.model}</strong><span>{(record.input_tokens + record.output_tokens).toLocaleString()} token</span><small>{record.scope} · {record.estimated_cost == null ? "服务商未返回可估价信息" : `$${record.estimated_cost.toFixed(5)}`}</small></article>)}</div>

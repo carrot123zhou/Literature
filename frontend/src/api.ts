@@ -3,7 +3,7 @@ import { isDesktop, runtimeInfo } from "./desktop";
 let base = import.meta.env.VITE_API_URL || "http://127.0.0.1:41731";
 let token = import.meta.env.VITE_LITERATURE_TOKEN || "";
 let ready: Promise<void> | undefined;
-const requiredCapabilities = ["intake_items_v1", "structure_review_v2", "model_services_v1", "model_services_v2", "model_services_v3", "structure_job_v1", "structure_modes_v1", "structure_pause_v1", "structure_vision_v1", "parse_backends_v1", "desktop_resources_v1", "translation_module_v1", "translation_engine_v2", "resource_pipeline_v1", "translation_safety_v1", "parse_lifecycle_v1", "task_history_v1"];
+const requiredCapabilities = ["intake_items_v1", "structure_review_v2", "model_services_v1", "model_services_v2", "model_services_v3", "model_services_v4", "structure_job_v1", "structure_modes_v1", "structure_pause_v1", "structure_vision_v1", "parse_backends_v1", "desktop_resources_v1", "translation_module_v1", "translation_engine_v2", "resource_pipeline_v1", "translation_safety_v1", "parse_lifecycle_v1", "task_history_v1", "export_v1"];
 
 export function initializeApi(): Promise<void> {
   return ready ||= connect();

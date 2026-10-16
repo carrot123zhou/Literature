@@ -6,7 +6,7 @@ import { useCallback, useEffect, useState } from "react";
  * - `#/home`、`#/resources`：首页与文件资源库。
  * - `#/p/<projectId>/review|read`：某个项目的两个工作区。
  *
- * 旧的 `#/p/<id>/export` 与 `#/export` 已移除导出模块，统一回退到「阅读与翻译」，
+ * 旧的 `#/p/<id>/export` 与 `#/export` 已移除导出模块，统一回退到「对照翻译」，
  * 避免旧书签/历史地址打开白屏。
  */
 export type View = "home" | "resources" | "history" | "review" | "read";
@@ -14,7 +14,7 @@ export type Route = { view: View; projectId: string };
 
 export const WORK_VIEWS: View[] = ["review", "read"];
 
-// 已下架模块的历史地址 → 现在的落地视图。导出模块整块移除后落到阅读与翻译。
+// 已下架模块的历史地址 → 现在的落地视图。导出模块整块移除后落到对照翻译。
 const LEGACY_WORK_VIEWS: Record<string, View> = { export: "read" };
 
 const LAST_PROJECT_KEY = "literature.lastProject";

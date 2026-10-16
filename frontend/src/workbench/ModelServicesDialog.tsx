@@ -11,7 +11,7 @@ const PRESETS: Record<string, { label: string; base_url: string }> = {
   custom: { label: "自定义中转站 / OpenAI 兼容", base_url: "" },
 };
 
-type Draft = { service_id: string; name: string; preset: string; base_url: string; models: ModelEntry[] };
+type Draft = { service_id: string; name: string; preset: string; base_url: string; allow_plaintext_http: boolean; models: ModelEntry[] };
 
 /** 思考配置挂在单个模型上（v3：provider → model 两层）。 */
 type ReasoningFields = { model?: string; reasoning_style?: string; reasoning_effort?: string; reasoning_budget?: number };
@@ -84,6 +84,10 @@ function effortForProtocol(current: string, protocol: string): string {
 function normalizeProviderError(raw: string): string {
   const text = String(raw || "");
   const lower = text.toLowerCase();
+  // 明文 HTTP 拦截：这不是服务端错误，不能落到下面的“端点无法连接”里，否则用户会去查网络。
+  if (/\u660e\u6587\s*http|plaintext\s*http/.test(lower) || text.includes("\u672c\u673a loopback")) {
+    return "该地址是明文 HTTP，密钥会被明文传输，已默认拦截。若是自建/内网服务，请勾选「允许明文 HTTP」后重试；否则请改用 https://。";
+  }
   if (/\b401\b|unauthorized|invalid[_ ]?api[_ ]?key/.test(lower)) return "密钥无效或已过期，请检查密钥后重试。";
   if (/\b403\b|forbidden|permission/.test(lower)) return "没有访问权限（403），请确认账号可用该资源。";
   if (/\b429\b|rate.?limit|too many requests/.test(lower)) return "触发限流（429），请稍后重试或调低并发。";
@@ -107,10 +111,23 @@ function formatPrice(value: number | null | undefined, direction: "输入" | "�
 }
 
 function emptyDraft(): Draft {
-  return { service_id: "", name: "", preset: "custom", base_url: "", models: [] };
+  return { service_id: "", name: "", preset: "custom", base_url: "", allow_plaintext_http: false, models: [] };
 }
+
+/** 明文 HTTP 且不是本机 loopback：后端默认拦截，需要用户显式确认后才放行。
+ * 与后端 providers._is_loopback_host 保持一致，只把精确的 localhost / 127.0.0.0\/8 / [::1] 视为本机。 */
+function isPlaintextRemote(baseUrl: string): boolean {
+  try {
+    const parsed = new URL(baseUrl.trim());
+    if (parsed.protocol !== "http:") return false;
+    const host = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, "");
+    if (host === "localhost" || host === "::1") return false;
+    return !/^127\.(?:\d{1,3}\.){2}\d{1,3}$/.test(host);
+  } catch { return false; }
+}
+
 function draftFrom(service: ModelService): Draft {
-  return { service_id: service.service_id, name: service.name, preset: service.preset, base_url: service.base_url, models: service.models.map(entry => ({ ...entry })) };
+  return { service_id: service.service_id, name: service.name, preset: service.preset, base_url: service.base_url, allow_plaintext_http: Boolean(service.allow_plaintext_http), models: service.models.map(entry => ({ ...entry })) };
 }
 function remoteToEntry(remote: RemoteModel): ModelEntry {
   const context = remote.context_window || 0;
@@ -196,7 +213,7 @@ export default function ModelServicesPanel({ api, onMessage }: { api: ModelServi
     setDraft(current => ({ ...current, preset, base_url: preset === "custom" ? current.base_url : PRESETS[preset].base_url, name: current.name || PRESETS[preset].label }));
   };
 
-  const payloadOf = (current: Draft): ModelServicePayload => ({ name: current.name, preset: current.preset, base_url: current.base_url, models: current.models });
+  const payloadOf = (current: Draft): ModelServicePayload => ({ name: current.name, preset: current.preset, base_url: current.base_url, allow_plaintext_http: current.allow_plaintext_http, models: current.models });
 
   const save = async () => {
     if (!draft.name.trim() || !draft.base_url.trim()) { showStatus("请填写显示名称与基础 URL。", true); return; }
@@ -240,7 +257,7 @@ export default function ModelServicesPanel({ api, onMessage }: { api: ModelServi
     setListing(true);
     showStatus("");
     try {
-      const list = await api.fetchModels({ base_url: draft.base_url.trim(), api_key: keyInput.trim(), service_id: isNew ? "" : draft.service_id });
+      const list = await api.fetchModels({ base_url: draft.base_url.trim(), api_key: keyInput.trim(), service_id: isNew ? "" : draft.service_id, allow_plaintext_http: draft.allow_plaintext_http });
       const previousIds = new Set(remoteOptions.map(entry => entry.id));
       const fresh = list.filter(entry => !previousIds.has(entry.id)).length;
       setRemoteOptions(list);
@@ -274,8 +291,14 @@ export default function ModelServicesPanel({ api, onMessage }: { api: ModelServi
         const saved = await api.update(draft.service_id, {
           name: selected?.name ?? draft.name, preset: selected?.preset ?? draft.preset,
           base_url: selected?.base_url ?? draft.base_url, models: nextModels,
+          allow_plaintext_http: selected?.allow_plaintext_http ?? draft.allow_plaintext_http,
         });
-        setDraft(draftFrom(saved));
+        // 保留表单里未保存的改动（名称/地址/明文开关），不因为勾选模型而被回退。
+        setDraft(current => ({
+          ...draftFrom(saved),
+          name: current.name, preset: current.preset, base_url: current.base_url,
+          allow_plaintext_http: current.allow_plaintext_http,
+        }));
         onMessage(`已添加 ${additions.length} 个模型到「${saved.name}」`);
       } catch (error) { showStatus(normalizeProviderError(String(error)), true); }
       finally { setBusy(false); }
@@ -372,6 +395,15 @@ export default function ModelServicesPanel({ api, onMessage }: { api: ModelServi
             <label>类型<select value={draft.preset} onChange={event => changePreset(event.target.value)}>{Object.entries(PRESETS).map(([key, value]) => <option key={key} value={key}>{value.label}</option>)}</select></label>
           </div>
           <label>基础 URL<input value={draft.base_url} onChange={event => setDraft({ ...draft, base_url: event.target.value })} onBlur={() => void ensureModels()} placeholder="https://your-relay.example.com/v1"/></label>
+          {isPlaintextRemote(draft.base_url) && <div className={`model-plaintext-warning${draft.allow_plaintext_http ? " is-allowed" : ""}`} role="note">
+            <p>{draft.allow_plaintext_http
+              ? "已允许对该地址使用明文 HTTP：API Key 不加密传输，请确认这是可信的自建 / 内网服务。"
+              : "该地址是明文 http://，不是本机 loopback。API Key 会以明文在网络上传输，默认已被拦下。"}</p>
+            <label className="model-plaintext-check">
+              <input type="checkbox" checked={draft.allow_plaintext_http} onChange={event => setDraft({ ...draft, allow_plaintext_http: event.target.checked })}/>
+              允许明文 HTTP（仅限自建 / 内网服务；修改后需要点「保存」生效）
+            </label>
+          </div>}
           <label>API Key<input type="password" value={keyInput} onChange={event => setKeyInput(event.target.value)} placeholder={selected?.configured ? "已保存，留空则不变" : "只保存到 macOS Keychain"}/></label>
           <div className="model-form-actions">
             <button type="button" onClick={saveKey} disabled={busy || isNew || !keyInput.trim()}>保存密钥</button>

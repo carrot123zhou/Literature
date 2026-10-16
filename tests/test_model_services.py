@@ -380,10 +380,44 @@ class ModelServiceApiTests(unittest.TestCase):
             response = self.client.post(f"/model-services/{service['service_id']}/models", headers=self.headers)
         self.assertEqual(response.status_code, 200, response.text)
         self.assertEqual(response.json()["models"], remote)
-        mocked.assert_called_once_with(service["base_url"], "sk-test", timeout=30.0)
+        mocked.assert_called_once_with(
+            service["base_url"], "sk-test", timeout=30.0, allow_plaintext_http=False,
+        )
         # 不存在的服务报错而不是静默返回空列表。
         missing = self.client.post("/model-services/not-a-service/models", headers=self.headers)
         self.assertEqual(missing.status_code, 502, missing.text)
+
+    def test_plaintext_http_optin_round_trips_through_the_api(self) -> None:
+        """内网 http 地址：新建/读取携带 allow_plaintext_http，拉模型列表与 provider 都带上它。"""
+        from literature.model_services import ModelServiceStore
+        service = self.create_service(base_url="http://maas.intranet.example/v1", allow_plaintext_http=True)
+        self.assertTrue(service["allow_plaintext_http"])
+        listing = self.client.get("/model-services", headers=self.headers).json()
+        self.assertTrue(listing["services"][0]["allow_plaintext_http"])
+
+        # 已保存服务：用服务上的开关拉列表。
+        with patch("literature.model_services.ModelServiceStore.api_key", return_value="sk-test"), \
+                patch("literature.providers.list_remote_models", return_value=[]) as saved_call:
+            response = self.client.post(f"/model-services/{service['service_id']}/models", headers=self.headers)
+        self.assertEqual(response.status_code, 200, response.text)
+        saved_call.assert_called_once_with(
+            "http://maas.intranet.example/v1", "sk-test", timeout=30.0, allow_plaintext_http=True,
+        )
+
+        # 新建服务尚未保存：表单里的勾选随探测载荷带过去。
+        with patch("literature.providers.list_remote_models", return_value=[]) as draft_call:
+            response = self.client.post("/model-services/models", headers=self.headers, json={
+                "base_url": "http://maas.intranet.example/v1", "api_key": "sk-typed", "allow_plaintext_http": True,
+            })
+        self.assertEqual(response.status_code, 200, response.text)
+        draft_call.assert_called_once_with(
+            "http://maas.intranet.example/v1", "sk-typed", timeout=30.0, allow_plaintext_http=True,
+        )
+
+        # 任务路径拿到的 provider 配置必须带上这个开关，否则 _complete 仍会拦下请求。
+        with patch.object(ModelServiceStore, "api_key", return_value="sk-test"):
+            provider = ModelServiceStore().config_for(service["service_id"], "gpt-4o-mini")
+        self.assertTrue(provider.config.allow_plaintext_http)
 
     def test_probe_models_works_before_the_service_is_saved(self) -> None:
         """新建服务尚未保存时，仅凭 Base URL + API Key 也能拉取模型列表。"""
@@ -396,7 +430,9 @@ class ModelServiceApiTests(unittest.TestCase):
             })
         self.assertEqual(response.status_code, 200, response.text)
         self.assertEqual(response.json()["models"][0]["id"], "qwen3-max")
-        mocked.assert_called_once_with("https://relay.example.com/v1", "sk-typed", timeout=30.0)
+        mocked.assert_called_once_with(
+            "https://relay.example.com/v1", "sk-typed", timeout=30.0, allow_plaintext_http=False,
+        )
 
     def test_parses_context_and_pricing_from_openrouter_style_payload(self) -> None:
         """OpenRouter 风格字段（context_length / top_provider / 每 token 单价）应被收敛成元数据。"""

@@ -124,7 +124,7 @@ class ModelProbeKeyTests(unittest.TestCase):
             store, service_id = self.make_service(Path(tmp))
             calls: list[tuple[str, str]] = []
 
-            def fake(base: str, key: str, *, timeout: float = 30.0):
+            def fake(base: str, key: str, *, timeout: float = 30.0, allow_plaintext_http: bool = False):
                 calls.append((base, key))
                 return []
 
@@ -140,6 +140,43 @@ class ModelProbeKeyTests(unittest.TestCase):
                 # 地址一致 → 复用已保存地址与密钥。
                 store.probe_models(service_id=service_id, base_url="https://saved.example/v1")
                 self.assertEqual(calls[-1], ("https://saved.example/v1", "SECRET"))
+
+    def test_probe_models_forwards_saved_plaintext_optin(self):
+        """服务上确认过「允许明文 HTTP」后，拉模型列表才能向 http 远程地址发密钥。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ModelServiceStore(Path(tmp) / "runtime")
+            service = store.create({
+                "name": "Intranet", "preset": "custom", "base_url": "http://maas.intranet.example/v1",
+                "allow_plaintext_http": True, "models": [{"model": "m"}],
+            })
+            self.assertTrue(service["allow_plaintext_http"])
+            seen: list[dict] = []
+
+            def fake(base: str, key: str, *, timeout: float = 30.0, allow_plaintext_http: bool = False):
+                seen.append({"base": base, "allow": allow_plaintext_http})
+                return []
+
+            with patch("literature.providers.list_remote_models", side_effect=fake), \
+                 patch.object(ModelServiceStore, "api_key", return_value="SECRET"):
+                store.probe_models(service_id=service["service_id"])
+                self.assertEqual(seen[-1], {"base": "http://maas.intranet.example/v1", "allow": True})
+
+    def test_plaintext_optin_defaults_to_false_for_old_configs(self):
+        """旧配置文件没有该字段：必须按 False 读，不能因为缺字段而意外放行。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "runtime" / "model-services.json"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps({
+                "version": 2,
+                "services": [{"service_id": "svc", "name": "old", "preset": "custom",
+                              "base_url": "http://maas.intranet.example/v1", "models": [{"model": "m"}]}],
+                "roles": {},
+            }), encoding="utf-8")
+            store = ModelServiceStore(Path(tmp) / "runtime")
+            self.assertFalse(store.get("svc")["allow_plaintext_http"])
+            with patch.object(ModelServiceStore, "api_key", return_value="SECRET"):
+                provider = store.config_for("svc", "m")
+            self.assertFalse(provider.config.allow_plaintext_http)
 
 
 class KeyTransportTests(unittest.TestCase):
@@ -162,6 +199,44 @@ class KeyTransportTests(unittest.TestCase):
         assert_key_transport_safe("https://evil.example/v1", "k")
         # 无密钥时明文地址不拦截（无凭据可泄漏）
         assert_key_transport_safe("http://evil.example/v1", "")
+
+    def test_plaintext_http_allowed_only_with_explicit_optin(self):
+        """内网/自建服务的 http 地址：默认拦截，用户显式确认后放行。"""
+        self.assertTrue(plaintext_http_blocked("http://maas.intranet.example/v1"))
+        self.assertFalse(plaintext_http_blocked("http://maas.intranet.example/v1", allow_plaintext=True))
+        # 放行只影响明文判断；https 与 loopback 行为不变。
+        self.assertFalse(plaintext_http_blocked("https://evil.example/v1", allow_plaintext=True))
+        self.assertFalse(plaintext_http_blocked("http://127.0.0.1:8000/v1", allow_plaintext=True))
+        with self.assertRaises(ProviderError):
+            assert_key_transport_safe("http://maas.intranet.example/v1", "k")
+        assert_key_transport_safe("http://maas.intranet.example/v1", "k", allow_plaintext=True)
+        # 没有密钥时连“放行”也不需要。
+        assert_key_transport_safe("http://maas.intranet.example/v1", "", allow_plaintext=True)
+
+    def test_plaintext_provider_completes_only_with_optin(self):
+        """完整请求路径：默认拦在发请求前，显式确认后才真的带着密钥发出。"""
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json={
+                "model": "m",
+                "choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}],
+            })
+
+        blocked = OpenAICompatibleProvider(
+            ProviderConfig(provider="custom", model="m", base_url="http://maas.intranet.example/v1"),
+            api_key="k", timeout=5.0,
+        )
+        blocked._client = httpx.Client(transport=httpx.MockTransport(handler))
+        with self.assertRaises(ProviderError) as raised:
+            blocked.complete(system="s", user="u")
+        self.assertIn("明文 HTTP", str(raised.exception))
+
+        allowed = OpenAICompatibleProvider(
+            ProviderConfig(provider="custom", model="m", base_url="http://maas.intranet.example/v1",
+                           allow_plaintext_http=True),
+            api_key="k", timeout=5.0,
+        )
+        allowed._client = httpx.Client(transport=httpx.MockTransport(handler))
+        self.assertEqual(allowed.complete(system="s", user="u").content, "ok")
 
 
 class FrozenServiceIdentityTests(unittest.TestCase):

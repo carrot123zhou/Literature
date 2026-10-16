@@ -346,8 +346,8 @@ export default function ImportWorkspace({ refreshProjects, openResources, openHi
       </section>
     </main>
     {fileSettingsOpen && <FileSettingsDialog files={pendingFiles} close={() => setFileSettingsOpen(false)} updatePageRanges={updatePageRanges} toggleExtraFormat={toggleExtraFormat}/>}
-    {tokenDialog && <div className="modal-backdrop" onClick={() => setTokenDialog(false)}><section className="token-dialog" onClick={event => event.stopPropagation()}><div className="panel-title"><h2>MinerU API Token</h2><button onClick={() => setTokenDialog(false)}>关闭</button></div><p>Token 只会保存到 macOS Keychain，不写入项目、日志或其他文件。</p>{tokenConfigured && !tokenEditing ? <div className="token-saved-state"><i>✓</i><div><strong>Token 已安全保存</strong><span>为保护密钥安全，Literature 不回显完整 Token。</span></div><button onClick={() => setTokenEditing(true)}>替换 Token</button></div> : <><label>MinerU Token<input autoFocus type="password" value={token} onChange={event => setToken(event.target.value)} placeholder="请输入 MinerU Token"/></label><button className="primary" disabled={!token.trim() || busy} onClick={saveToken}>{busy ? "正在保存…" : tokenConfigured ? "保存新 Token" : "保存 Token"}</button>{tokenConfigured && <button className="token-cancel-edit" onClick={() => { setToken(""); setTokenEditing(false); }}>取消替换</button>}</>}</section></div>}
-    {message && <button className="toast" onClick={() => setMessage("")}>{message}</button>}
+    {tokenDialog && <div className="modal-backdrop u-backdrop" onClick={() => setTokenDialog(false)}><section className="token-dialog" onClick={event => event.stopPropagation()}><div className="panel-title"><h2>MinerU API Token</h2><button onClick={() => setTokenDialog(false)}>关闭</button></div><p>Token 只会保存到 macOS Keychain，不写入项目、日志或其他文件。</p>{tokenConfigured && !tokenEditing ? <div className="token-saved-state"><i>✓</i><div><strong>Token 已安全保存</strong><span>为保护密钥安全，Literature 不回显完整 Token。</span></div><button onClick={() => setTokenEditing(true)}>替换 Token</button></div> : <><label>MinerU Token<input autoFocus type="password" value={token} onChange={event => setToken(event.target.value)} placeholder="请输入 MinerU Token"/></label><button className="primary" disabled={!token.trim() || busy} onClick={saveToken}>{busy ? "正在保存…" : tokenConfigured ? "保存新 Token" : "保存 Token"}</button>{tokenConfigured && <button className="token-cancel-edit" onClick={() => { setToken(""); setTokenEditing(false); }}>取消替换</button>}</>}</section></div>}
+    {message && <button className="toast u-toast" onClick={() => setMessage("")}>{message}</button>}
   </>;
 }
 
@@ -356,7 +356,7 @@ function FileSettingsDialog({ files, close, updatePageRanges, toggleExtraFormat 
   updatePageRanges: (key: string, value: string) => void;
   toggleExtraFormat: (key: string, format: ExtraFormat) => void;
 }) {
-  return <div className="modal-backdrop file-settings-backdrop" onClick={close}><section className="file-settings-dialog" role="dialog" aria-modal="true" aria-label="逐文件 MinerU 设置" onClick={event => event.stopPropagation()}>
+  return <div className="modal-backdrop u-backdrop file-settings-backdrop" onClick={close}><section className="file-settings-dialog" role="dialog" aria-modal="true" aria-label="逐文件 MinerU 设置" onClick={event => event.stopPropagation()}>
     <header><div><h2>设置每个文件的解析范围</h2><p>以下设置会分别写入对应文件资源的 MinerU 任务；PDF 页码范围留空时解析全部页。</p></div><button aria-label="关闭逐文件设置" onClick={close}>×</button></header>
     <div className="file-settings-table">
       <div className="file-settings-head"><span>文件</span><span>总页数</span><span>PDF 解析页码范围</span><span>额外输出格式</span></div>

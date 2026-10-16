@@ -185,11 +185,11 @@ export default function TaskHistory({ onOpenResources, onMessage }: {
 
     {detail && <div className="res-pop" onClick={event => { if (event.target === event.currentTarget) setDetail(null); }}>
       <section className="res-dialog res-form" role="dialog" aria-modal="true" aria-label={`解析任务详情 ${detail.job_id}`}>
-        <div className="res-dialog-head" style={{ alignItems: "center" }}>
-          <div style={{ flex: 1 }}><h2 style={{ fontSize: 17 }}>解析任务详情</h2><p className="src">{detail.source_name || detail.title}</p></div>
+        <div className="res-dialog-head history-detail-head">
+          <div className="u-grow"><h2 className="history-detail-title">解析任务详情</h2><p className="src">{detail.source_name || detail.title}</p></div>
           <button className="res-iconbtn" aria-label="关闭" onClick={() => setDetail(null)}>✕</button>
         </div>
-        <div className="res-dialog-body" style={{ padding: "16px 19px" }}>
+        <div className="res-dialog-body history-detail-body">
           <p className="res-field"><label>任务状态</label><span>{STATE_LABEL[detail.state] || detail.state}{detail.archived ? ` · ${archiveReasonLabel(detail.archive_reason)}` : ""}</span></p>
           <p className="res-field"><label>本次范围 / 解析页数</label><span>{taskScope(detail)} · {taskPages(detail)} 页{detail.slice_count > 1 ? `（${detail.slice_count} 段）` : ""}</span></p>
           <p className="res-field"><label>资源当前覆盖</label><span>{coverageLabel(detail)}</span></p>

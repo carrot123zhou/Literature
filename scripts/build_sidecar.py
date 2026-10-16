@@ -35,7 +35,7 @@ def main() -> None:
     subprocess.run([
         sys.executable, "-m", "PyInstaller", "--noconfirm", "--clean", "--onefile",
         "--name", "literature-sidecar", "--distpath", str(DIST), "--workpath", str(WORK),
-        "--specpath", str(WORK), "--collect-all", "pymupdf",
+        "--specpath", str(WORK), "--collect-all", "pymupdf", "--collect-all", "docx",
         "--add-data", f"{revision}:literature",
         "--hidden-import", "uvicorn.logging", "--hidden-import", "uvicorn.loops.auto",
         "--hidden-import", "uvicorn.protocols.http.auto", "--hidden-import", "uvicorn.protocols.websockets.auto",

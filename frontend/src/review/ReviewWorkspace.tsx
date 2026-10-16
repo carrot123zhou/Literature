@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import "./review.css";
 import { api } from "../api";
 import SplitPane from "../SplitPane";
-import type { DocumentGraph, Job, ModelRoleBinding, ModelService, PageMeta, StructureBaseline, StructurePatch, StructureSuggestion, StructureTocEntry } from "../types";
+import type { DocumentGraph, FlowLinks, Job, ModelRoleBinding, ModelService, PageMeta, StructureBaseline, StructurePatch, StructureSuggestion, StructureTocEntry } from "../types";
 import type { TaskModelPatch } from "../workbench/TaskModelPicker";
 import OutlinePane, { MODE_PRESET, type StructureAnalysis, type StructureMode, type StructureOptions, type TocCandidate } from "./OutlinePane";
 import type { ReasoningMode } from "../workbench/ThinkingLevelField";
@@ -66,6 +66,8 @@ export default function ReviewWorkspace(props: Props) {
   const { projectId, document, sourceType, sourceName, patches, suggestions, onSuggestions, selected, onSelect, refresh, setMessage, modelService, boundModel, providers, onConfigureModel } = props;
   const bboxAvailable = document.bbox_space === "mineru-1000" && document.blocks.some(block => block.bbox.length === 4);
   const isPdf = sourceType.toLowerCase() === "pdf";
+  // 后端只读派生：跨页续接双向链接，供原页虚线框/连线与结果栏提示使用。
+  const flowLinks: FlowLinks = document.flow_links ?? {};
 
   const [tocText, setTocText] = useState(() => { try { return localStorage.getItem(`literature.review.baseline.${projectId}`) || ""; } catch { return ""; } });
   const [pageText, setPageText] = useState("");
@@ -513,7 +515,7 @@ export default function ReviewWorkspace(props: Props) {
       className="workspace review-grid"
       storageKey="literature.split.review"
       initial={[0.2, 0.4, 0.4]}
-      minPx={[260, 320, 300]}
+      minPx={[200, 360, 280]}
       handleLabels={["调整结构与任务栏宽度", "调整文档预览与解析结果宽度"]}
     >
       <OutlinePane
@@ -563,6 +565,7 @@ export default function ReviewWorkspace(props: Props) {
             blocks={document.blocks}
             space={document.bbox_space}
             selected={selected}
+            flowLinks={flowLinks}
             onSelect={locate}
             onActiveBlock={setActiveBlock}
             focus={focus}
@@ -574,6 +577,7 @@ export default function ReviewWorkspace(props: Props) {
         space={document.bbox_space}
         selected={selected}
         activeBlock={activeBlock}
+        flowLinks={flowLinks}
         checked={picked}
         tab={tab}
         onTab={setTab}

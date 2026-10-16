@@ -504,8 +504,8 @@ export default function App() {
           translationBinding={models.roles.translation}
           onConfigureModel={() => openSettings("models")}
         />
-      : projectPlaceholder("选择一个已完成处理的文档，进入阅读与翻译；或去首页上传新文件。"))}
-    {isWorkView(view) && <footer className="statusbar"><span>{syncError ? <b style={{ color: "var(--rdg-fail, #b91c1c)" }}>同步失败：{syncError}</b> : lastSyncAt ? `已同步 ${new Date(lastSyncAt).toLocaleTimeString()}` : "本地项目 · 已保存"}</span><span>{jobs[0] ? `${JOB_KIND[jobs[0].kind] || jobs[0].kind} · ${JOB_STATUS[jobs[0].status] || jobs[0].status} · ${Math.round(jobs[0].progress * 100)}%` : "无运行任务"}</span>{view === "review" && <span>{suggestions.filter(value => !value.automatic).length} 项待确认</span>}</footer>}
+      : projectPlaceholder("选择一个已完成处理的文档，进入对照翻译；或去首页上传新文件。"))}
+    {isWorkView(view) && <footer className="statusbar"><span>{syncError ? <b className="statusbar-fail">同步失败：{syncError}</b> : lastSyncAt ? `已同步 ${new Date(lastSyncAt).toLocaleTimeString()}` : "本地项目 · 已保存"}</span><span>{jobs[0] ? `${JOB_KIND[jobs[0].kind] || jobs[0].kind} · ${JOB_STATUS[jobs[0].status] || jobs[0].status} · ${Math.round(jobs[0].progress * 100)}%` : "无运行任务"}</span>{view === "review" && <span>{suggestions.filter(value => !value.automatic).length} 项待确认</span>}</footer>}
 
     {settings && <Settings
       projectId={activeProjectId || undefined}

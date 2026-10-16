@@ -1,0 +1,113 @@
+/* 导出对话框：章节树 + 配置两栏，沿用 UI v3 弹层与表单令牌。 */
+.res-pop.export-backdrop { position: fixed; inset: 0; z-index: 40; display: grid; place-items: center; padding: var(--sp-6); }
+.res-dialog.export-dialog { display: flex; flex-direction: column; width: min(calc(var(--sp-9) * 21), 100%); max-height: min(80vh, 100%); min-width: 0; border: 0; border-radius: var(--r-sheet); background: var(--bg-elevated); box-shadow: var(--shadow-overlay); overflow: hidden; color: var(--label); font-family: var(--font-ui); }
+.export-dialog .res-dialog-head { display: flex; align-items: flex-start; gap: var(--sp-3); padding: var(--sp-5) var(--sp-6); border-bottom: 1px solid var(--separator); background: var(--bg-elevated); }
+.export-dialog .res-mono { display: grid; width: var(--sp-8); height: var(--sp-8); flex: none; place-items: center; border-radius: var(--r-card); background: var(--accent-tint); color: var(--accent); font-size: var(--fs-caption1); font-weight: var(--fw-semibold); }
+.export-dialog .res-dialog-head h2 { font-family: var(--font-ui); font-size: var(--fs-title2); }
+.export-dialog .res-dialog-head .src { margin: var(--sp-1) 0 0; color: var(--label-2); font-size: var(--fs-caption1); overflow-wrap: anywhere; }
+.export-header-copy { flex: 1; min-width: 0; }
+.export-dialog .res-iconbtn { width: var(--sp-8); height: var(--sp-8); flex: none; margin-left: auto; padding: 0; }
+.export-dialog .res-dialog-body { flex: 1; min-height: 0; overflow: auto; padding: var(--sp-5) var(--sp-6); background: var(--bg); }
+.export-dialog .res-dialog-foot { display: flex; align-items: center; gap: var(--sp-2); padding: var(--sp-3) var(--sp-6); border-top: 1px solid var(--separator); background: var(--bg-elevated); }
+.export-dialog button { display: inline-flex; align-items: center; justify-content: center; min-height: calc(var(--sp-8) - var(--sp-2)); padding: 0 var(--sp-3); border: 1px solid var(--separator-strong); border-radius: var(--r-control); background: var(--bg-elevated); color: var(--label); font: inherit; font-size: var(--fs-footnote); font-weight: var(--fw-medium); line-height: 1; cursor: pointer; }
+.export-dialog button:hover { border-color: var(--label-3); background: var(--fill-2); }
+.export-dialog button.primary { border-color: var(--accent); background: var(--accent); color: var(--on-accent); font-weight: var(--fw-semibold); }
+.export-dialog button.primary:hover { border-color: var(--accent-hover); background: var(--accent-hover); }
+.export-dialog button:disabled { opacity: 0.42; cursor: not-allowed; }
+
+.export-state { display: grid; min-height: calc(var(--sp-9) * 5); place-items: center; align-content: center; gap: var(--sp-3); padding: var(--sp-6); color: var(--label-2); font-size: var(--fs-footnote); text-align: center; }
+.export-state.is-error { color: var(--on-red); }
+.export-state .u-spinner { margin: var(--sp-2); }
+.export-state .u-skeleton { width: min(calc(var(--sp-9) * 7), 100%); height: var(--sp-4); }
+
+/* 左右分区都可收缩；树单独滚动，右侧随对话框主体滚动。 */
+.export-grid { display: grid; grid-template-columns: minmax(calc(var(--sp-9) * 5), calc(var(--sp-8) * 8)) minmax(0, 1fr); align-items: start; gap: var(--sp-4); min-width: 0; }
+.export-side,
+.export-block { min-width: 0; border: 1px solid var(--separator); border-radius: var(--r-card); background: var(--bg-elevated); box-shadow: var(--shadow-card); }
+.export-side { display: flex; flex-direction: column; min-height: 0; padding: var(--sp-3); }
+.export-side-head { display: flex; align-items: baseline; justify-content: space-between; gap: var(--sp-2); min-width: 0; margin-bottom: var(--sp-2); }
+.export-side-head b { font-size: var(--fs-footnote); font-weight: var(--fw-semibold); }
+.export-side-head span { color: var(--label-3); font-size: var(--fs-caption1); white-space: nowrap; }
+.export-chapter-actions { display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap; }
+.export-chapter-actions button { min-height: calc(var(--sp-7) - var(--sp-1)); padding: 0 var(--sp-2); font-size: var(--fs-caption1); }
+.export-filter { display: inline-flex; align-items: center; gap: var(--sp-1); margin-left: auto; color: var(--label-2); font-size: var(--fs-caption1); white-space: nowrap; }
+.export-filter input,
+.export-node input { accent-color: var(--accent); }
+.export-tree { display: flex; flex: 1; flex-direction: column; min-height: 0; max-height: calc(var(--sp-9) * 9); gap: var(--sp-1); margin-top: var(--sp-3); overflow-y: auto; overscroll-behavior: contain; }
+.export-node { display: flex; align-items: center; gap: var(--sp-1); min-width: 0; padding: var(--sp-1) var(--sp-2); padding-left: calc(var(--sp-2) + var(--export-indent, 0)); border-radius: var(--r-control); }
+.export-node:hover { background: var(--fill-3); }
+.export-caret { width: var(--sp-4); min-width: var(--sp-4); height: var(--sp-4); min-height: var(--sp-4); padding: 0; border: 0; background: transparent; color: var(--label-3); font-size: var(--fs-caption1); transition: transform var(--dur-fast) var(--ease); }
+.export-caret.open { transform: rotate(90deg); }
+.export-caret.is-empty { visibility: hidden; }
+.export-node-title { flex: 1; min-width: 0; color: var(--label); font-size: var(--fs-caption1); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.export-node-meta { display: flex; align-items: center; gap: var(--sp-1); min-width: 0; flex: none; }
+.export-node-meta small { color: var(--label-3); font-size: var(--fs-caption2); white-space: nowrap; }
+.export-node-warn { padding: var(--sp-1); border-radius: var(--r-pill); background: var(--tint-orange); color: var(--on-orange); font-size: var(--fs-caption2); font-style: normal; font-weight: var(--fw-semibold); }
+.export-node-bar { width: var(--sp-8); height: var(--sp-1); border-radius: var(--r-pill); background: var(--fill-2); overflow: hidden; }
+.export-node-bar b { display: block; height: 100%; background: var(--accent); }
+.export-notoc { margin-top: var(--sp-3); padding: var(--sp-3); border: 1px dashed var(--separator-strong); border-radius: var(--r-control); background: var(--fill-3); color: var(--label-2); font-size: var(--fs-caption1); line-height: var(--lh-normal); }
+
+.export-main { display: flex; flex-direction: column; gap: var(--sp-3); min-width: 0; }
+.export-block { padding: var(--sp-4); }
+.export-block h4 { display: flex; align-items: center; gap: var(--sp-2); margin: 0 0 var(--sp-3); color: var(--label); font-size: var(--fs-footnote); font-weight: var(--fw-semibold); }
+.export-block h4 .grow { flex: 1; min-width: 0; }
+.export-formats { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--sp-2); }
+.export-chip { display: flex; align-items: flex-start; gap: var(--sp-2); min-width: 0; padding: var(--sp-3); border: 1px solid var(--separator); border-radius: var(--r-card); background: var(--bg-secondary); cursor: pointer; transition: border-color var(--dur-fast) var(--ease), background-color var(--dur-fast) var(--ease); }
+.export-chip:hover { border-color: var(--separator-strong); }
+.export-chip.on { border-color: var(--accent); background: var(--accent-tint); }
+.export-chip input { flex: none; margin-top: var(--sp-1); accent-color: var(--accent); }
+.export-chip span { min-width: 0; }
+.export-chip b { display: block; font-size: var(--fs-footnote); font-weight: var(--fw-semibold); }
+.export-chip small { display: block; margin-top: var(--sp-1); color: var(--label-2); font-size: var(--fs-caption1); overflow-wrap: anywhere; }
+.export-dialog .radio { display: grid; gap: var(--sp-2); }
+.export-dialog .radio label { display: flex; align-items: flex-start; gap: var(--sp-3); min-width: 0; padding: var(--sp-3); border: 1px solid var(--separator); border-radius: var(--r-card); background: var(--bg-secondary); cursor: pointer; }
+.export-dialog .radio label:hover { border-color: var(--separator-strong); }
+.export-dialog .radio label.on { border-color: var(--accent); background: var(--accent-tint); }
+.export-dialog .radio label.dis { opacity: 0.5; cursor: not-allowed; }
+.export-dialog .radio input { flex: none; margin-top: var(--sp-1); accent-color: var(--accent); }
+.export-dialog .radio .n { flex: 1; min-width: 0; }
+.export-dialog .radio .n b { font-size: var(--fs-footnote); font-weight: var(--fw-semibold); }
+.export-dialog .radio .n small { display: block; margin-top: var(--sp-1); color: var(--label-2); font-size: var(--fs-caption1); overflow-wrap: anywhere; }
+.export-inline { display: flex; align-items: flex-end; gap: var(--sp-3); margin-top: var(--sp-3); flex-wrap: wrap; }
+.export-inline label { display: grid; min-width: calc(var(--sp-9) * 3); gap: var(--sp-1); color: var(--label-2); font-size: var(--fs-caption1); }
+.export-inline label.grow { flex: 1; min-width: min(calc(var(--sp-9) * 4), 100%); }
+.export-inline input,
+.export-inline select { width: 100%; min-height: calc(var(--sp-8) - var(--sp-2)); padding: 0 var(--sp-3); border: 1px solid var(--separator-strong); border-radius: var(--r-control); background: var(--bg-elevated); color: var(--label); font-size: var(--fs-footnote); }
+.export-summary .export-kv { display: flex; justify-content: space-between; gap: var(--sp-3); padding: var(--sp-2) 0; border-bottom: 1px solid var(--separator); color: var(--label-2); font-size: var(--fs-footnote); }
+.export-summary .export-kv:last-child { border-bottom: 0; }
+.export-summary .export-kv b { min-width: 0; color: var(--label); font-weight: var(--fw-semibold); text-align: right; overflow-wrap: anywhere; }
+.export-warn { margin-top: var(--sp-3); padding: var(--sp-2) var(--sp-3); border-radius: var(--r-control); background: var(--tint-orange); color: var(--on-orange); font-size: var(--fs-caption1); line-height: var(--lh-normal); overflow-wrap: anywhere; }
+.export-ok { padding: var(--sp-1) var(--sp-2); border-radius: var(--r-pill); background: var(--tint-green); color: var(--on-green); font-size: var(--fs-caption2); font-weight: var(--fw-semibold); }
+.export-files { display: flex; flex-direction: column; gap: var(--sp-2); margin-top: var(--sp-2); }
+.export-file { display: flex; align-items: center; gap: var(--sp-2); min-width: 0; padding: var(--sp-2) var(--sp-3); border: 1px solid var(--separator); border-radius: var(--r-control); background: var(--fill-3); }
+.export-file-kind { flex: none; padding: var(--sp-1) var(--sp-2); border-radius: var(--r-pill); background: var(--tint-blue); color: var(--on-blue); font-size: var(--fs-caption2); font-weight: var(--fw-semibold); letter-spacing: 0.03em; }
+.export-file-kind.is-folder { background: var(--tint-purple); color: var(--on-purple); }
+.export-file-name { flex: 1; min-width: 0; font-size: var(--fs-caption1); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.export-file-size { flex: none; color: var(--label-3); font-size: var(--fs-caption2); white-space: nowrap; }
+.export-file-acts { display: flex; flex: none; gap: var(--sp-1); }
+.export-file-acts button,
+.export-history .export-toggle { min-height: calc(var(--sp-7) - var(--sp-1)); padding: 0 var(--sp-2); font-size: var(--fs-caption1); }
+.export-link { color: var(--accent); font-size: var(--fs-caption1); }
+.export-hint { color: var(--label-2); font-size: var(--fs-footnote); }
+.export-hist { margin-top: var(--sp-2); border: 1px solid var(--separator); border-radius: var(--r-control); overflow: hidden; }
+.export-hist-head { display: flex; align-items: baseline; gap: var(--sp-2); width: 100%; border: 0; border-radius: 0; background: var(--fill-3); text-align: left; }
+.export-hist-head:hover { background: var(--fill-2); }
+.export-hist-head b { color: var(--label); font-size: var(--fs-caption1); font-weight: var(--fw-semibold); }
+.export-hist-head span { color: var(--label-2); font-size: var(--fs-caption1); }
+.export-hist-head small { min-width: 0; margin-left: auto; color: var(--label-3); font-size: var(--fs-caption2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.export-hist .export-files { margin: 0; padding: var(--sp-2); }
+
+@media (max-width: 1180px) {
+  .export-grid { grid-template-columns: minmax(calc(var(--sp-9) * 4), calc(var(--sp-9) * 5)) minmax(0, 1fr); }
+  .export-node-meta small:first-child { display: none; }
+}
+@media (max-width: 899px) {
+  .res-pop.export-backdrop { padding: var(--sp-4); }
+  .export-dialog .res-dialog-head,
+  .export-dialog .res-dialog-body,
+  .export-dialog .res-dialog-foot { padding-left: var(--sp-4); padding-right: var(--sp-4); }
+  .export-grid,
+  .export-formats { grid-template-columns: minmax(0, 1fr); }
+  .export-tree { max-height: calc(var(--sp-9) * 5); }
+  .export-node-meta small { display: none; }
+}

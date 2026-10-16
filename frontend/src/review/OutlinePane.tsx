@@ -42,7 +42,7 @@ function TocRow({ node, selected, activeBlock, onSelect }: { node: TocNode; sele
   return <li>
     <div className={`toc-row${selected === node.block_id ? " selected" : ""}${activeBlock === node.block_id ? " active" : ""}`}>
       <span className="toc-level">H{node.level}</span>
-      <button className="toc-title" onClick={() => onSelect(node.block_id)} title={node.title}>{node.title}</button>
+      <button className="toc-title u-truncate" onClick={() => onSelect(node.block_id)} title={node.title}>{node.title}</button>
       <span className="toc-page">{node.page_index + 1}</span>
     </div>
     {node.children.length > 0 && <ul>{node.children.map(child => <TocRow key={child.node_id} node={child} selected={selected} activeBlock={activeBlock} onSelect={onSelect}/>)}</ul>}
@@ -128,19 +128,19 @@ export default memo(function OutlinePane(props: Props) {
           onConfigure={onConfigureModel}
           onChange={onModelChange}
         />
-        <div className="calib-modes" role="radiogroup" aria-label="校准档位">
+        <div className="calib-modes u-segmented u-segmented--fill" role="radiogroup" aria-label="校准档位">
           {(["coarse", "fine"] as StructureMode[]).map(value =>
-            <button key={value} type="button" role="radio" aria-checked={mode === value} className={mode === value ? "active" : ""} disabled={blocked || paused} onClick={() => onMode(value)}>{value === "coarse" ? "粗校" : "精校"}</button>)}
+            <button key={value} type="button" role="radio" aria-checked={mode === value} className={mode === value ? "active is-active" : ""} disabled={blocked || paused} onClick={() => onMode(value)}>{value === "coarse" ? "粗校" : "精校"}</button>)}
         </div>
         <p className="calib-mode-hint">{MODE_HINTS[mode]}</p>
         {/* 运行中主按钮变「暂停」必须保持可点；档位/基准约束只在未运行时拦截。 */}
-        <button className="primary block-button" disabled={busy || (!running && (!configured || (!options.extractToc && !baselineCount)))}
+        <button className="primary block-button u-btn u-btn--primary u-btn--block" disabled={busy || (!running && (!configured || (!options.extractToc && !baselineCount)))}
           onClick={() => running ? onPause() : onRunModel()}>
           {running ? "暂停" : paused ? "继续校准" : "开始校准"}
         </button>
         {!configured && <small className="review-hint">先选择并配置校对模型；校准结果自动应用，可随时在修订历史撤销。</small>}
-        {job && <div className={`structure-run-panel${job.status === "failed" ? " is-failed" : ""}${paused ? " is-paused" : ""}`} role="status">
-          <strong>{running ? "正在校准" : paused ? "已暂停" : job.status === "failed" ? "校准失败" : "校准完成"}</strong>
+        {job && <div className={`structure-run-panel${running ? " is-running" : ""}${job.status === "failed" ? " is-failed" : ""}${paused ? " is-paused" : ""}`} role="status">
+          <strong><span className={`run-dot${running ? " running" : job.status === "failed" ? " failed" : " done"}`} aria-hidden="true"/> {running ? "正在校准" : paused ? "已暂停" : job.status === "failed" ? "校准失败" : "校准完成"}</strong>
           <progress max={1} value={job.progress || 0}/>
           {running && totalElapsed !== null && <p>已用时 {formatDuration(totalElapsed)}{inFlight && inFlightElapsed !== null ? ` · ${stageLabel(inFlight.scope)}进行中 ${formatDuration(inFlightElapsed)}` : ""}</p>}
           {paused && <p>已暂停：已完成的请求会保留，点「继续校准」只补剩余部分。</p>}

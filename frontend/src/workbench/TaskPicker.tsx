@@ -19,7 +19,7 @@ export default function TaskPicker({ projects, onOpen, onUpload, hint }: Props) 
     return ready.filter(project => `${project.title} ${project.source_name || ""}`.toLocaleLowerCase().includes(normalized));
   }, [ready, query]);
 
-  return <div className="workspace-state task-picker">
+  return <div className="workspace-state task-picker task-picker-v3 u-card">
     <span className="eyebrow">WORKSPACE</span>
     <h2>还没有打开任务</h2>
     <p>{hint || "从下面的资源里选择一个已完成处理的文档，或去首页导入新文件。"}</p>

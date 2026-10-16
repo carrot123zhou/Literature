@@ -39,8 +39,8 @@ export function TocPanel({ document, translation, checked, onToggle, onSelectBlo
   };
   walk(document.toc, 0);
   if (!rows.length) return <div className="panel"><h4>目录</h4><div className="pbody"><div className="hint">该文档还没有确认的目录结构，可先在「结构校对」中整理标题。</div></div></div>;
-  return <div className="panel"><h4>目录<span className="grow"/><span style={{ fontSize: 11, color: "var(--rdg-faint)" }}>{rows.length} 项</span></h4>
-    <div className="pbody" style={{ gap: 3, padding: 9 }}>
+  return <div className="panel"><h4>目录<span className="grow"/><span className="panel-count">{rows.length} 项</span></h4>
+    <div className="pbody toc-body">
       {rows.map(({ node, depth, done, total }) => {
         const pct = total ? Math.round(done / total * 100) : 0;
         return <div key={node.node_id} className={`tocitem${checked.has(node.block_id) ? " on" : ""}${depth > 0 ? " tocchild" : ""}`}>
@@ -86,31 +86,32 @@ export function JobPanel({ jobs, stats, usage, failed, onPause, onResume, onRetr
     : job.status === "failed" ? "失败"
     : job.status;
   return <>
-    <div className="panel"><h4>当前翻译任务<span className="grow"/><span style={{ fontSize: 11, color: running ? "var(--rdg-run)" : "var(--rdg-faint)" }}>{stateLabel}</span></h4>
+    <div className="panel"><h4>当前翻译任务<span className="grow"/><span className={`panel-count${running ? " is-running" : ""}`}>{stateLabel}</span></h4>
       <div className="pbody">
         <div className="kv"><span>范围</span><b>{job ? (SCOPE_LABEL[scopeValue] || scopeValue) : "—"}</b></div>
         <div className="jobbar"><i style={{ width: `${job ? Math.round((job.progress || 0) * 100) : stats.percent}%` }}/></div>
         <div className="kv"><span>整书进度</span><b>{stats.done} / {stats.total} 段 · {stats.percent}%</b></div>
-        <div className="kv"><span>失败段落</span><b style={{ color: stats.failed ? "var(--rdg-fail)" : "var(--rdg-ink)" }}>{stats.failed}</b></div>
+        <div className="kv"><span>失败段落</span><b className={stats.failed ? "is-failed" : ""}>{stats.failed}</b></div>
         <div className="kv"><span>已用 tokens</span><b>{(usage.input_tokens + usage.output_tokens).toLocaleString()}</b></div>
         {usage.reasoning_tokens ? <div className="kv"><span>其中思考 tokens</span><b>{usage.reasoning_tokens.toLocaleString()}</b></div> : null}
         <div className="kv"><span>估算费用</span><b>${(usage.estimated_cost || 0).toFixed(4)}</b></div>
-        {job?.error ? <div className="hint" style={{ color: "var(--rdg-fail)" }}>{job.error}</div> : null}
+        {job?.error ? <div className="hint job-error">{job.error}</div> : null}
         <div className="acts">
-          <button disabled={!running} onClick={() => job && onPause(job)}>⏸ 暂停</button>
-          <button disabled={!paused && job?.status !== "failed" && job?.status !== "partial_failed"} onClick={() => job && onResume(job)}>{job?.status === "failed" || job?.status === "partial_failed" ? "▶ 重试失败" : "▶ 恢复"}</button>
+          {running
+            ? <button onClick={() => job && onPause(job)}>⏸ 暂停</button>
+            : <button disabled={!job || (!paused && job.status !== "failed" && job.status !== "partial_failed")} onClick={() => job && onResume(job)}>{job?.status === "failed" || job?.status === "partial_failed" ? "▶ 重试失败" : paused ? "▶ 继续翻译" : "▶ 开始翻译"}</button>}
         </div>
       </div>
     </div>
-    <div className="panel"><h4>失败分块<span className="grow"/><button className="ghost" style={{ fontSize: 11 }} disabled={!stats.failed} onClick={onRetryAll}>重试全部失败</button></h4>
-      <div className="pbody" style={{ gap: 0 }}>
+    <div className="panel"><h4>失败分块<span className="grow"/><button className="ghost panel-action" disabled={!stats.failed} onClick={onRetryAll}>重试全部失败</button></h4>
+      <div className="pbody compact-body">
         {!failed.length ? <div className="hint">暂无失败分块。</div> : failed.map(item => <div className="failrow" key={item.block_id}>
           <i className="fdot"/><div className="grow"><b>#{item.block_id} {TYPE_LABEL[blockKind({ type: item.type } as Block)] || item.type}</b><small>{item.error || "翻译失败或已中断"}</small></div>
           <button onClick={() => onRetryOne(item.block_id)}>重试</button>
         </div>)}
       </div>
     </div>
-    <div className="panel"><h4>段落状态统计</h4><div className="pbody" style={{ gap: 7 }}>
+    <div className="panel"><h4>段落状态统计</h4><div className="pbody stats-body">
       <div className="kv"><span>已翻译</span><b>{stats.translated + stats.refined + stats.edited}</b></div>
       <div className="kv"><span>人工锁定</span><b>{stats.locked}</b></div>
       <div className="kv"><span>待复核（原文已变）</span><b>{stats.stale_source}</b></div>
@@ -141,18 +142,18 @@ export function GlossaryPanel({ glossary, versions, onFreeze, onRollback }: {
   };
   const currentVersion = versions.length ? versions[versions.length - 1].version : 0;
   return <>
-    <div className="panel"><h4>术语表<span className="grow"/><span style={{ fontSize: 11, color: "var(--rdg-faint)" }}>草稿 → 冻结快照</span></h4>
+    <div className="panel"><h4>术语表<span className="grow"/><span className="panel-count">草稿 → 冻结快照</span></h4>
       <div className="pbody">
         <div className="ghead">原文词条 → 目标译法（每行一条，Tab 或 =&gt; 分隔）</div>
-        <textarea style={{ minHeight: 160 }} value={text} onChange={event => setText(event.target.value)} placeholder={"state of nature\t自然状态"}/>
+        <textarea className="glossary-textarea" value={text} onChange={event => setText(event.target.value)} placeholder={"state of nature\t自然状态"}/>
         <div className="xnote">术语表会随任务保存为冻结快照；之后编辑不影响已运行的任务，需要时可切换到新版本。</div>
         <button className="primary" onClick={() => onFreeze(parse())}>冻结为新快照 v{currentVersion + 1}</button>
       </div>
     </div>
-    <div className="panel"><h4>版本与回滚</h4><div className="pbody" style={{ gap: 0 }}>
+    <div className="panel"><h4>版本与回滚</h4><div className="pbody compact-body">
       {!versions.length ? <div className="hint">尚未冻结任何版本。</div> : [...versions].reverse().map(item => <div className="vrow" key={item.version}>
         <b>v{item.version}</b>
-        <span style={{ color: "var(--rdg-faint)" }}>{new Date(item.created_at).toLocaleString()} · {Object.keys(item.entries).length} 词条</span>
+        <span className="version-meta">{new Date(item.created_at).toLocaleString()} · {Object.keys(item.entries).length} 词条</span>
         {item.version === currentVersion ? <span className="curtag">当前使用</span> : <button onClick={() => onRollback(item.version)}>回滚</button>}
       </div>)}
     </div></div>
@@ -176,7 +177,7 @@ export function BlockPanel({ block, entry, chapter, onTranslateBlock, onUnlock }
     <div className="panel"><h4>当前块</h4><div className="pbody blockinfo">
       <p className="bt">#{block.block_id} · {TYPE_LABEL[kind] || block.type}</p>
       <p className="bs">{chapter} · 依据结构 revision r{entry?.structure_revision ?? 0}</p>
-      <span className={`bstate s-${meta.cls}`} style={{ justifySelf: "start" }}><i className="dot"/>{meta.label}</span>
+      <span className={`bstate s-${meta.cls} block-state`}><i className="dot"/>{meta.label}</span>
       <div className="txt">{entryText(entry) || "（尚未翻译）"}</div>
       <div className="acts">
         {state !== "locked" && state !== "translated" && state !== "refined" && state !== "edited" ? <button className="primary" onClick={() => onTranslateBlock()}>翻译本段</button> : null}
@@ -237,14 +238,14 @@ export function ScopeDialog({ projectTitle, locale, stats, selectedScopeCount, g
   const canGo = scope !== "blocks" || selectedScopeCount > 0;
   // 预估必须按当前弹窗选项（目标语言/术语/附加要求/refine/force/polish）计算，而不是只传 scope。
   const confirmValue: ScopeConfirm = { scope, useGlossary: glossaryMode === "frozen", instructions, refine, force: force && !refine, polish: polish && !refine, workers, locale: target, serviceId: modelValue.service_id, model: modelValue.model, reasoningMode, reasoningBudget };
-  return <div className="rdg-pop" onClick={event => { if (event.target === event.currentTarget) onClose(); }}>
-    <div className="dialog" role="dialog" aria-modal="true" aria-label="选择翻译范围">
-      <div className="dialog-head">
+  return <div className="rdg-pop u-backdrop" onClick={event => { if (event.target === event.currentTarget) onClose(); }}>
+    <div className="dialog u-modal u-modal--lg" role="dialog" aria-modal="true" aria-label="选择翻译范围">
+      <div className="dialog-head u-modal__head">
         <span className="mono">FR</span>
-        <div style={{ flex: 1 }}><h2>翻译 · {projectTitle}</h2><p className="src">选择范围与模型后开始</p></div>
+        <div className="dialog-title"><h2>翻译 · {projectTitle}</h2><p className="src">选择范围与模型后开始</p></div>
         <button className="x" onClick={onClose} aria-label="关闭">✕</button>
       </div>
-      <div className="dialog-body">
+      <div className="dialog-body u-modal__body">
         <div className="grid2">
           <div className="field"><label>目标语言</label>
             <select value={target} onChange={event => setTarget(event.target.value)}>
@@ -281,15 +282,15 @@ export function ScopeDialog({ projectTitle, locale, stats, selectedScopeCount, g
             </label>)}
           </div>
         </div>
-        <details className="scope-more"><summary style={{ cursor: "pointer", margin: "4px 0 12px", fontWeight: 600 }}>更多选项（附加要求、润色、重译、并发）</summary>
+        <details className="scope-more"><summary>更多选项（附加要求、润色、重译、并发）</summary>
         <div className="field"><label>附加要求（进入任务快照）</label>
           <input value={instructions} onChange={event => setInstructions(event.target.value)} placeholder="如：保留原文人名，不译"/>
         </div>
-        <label className="radio" style={{ marginBottom: 12 }}>
-          <label className={refine ? "on" : ""} style={{ width: "100%" }}><input type="checkbox" checked={refine} onChange={event => setRefine(event.target.checked)}/><span className="n"><b>仅润色已有译文</b><small>跳过未翻译段落，只对已有译文做润色</small></span></label>
+        <label className="radio option-radio">
+          <label className={refine ? "on" : ""}><input type="checkbox" checked={refine} onChange={event => setRefine(event.target.checked)}/><span className="n"><b>仅润色已有译文</b><small>跳过未翻译段落，只对已有译文做润色</small></span></label>
         </label>
-        <label className="radio" style={{ marginBottom: 12 }}>
-          <label className={force ? "on" : ""} style={{ width: "100%" }}><input type="checkbox" checked={force} disabled={refine} onChange={event => setForce(event.target.checked)}/><span className="n"><b>强制重译已有译文</b><small>忽略“已翻译”状态重新生成（人工锁定段落仍会跳过）；换模型或换引擎后整本重跑时勾选</small></span></label>
+        <label className="radio option-radio">
+          <label className={force ? "on" : ""}><input type="checkbox" checked={force} disabled={refine} onChange={event => setForce(event.target.checked)}/><span className="n"><b>强制重译已有译文</b><small>忽略“已翻译”状态重新生成（人工锁定段落仍会跳过）；换模型或换引擎后整本重跑时勾选</small></span></label>
         </label>
         <div className="grid2">
           <div className="field"><label>并发请求数</label>
@@ -303,15 +304,15 @@ export function ScopeDialog({ projectTitle, locale, stats, selectedScopeCount, g
               <option value={16}>16（最快，限流时自动降速）</option>
             </select>
           </div>
-          <label className="radio" style={{ alignSelf: "end", marginBottom: 12 }}>
-            <label className={polish && !refine ? "on" : ""} style={{ width: "100%" }}><input type="checkbox" checked={polish} disabled={refine} onChange={event => setPolish(event.target.checked)}/><span className="n"><b>翻译后自动润色</b><small>两遍制：先翻译再文学润色，质量更高，耗时与费用约翻倍</small></span></label>
+          <label className="radio option-radio option-radio-end">
+            <label className={polish && !refine ? "on" : ""}><input type="checkbox" checked={polish} disabled={refine} onChange={event => setPolish(event.target.checked)}/><span className="n"><b>翻译后自动润色</b><small>两遍制：先翻译再文学润色，质量更高，耗时与费用约翻倍</small></span></label>
           </label>
         </div>
         </details>
         <div className="xnote">校对未完成不影响翻译；翻译完成后再调整结构时，译文会<b>自动对齐到新的内容层级</b>，无需重新翻译。翻译按小块并发发送，单段失败只重试该段，不重复已成功的 usage。</div>
         {estimate ? <div className="xnote">将处理 <b>{estimate.block_count}</b> 块 · 约 {estimate.estimated_input_tokens.toLocaleString()}{(estimate.estimated_input_tokens_low != null && estimate.estimated_input_tokens_high != null) ? `（区间 ${estimate.estimated_input_tokens_low.toLocaleString()}–${estimate.estimated_input_tokens_high.toLocaleString()}）` : ""} 输入 token · {estimate.chunk_count} 个请求{estimate.has_pricing ? (estimate.estimated_cost != null ? ` · 估费 ${estimate.estimated_cost_low != null && estimate.estimated_cost_high != null ? `$${estimate.estimated_cost_low.toFixed(4)}–$${estimate.estimated_cost_high.toFixed(4)}（约 $${estimate.estimated_cost.toFixed(4)}）` : `约 $${estimate.estimated_cost.toFixed(4)}`}` : " · 价格未知，无法给出硬预算") : <span> · 单价比未配置，无法估算费用</span>}</div> : null}
       </div>
-      <div className="dialog-foot">
+      <div className="dialog-foot u-modal__foot">
         <button onClick={() => onEstimate(confirmValue)}>预估</button>
         <span className="grow"/>
         <button onClick={onClose}>取消</button>

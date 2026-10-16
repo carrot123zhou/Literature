@@ -71,6 +71,40 @@ class ApiIntegrationTests(unittest.TestCase):
         self.assertEqual(preflight.status_code, 200)
         self.assertEqual(preflight.headers["access-control-allow-origin"], "tauri://localhost")
 
+    def test_document_endpoint_exposes_cross_page_flow(self) -> None:
+        from literature.models import BBOX_SPACE_MINERU_1000, Block, Document, Page
+
+        created = self.client.post("/projects", headers=self.headers, json={
+            "source_pdf": str(self.source), "source_language": "en", "target_language": "zh-CN",
+        })
+        project_id = created.json()["project_id"]
+        project = self.store.project_path(project_id)
+        raw = project / "ocr" / "raw" / "mineru" / "slice-001"
+        raw.mkdir(parents=True, exist_ok=True)
+        relative = "ocr/raw/mineru/slice-001/book_content_list_v2.json"
+        merged = "The legacy of the Chan/Zen tradition can be seen as a dialectical tension between mediate and immediate understanding"
+        (project / relative).write_text(json.dumps([
+            [{"type": "paragraph", "content": {"paragraph_content": [{"content": merged}]}, "bbox": [50, 760, 550, 960]}],
+            [
+                {"type": "paragraph", "content": {"paragraph_content": []}, "bbox": [50, 80, 550, 380]},
+                {"type": "paragraph", "content": {"paragraph_content": [{"content": "When society is seen as a product of contract."}]}, "bbox": [50, 380, 550, 700]},
+            ],
+        ]), encoding="utf-8")
+        document = Document(
+            project_id=project_id, title="Flow", source_language="en", bbox_space=BBOX_SPACE_MINERU_1000,
+            page_count=2, pages=[Page(page_index=index, width=600, height=800, source_page_index=index) for index in range(2)],
+            source_files=[{"path": relative, "representation": "content_list_v2", "sha256": "", "page_offset": 0, "page_count": 2}],
+        )
+        document.blocks = [
+            Block(block_id="p0", type="paragraph", order=1, page_index=0, bbox=[50, 760, 550, 960], source_text=merged),
+            Block(block_id="p1", type="paragraph", order=2, page_index=1, bbox=[50, 380, 550, 700],
+                  source_text="When society is seen as a product of contract."),
+        ]
+        self.store.save_document(document)
+        payload = self.client.get(f"/projects/{project_id}/document", headers=self.headers).json()
+        # MinerU 把跨页整段并入上一页的块，续页只留空占位块；派生视图给出续行区域。
+        self.assertEqual(payload["flow_links"], {"p0": {"next_region": {"page_index": 1, "bbox": [50.0, 80.0, 550.0, 380.0]}}})
+
     def test_authenticated_project_import_and_exports(self) -> None:
         health = self.client.get("/health")
         self.assertEqual(health.status_code, 200)
@@ -94,6 +128,9 @@ class ApiIntegrationTests(unittest.TestCase):
         graph = imported.json()
         self.assertEqual(graph["source_language"], "en")
         self.assertEqual(graph["pages"][0]["width"], 600)
+        # 跨页续接是只读派生字段，单页样例应为空但仍必须存在。
+        self.assertEqual(graph["flow_links"], {})
+        self.assertEqual(self.client.get(f"/projects/{project_id}/document", headers=self.headers).json()["flow_links"], {})
         title_id = graph["blocks"][0]["block_id"]
         language = self.client.patch(f"/projects/{project_id}", headers=self.headers, json={
             "source_language": "fr", "chapter_language_overrides": {title_id: "ja"}, "budget_usd": 12.5,
@@ -102,6 +139,7 @@ class ApiIntegrationTests(unittest.TestCase):
         self.assertEqual(language.json()["source_language"], "fr")
         self.assertEqual(language.json()["chapter_language_overrides"][title_id], "ja")
         self.assertEqual(language.json()["budget_usd"], 12.5)
+        self.assertIn("flow_links", language.json())
         patched = self.client.post(
             f"/projects/{project_id}/structure/patches/batch", headers=self.headers,
             json={"patches": [{
@@ -128,28 +166,40 @@ class ApiIntegrationTests(unittest.TestCase):
         self.assertEqual(records.json(), [])
         verified = self.client.get(f"/projects/{project_id}/mineru/verify", headers=self.headers)
         self.assertEqual(verified.json(), {"valid": True, "errors": []})
-        # 导出与外部 TBL 已从 Literature 整体移除：废止接口必须明确拒绝，不能静默成功。
+        # 导出与外部 TBL：TBL 继续废弃，内置导出已恢复为真实实现。
         for method, path in (("post", "tbl/start"), ("get", "tbl/config"), ("get", "tbl/status")):
             response = getattr(self.client, method)(f"/{path}", headers=self.headers)
             self.assertEqual(response.status_code, 410, response.text)
-        legacy_export = self.client.post(f"/projects/{project_id}/exports", headers=self.headers, json={"mode": "source"})
-        self.assertEqual(legacy_export.status_code, 410, legacy_export.text)
-        legacy_readiness = self.client.get(f"/projects/{project_id}/export/readiness", headers=self.headers)
-        self.assertEqual(legacy_readiness.status_code, 410, legacy_readiness.text)
+        self.assertIn("export_v1", health.json()["capabilities"])
+        options = self.client.get(f"/projects/{project_id}/export/options", headers=self.headers)
+        self.assertEqual(options.status_code, 200, options.text)
+        self.assertEqual({i["id"] for i in options.json()["formats"]}, {"epub", "docx", "markdown", "html"})
+        exported = self.client.post(
+            f"/projects/{project_id}/export", headers=self.headers,
+            json={"formats": ["markdown"], "mode": "source", "locale": "zh-CN"},
+        )
+        self.assertEqual(exported.status_code, 200, exported.text)
+        self.assertTrue(any(i["rel_path"] == "full.md" for i in exported.json()["files"]))
 
-    def test_removed_export_does_not_touch_existing_files(self) -> None:
+    def test_export_preserves_existing_files(self) -> None:
         created = self.client.post("/projects", headers=self.headers, json={"source_pdf": str(self.source), "title": "Keep Exports"})
         project_id = created.json()["project_id"]
+        imported = self.client.post(
+            f"/projects/{project_id}/mineru/import", headers=self.headers, json={"paths": [str(self.mineru)]},
+        )
+        self.assertEqual(imported.status_code, 200, imported.text)
         exports = Path(created.json()["path"]) / "exports"
         exports.mkdir(parents=True, exist_ok=True)
         marker = exports / "legacy-note.md"
         marker.write_text("kept by user", encoding="utf-8")
-        # 废止的接口只拒绝，不生成也不删除任何成品。
-        self.assertEqual(self.client.post(f"/projects/{project_id}/exports", headers=self.headers, json={"mode": "source"}).status_code, 410)
-        self.assertEqual(self.client.get(f"/projects/{project_id}/export/readiness", headers=self.headers).status_code, 410)
+        exported = self.client.post(
+            f"/projects/{project_id}/export", headers=self.headers,
+            json={"formats": ["markdown"], "mode": "source"},
+        )
+        self.assertEqual(exported.status_code, 200, exported.text)
         self.assertTrue(marker.is_file())
         self.assertEqual(marker.read_text(encoding="utf-8"), "kept by user")
-        # 新建项目不再预建 exports/ 目录；旧项目已存在的目录保留。
+        self.assertTrue(any(exports.glob("*/export.json")))
         other = self.client.post("/projects", headers=self.headers, json={"source_pdf": str(self.source), "title": "No Exports"})
         self.assertFalse((Path(other.json()["path"]) / "exports").exists())
 
@@ -464,11 +514,11 @@ class ApiIntegrationTests(unittest.TestCase):
         self.assertEqual(stale["pipeline"]["translate"]["state"], "partial")
 
         exported = self.client.post(
-            f"/projects/{project_id}/exports", headers=self.headers,
+            f"/projects/{project_id}/export", headers=self.headers,
             json={"mode": "source", "locale": "zh-CN", "formats": ["html"]},
         )
-        # 已移除的内置导出不再影响流水线统计，并且必须明确拒绝而不是报成功。
-        self.assertEqual(exported.status_code, 410, exported.text)
+        # 导出只是视图：产物落 exports/，不进入流水线统计。
+        self.assertEqual(exported.status_code, 200, exported.text)
         self.assertNotIn("export", self.client.get("/projects", headers=self.headers).json()[0]["pipeline"])
 
     def test_web_upload_accepts_mineru_document_types_and_persists_settings(self) -> None:

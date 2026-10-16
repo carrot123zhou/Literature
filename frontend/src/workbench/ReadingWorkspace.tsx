@@ -186,10 +186,13 @@ export default function ReadingWorkspace(props: Props) {
           <span className="txt"><b>{stats.percent}%</b> · {stats.done}/{stats.total}</span>
         </div>
         <div className="foot-acts">
-          <button className="primary" onClick={() => setScopeOpen(true)}>开始翻译…</button>
           {activeJob?.status === "running"
-            ? <button onClick={() => onPause(activeJob)}>⏸ 暂停</button>
-            : <button disabled={!activeJob || !["paused", "budget_paused", "failed", "partial_failed"].includes(activeJob.status)} onClick={() => activeJob && onResume(activeJob)}>▶ 恢复</button>}
+            ? <button className="primary" onClick={() => onPause(activeJob)}>⏸ 暂停</button>
+            : activeJob?.status === "queued"
+              ? <button disabled>排队中…</button>
+              : activeJob && ["paused", "budget_paused", "failed", "partial_failed"].includes(activeJob.status)
+                ? <button className="primary" onClick={() => onResume(activeJob)}>{activeJob.status === "failed" || activeJob.status === "partial_failed" ? "▶ 重试失败段落" : "▶ 继续翻译"}</button>
+                : <button className="primary" onClick={() => setScopeOpen(true)}>开始翻译…</button>}
         </div>
         <div className="foot-note">暂停在分块边界生效 · 译文自动随结构对齐</div>
       </div>
@@ -204,7 +207,7 @@ export default function ReadingWorkspace(props: Props) {
         <div className="chips">
           {CHIPS.map(chip => <span key={chip.key} className={`chip ${chip.cls}`}><i className="dot"/>{chip.label} {chip.key === "done" ? stats.done : (stats[chip.key] as number)}</span>)}
         </div>
-        <div style={{ display: "flex", gap: 8, marginLeft: "auto" }}>
+        <div className="tool-actions">
           <button className="ghost" onClick={onOpenReview}>打开原页</button>
         </div>
       </div>
@@ -222,7 +225,7 @@ export default function ReadingWorkspace(props: Props) {
       </div>
     </section>
 
-    {reviewCandidate && <div className="review-candidate" role="dialog" aria-label="定向译审候选">
+    {reviewCandidate && <div className="review-candidate u-card" role="dialog" aria-label="定向译审候选">
       <div className="rch">定向译审候选 · {reviewCandidate.block_id} · {reviewCandidate.changed ? "有修订" : "与现译一致"}</div>
       {reviewCandidate.complete
         ? <div className="rcmp">
@@ -231,7 +234,7 @@ export default function ReadingWorkspace(props: Props) {
             <div><span>建议</span><p>{summarizeCandidate(reviewCandidate.revised)}</p></div>
           </div>
         : <p>模型输出不完整，未提供可采纳候选；不会自动覆盖现有译文。</p>}
-      <div style={{ display: "flex", gap: 8 }}>
+      <div className="review-candidate-actions">
         <button className="primary" disabled={!reviewCandidate.changed || !reviewCandidate.complete} onClick={onAdoptReview}>采纳并保存</button>
         <button onClick={onRejectReview}>拒绝</button>
       </div>

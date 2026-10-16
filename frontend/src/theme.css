@@ -1,0 +1,200 @@
+/* =============================================================================
+ * Literature UI v3 — 唯一设计令牌层（Single Source of Truth）
+ * -----------------------------------------------------------------------------
+ * 规则：
+ *  1. 全仓库禁止再新增硬编码颜色 / 圆角 / 间距；一律消费本文件的变量。
+ *  2. 本文件只定义「变量」，不定义任何可视样式（除 :root 本身）。
+ *  3. 旧的 var(--mineru-*) 保留为兼容别名，最终由各屏迁移后删除。
+ *  4. 强调色：Apple system blue #007AFF（用户 2026-10 拍板），旧橄榄绿与
+ *     MinerU 橙统一收敛到它。
+ * ========================================================================== */
+
+:root {
+  color-scheme: light;
+
+  /* ---- 强调色（Apple system blue） ---- */
+  --accent: #007aff;
+  --accent-hover: #0071eb;
+  --accent-press: #0062cc;
+  --accent-tint: rgba(0, 122, 255, 0.10);
+  --accent-tint-strong: rgba(0, 122, 255, 0.18);
+  --accent-ring: rgba(0, 122, 255, 0.30);
+  --on-accent: #ffffff;
+
+  /* ---- 兼容别名（迁移期） ---- */
+  --mineru-accent: var(--accent);
+  --mineru-green: var(--system-green);
+  --mineru-border: var(--separator);
+  --mineru-panel: var(--bg-elevated);
+
+  /* ---- 文本（iOS label 语义） ---- */
+  --label: rgba(0, 0, 0, 0.92);
+  --label-2: rgba(60, 60, 67, 0.60);
+  --label-3: rgba(60, 60, 67, 0.32);
+  --label-4: rgba(60, 60, 67, 0.16);
+
+  /* ---- 背景 / 填充（iOS background & fill 语义） ---- */
+  --bg: #f2f2f7;                       /* systemGroupedBackground */
+  --bg-elevated: #ffffff;              /* systemBackground */
+  --bg-secondary: #ffffff;             /* secondarySystemGroupedBackground */
+  --bg-tertiary: #f2f2f7;
+  --bg-sunken: #e8e8ed;                /* 画布/PDF 底 */
+  --fill-1: rgba(120, 120, 128, 0.20);
+  --fill-2: rgba(120, 120, 128, 0.12);
+  --fill-3: rgba(120, 120, 128, 0.08);
+  --separator: rgba(60, 60, 67, 0.16);         /* 发丝线 */
+  --separator-strong: rgba(60, 60, 67, 0.29);
+  --scrim: rgba(0, 0, 0, 0.32);                /* 弹层遮罩 */
+
+  /* ---- 语义状态色（Apple system colors） ---- */
+  --system-red: #ff3b30;
+  --system-orange: #ff9500;
+  --system-yellow: #ffcc00;
+  --system-green: #34c759;
+  --system-mint: #00c7be;
+  --system-teal: #30b0c7;
+  --system-blue: #007aff;
+  --system-indigo: #5856d6;
+  --system-purple: #af52de;
+  --system-pink: #ff2d55;
+  --system-brown: #a2845e;
+  --system-gray: #8e8e93;
+
+  /* 状态浅底 + 前景（保证小字号下的对比度） */
+  --tint-green: rgba(52, 199, 89, 0.12);
+  --on-green: #1b7a38;
+  --tint-orange: rgba(255, 149, 0, 0.14);
+  --on-orange: #96560a;
+  --tint-red: rgba(255, 59, 48, 0.12);
+  --on-red: #b3261e;
+  --tint-blue: rgba(0, 122, 255, 0.12);
+  --on-blue: #0057b8;
+  --tint-purple: rgba(175, 82, 222, 0.12);
+  --on-purple: #7a2fa8;
+  --tint-teal: rgba(48, 176, 199, 0.14);
+  --on-teal: #1f6b7d;
+  --tint-gray: rgba(120, 120, 128, 0.12);
+  --on-gray: rgba(60, 60, 67, 0.62);
+
+  /* ---- 字体 ---- */
+  /* UI 一律 SF / 系统无衬线；衬线只用于书稿正文，不用于界面标题。 */
+  --font-ui: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue",
+    "PingFang SC", "Noto Sans CJK SC", sans-serif;
+  --font-text: "New York", "Songti SC", "Noto Serif CJK SC", Georgia, serif;
+  --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+
+  /* ---- 字阶（11 起步，界面不再出现 9/10px） ---- */
+  --fs-caption2: 11px;
+  --fs-caption1: 12px;
+  --fs-footnote: 13px;
+  --fs-subhead: 14px;
+  --fs-body: 15px;
+  --fs-title3: 17px;
+  --fs-title2: 20px;
+  --fs-title1: 24px;
+  --fs-large: 30px;
+  --lh-tight: 1.25;
+  --lh-normal: 1.45;
+  --lh-relaxed: 1.7;
+  --fw-regular: 400;
+  --fw-medium: 500;
+  --fw-semibold: 600;
+
+  /* ---- 间距（4pt 栅格，只允许取这些值） ---- */
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-5: 20px;
+  --sp-6: 24px;
+  --sp-7: 32px;
+  --sp-8: 40px;
+  --sp-9: 48px;
+
+  /* ---- 圆角（只允许 4 档） ---- */
+  --r-control: 6px;
+  --r-card: 10px;
+  --r-sheet: 14px;
+  --r-pill: 999px;
+
+  /* ---- 层次（只允许 2 档阴影 + 发丝线） ---- */
+  --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.04);
+  --shadow-overlay: 0 10px 30px rgba(0, 0, 0, 0.14), 0 2px 8px rgba(0, 0, 0, 0.06);
+
+  /* ---- 材质（顶栏 / 侧栏 / 工具栏） ---- */
+  --material-bg: rgba(255, 255, 255, 0.72);
+  --material-bg-strong: rgba(255, 255, 255, 0.86);
+  --material-blur: saturate(180%) blur(20px);
+
+  /* ---- 动效 ---- */
+  --ease: cubic-bezier(0.25, 0.1, 0.25, 1);
+  --dur-fast: 0.14s;
+  --dur: 0.2s;
+  --dur-slow: 0.3s;
+
+  /* ---- 布局 ---- */
+  --topbar-h: 52px;
+  --toolbar-h: 52px;
+  --statusbar-h: 28px;
+  --gutter: 8px;
+  --min-app-width: 860px;   /* 与断点保持一致；窄于此由 Tauri 限制窗口 */
+
+  /* ---- 焦点环 ---- */
+  --focus-ring: 0 0 0 3px var(--accent-ring);
+  --focus-ring-inset: inset 0 0 0 2px var(--accent-ring);
+}
+
+/* -----------------------------------------------------------------------------
+ * 暗色令牌（预置，当前不启用；启用方式：<html data-theme="dark">）
+ * 目标：所有硬编码色值迁移完成后，只需切换此属性即可得到完整暗色模式。
+ * -------------------------------------------------------------------------- */
+@media (prefers-color-scheme: dark) {
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+
+    --accent: #0a84ff;
+    --accent-hover: #1f8fff;
+    --accent-press: #0a76e3;
+    --accent-tint: rgba(10, 132, 255, 0.18);
+    --accent-tint-strong: rgba(10, 132, 255, 0.26);
+    --accent-ring: rgba(10, 132, 255, 0.40);
+    --on-accent: #ffffff;
+
+    --label: rgba(255, 255, 255, 0.92);
+    --label-2: rgba(235, 235, 245, 0.60);
+    --label-3: rgba(235, 235, 245, 0.32);
+    --label-4: rgba(235, 235, 245, 0.16);
+
+    --bg: #000000;
+    --bg-elevated: #1c1c1e;
+    --bg-secondary: #1c1c1e;
+    --bg-tertiary: #2c2c2e;
+    --bg-sunken: #131315;
+    --fill-1: rgba(120, 120, 128, 0.36);
+    --fill-2: rgba(120, 120, 128, 0.32);
+    --fill-3: rgba(120, 120, 128, 0.24);
+    --separator: rgba(84, 84, 88, 0.60);
+    --separator-strong: rgba(84, 84, 88, 0.90);
+    --scrim: rgba(0, 0, 0, 0.55);
+
+    --tint-green: rgba(48, 209, 88, 0.20);
+    --on-green: #6ee78b;
+    --tint-orange: rgba(255, 159, 10, 0.20);
+    --on-orange: #ffb84d;
+    --tint-red: rgba(255, 69, 58, 0.20);
+    --on-red: #ff8078;
+    --tint-blue: rgba(10, 132, 255, 0.22);
+    --on-blue: #6cb6ff;
+    --tint-purple: rgba(191, 90, 242, 0.20);
+    --on-purple: #d2a0ff;
+    --tint-teal: rgba(64, 200, 224, 0.20);
+    --on-teal: #7fd8ea;
+    --tint-gray: rgba(120, 120, 128, 0.32);
+    --on-gray: rgba(235, 235, 245, 0.62);
+
+    --material-bg: rgba(28, 28, 30, 0.72);
+    --material-bg-strong: rgba(28, 28, 30, 0.86);
+    --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.5);
+    --shadow-overlay: 0 10px 30px rgba(0, 0, 0, 0.6), 0 2px 8px rgba(0, 0, 0, 0.4);
+  }
+}

@@ -6,6 +6,10 @@ export type Block = {
 };
 
 export type TocNode = { node_id: string; title: string; level: number; block_id: string; page_index: number; children: TocNode[] };
+/** 跨页续接（只读派生）：承载整段的 block → 它在下一页的续行区域。 */
+export type FlowRegion = { page_index: number; bbox: number[] };
+export type FlowLink = { next_region?: FlowRegion };
+export type FlowLinks = Record<string, FlowLink>;
 /** layout.json pdf_info 提供的页面几何；width/height 为 PDF 点，0 表示未取得。 */
 export type PageMeta = { page_index: number; width: number; height: number; rotation: number; source_file: string; source_page_index: number };
 export type DocumentGraph = {
@@ -14,6 +18,8 @@ export type DocumentGraph = {
   chapter_language_overrides: Record<string, string>;
   /** bbox 单位契约：mineru-1000 表示 0-1000 归一化坐标；none 表示没有可用坐标。 */
   bbox_space: string;
+  /** 跨页续接（只读派生）：承载整段的 block → 它在下一页的续行区域。 */
+  flow_links?: FlowLinks;
   schema_version?: string;
   updated_at?: string;
   budget_usd?: number;
@@ -77,6 +83,8 @@ export type ModelEntry = {
 /** v3：一个服务商（Base URL + 密钥）及其模型列表；模型嵌在服务商里。 */
 export type ModelService = {
   service_id: string; name: string; preset: string; base_url: string;
+  /** 是否已确认允许对该 http 地址明文发送 API Key（内网/自建服务）。 */
+  allow_plaintext_http?: boolean;
   models: ModelEntry[];
   configured: boolean;
 };
@@ -121,3 +129,27 @@ export type OcrJob = {
 export type TaskCounts = { running: number; queued: number; resumable: number; failed: number; total: number; completed?: number };
 export type TaskPage = { items: OcrJob[]; total: number; page: number; page_size: number; pages: number; counts: TaskCounts };
 export type ArchiveSettings = { retention_days: number | null; max_records: number };
+
+/* ----------------------------- 导出 ----------------------------- */
+export type ExportFormatId = "epub" | "docx" | "markdown" | "html";
+export type ExportModeId = "source" | "translation" | "bilingual";
+export type ExportFormat = { id: ExportFormatId; label: string; single_file: boolean };
+export type ExportMode = { id: ExportModeId; label: string };
+export type ExportTocNode = {
+  node_id: string; title: string; level: number; block_id: string; page_index: number;
+  block_count: number; translated_count: number; missing_count: number; children: ExportTocNode[];
+};
+export type ExportFile = { name: string; rel_path: string; bytes: number; single_file: boolean };
+export type ExportRecord = {
+  export_id: string; created_at: string; mode: string; locale: string; formats: string[];
+  path: string; files: ExportFile[]; bytes: number; warnings: string[];
+};
+export type ExportOptions = {
+  project_id: string; title: string; source_language: string; target_language: string;
+  locales: string[]; default_locale: string; formats: ExportFormat[]; modes: ExportMode[];
+  block_count: number; image_count: number; toc: ExportTocNode[]; recent: ExportRecord[];
+};
+export type ExportRequest = {
+  formats: ExportFormatId[]; mode: ExportModeId; locale: string; chapters: string[];
+  block_ids?: string[]; filename?: string; missing_policy?: "fallback_source";
+};

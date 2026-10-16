@@ -5,6 +5,124 @@
 > 条目为「最新在上」。2026-10-14 前的手工「第N轮」编号是遗留标记（历史上出现过重复，已用 `·` 后缀消歧），不再续编；新条目用 `## YYYY-MM-DD · 主题`，引用时以上文日期与主题为准。
 
 
+## 2026-10-17 · EPUB 导出排版重做（出版级 CSS + 对照导航）与封面/译文目录增强
+状态：已编码 / 自动测试通过（`tests/test_exporters.py` 29 passed，全量 608 passed）/ 冻结冒烟 15/15 / 冻结产物导出联调通过（含封面与双语/译文导航）/ **已重新打包安装到 `launcher/Literature.app`**（sidecar sha256 `4441cacd…`，内嵌前端未变）；**未由用户在 Apple Books 真机验收、未提交**。回滚快照：`launcher/.rollback-Literature-20261017024354.app`（含上一版 sidecar `c4f94868…`）。
+
+- **需求**：用户要求参照 Apple Books 商店书与数字出版最佳实践优化 EPUB 排版：两端对齐、标题/正文排布、对照版改为「一段原文一段译文」（不再用左侧竖线）、导航目录也做成原文译文对照；随后授权打包安装。
+- **背景**：导出模块（`literature/exporters.py` 等五文件）为未提交的重新引入版本（capability `export_v1`），此前 EPUB 直接复用浏览器阅读页的 `BASE_CSS`（绿竖线 `.translation`、奶白背景、max-width 限宽），在 Apple Books 里既拖累夜间模式也不符合出版排版。
+- **实现（`literature/exporters.py`）**：
+  - 新增 `EPUB_CSS` 专供 EPUB（`_write_epub` 写入 `styles/book.css`）：无背景/前景色（不干扰阅读器主题）、全相对单位；正文 serif 字体栈（Georgia/Palatino/Times New Roman + Songti SC/Noto Serif CJK SC），标题 sans 栈（Avenir Next/PingFang SC 等）；`text-align:justify` + `hyphens:auto`（配合 `widows/orphans:2`）；段落首行缩进制（`p` 1.5em，`p.translation` 2em，标题后首段不缩进）；章首标题（每章首个标题块）放大、`.block-title .translation` 弱化为常规字重副题；脚注/图题/表格/代码/列表/目录页各自成样式；`page-break-after:avoid`（标题）与 `break-inside:avoid`（表格、pre）。
+  - 对照模式去竖线：EPUB 内译文与原文同为普通段落顺排，仅靠缩进/语言自然区分；`BASE_CSS`（HTML 导出用）同步去掉 `border-left`，改为弱化墨色。
+  - 原文逐段标 `xml:lang`/`lang`（`_block_html` 新增 `source_language` 参数，仅 bilingual 且与根 lang 不同时输出），让西文在两端对齐下正确连字。
+  - 新增 `_section_nav_title`：EPUB `nav.xhtml` 条目——bilingual 模式「原文标题 · 译文标题」（取章首个 title block 的译文，译文缺失或与原文相同则回退原文标题；层级嵌套不变）；translation 模式用**纯译文标题**（缺译回退原文）。
+- **封面（用户第二轮需求）**：新增 `_cover_jpeg`——源目录有 `origin.pdf` 时用 PyMuPDF 渲染首页为 JPEG（目标宽 1600px、超宽降至 2400px 内、质量 88），写入 `EPUB/cover.jpg`（ZIP_STORED）+ `EPUB/cover.xhtml` 封面页，manifest 标 `properties="cover-image"` + 兼容性 `<meta name="cover">`，spine 首位插入封面页；非 PDF 源或渲染失败静默跳过（封面是增强项）。
+- **段间距（用户第二轮需求）**：EPUB 段落 `p{margin:0 0 .5em}`，脚注同步调整；对照节奏（原文/译文交替）更易读。
+- **验证**：`pytest tests/test_exporters.py` 29 passed（新增：双语/译文导航断言、源 PDF 出封面断言、无 PDF 不出封面断言；全量 608 passed）；临时项目 + **安装包内 sidecar** 联调：bilingual 导出 cover.jpg 在包内且 spine 首位、nav「原文 · 译文」，translation 导出 nav 为纯译文（第一章/第一节/第二章），`validate_epub` 全部通过。
+- **打包安装（第二轮，2026-10-17）**：重建 sidecar + Tauri bundle，adhoc 签名校验通过；冻结冒烟 15/15；旧包快照 `launcher/.rollback-Literature-20261017024354.app`。
+- **边界**：DOCX/Markdown 的对照样式（斜体/blockquote）未动；未在 Apple Books/其他阅读器真机验收字体回退与夜间模式表现；导出模块仍未提交 Git；本轮未做旧包快照。
+
+
+## 2026-10-17 · 应用图标换成定稿 monogram（L + 书 + 两点）
+状态：已编码 / 图标脚本重生成 / **已打包并安装到 `launcher/Literature.app`**（安装包 `Contents/Resources/icon.icns` 与新图标 sha256 一致；前端 `index-__nO-9dI.js`，sidecar 未变 `8e505fd1c6e616dd8a93`）；**未由用户真机验收、未提交**。
+
+- **需求**：用户提供定稿图标位图（粗体「L」+ 书形底 + 两个圆点），要求把应用图标换成它。
+- **差异定位**：仓库 `scripts/build_icons.py` 里已有一个矢量 `monogram`，但与用户位图不一致——矢量版书口是直边，定稿位图的书口是**波浪形**（书页翻开的观感）。因用户要求“换成这个”，改为**直接用定稿位图**保证逐像素一致。
+- **实现**：定稿位图存为 `assets/brand/monogram.png`（1254×1254）；`build_icons.py` 新增 `mark` 渲染器：把位图亮度取反得到 alpha 蒙版（白底→透明）、裁到墨迹、居中放到 macOS squircle 主体上（`MARK_TARGET_H=650`，即约 **0.80×主体高**，对齐参考图标的 glyph 占比）。另加 `svg_mark`（内嵌已蒙版 PNG）供 `icon.svg`/favicon 使用。`main()` 改为 `emit("mark", src-tauri/icons, with_favicon=True, with_lockup=True)`，`cards` 与矢量 `monogram` 作为备选分别输出到 `assets/brand/cards/`、`assets/brand/monogram/`；同步更新 `assets/brand/README.md`。
+- **产物**：重生成全部尺寸 + `icon.icns`（372532 B）+ `icon.ico` + `frontend/public/favicon.*`；`icon.png` 与 `icon.icns` 提取图均与定稿位图一致。
+- **尺寸回调（用户两次反馈图案偏小）**：真因是 `_mark_mask()` 的「裁到墨迹」没生效——源图近白底经 `255-luminance` 后是 1 而非 0，`getbbox()` 返回整张 1254 画布，于是 `MARK_TARGET_H` 实际相对整张画布、不是墨迹，glyph 只占主体 ~0.46。改为先阈值化再取 bbox；`MARK_TARGET_H` 定为 **640 = 0.78×主体高（宽 0.66）**，与用户参考（Notion / “U” 图标 glyph 约占 tile 0.65–0.80）一致（`icon.png` 实测 tile 815、glyph 536×637）。
+- **打包安装**：安装包 `Contents/Resources/icon.icns` sha256 `1c39aa2a…` 与仓库 `src-tauri/icons/icon.icns` 完全一致；adhoc 签名校验通过。安装前 `osascript` 退出客户端，旧包备份 `launcher/.rollback-Literature-20261017015852.app`；安装后 `lsregister -f` + `killall Dock` 刷新图标缓存（之前 Dock 一直显示旧的小图）。
+- **边界**：macOS 可能缓存 Dock/Finder 图标，重开或稍后会刷新；未做原生窗口/真机回归。换主图今后只需替 `assets/brand/monogram.png` 再跑 `python3 scripts/build_icons.py`。
+
+状态：已编码 / 前端 tsc + Vite 生产构建通过 / 已跑通隔离浏览器验收（新增并扩到 11 项 PASS、0 脚本错误，截图 `tmp/toc-overlay-wide.png`、`tmp/toc-overlay.png`）/ **已打包并安装到 `launcher/Literature.app`**（内嵌前端 `index-__nO-9dI.js` / `index-Cz8XKgc8.css`；sidecar 未变 `8e505fd1c6e616dd8a93`）；**未由用户真机验收、未提交**。
+
+- **用户反馈**：三栏顶部没有对齐，字号/元素高度参差不齐；中栏拉窄后元素会换行，要求始终单行、放不下时左右滑动。
+- **对齐/字号（review.css）**：`.review-outline .panel-title` 改为 `min-height: var(--toolbar-h)`、`padding: 0 var(--sp-4)`，与 `.viewer-toolbar`、`.result-tabs` 统一为 52px 高、底边同一条线；右侧页签从 `align-items: end` 改为 `stretch`，按钮改 `inline-flex` 拉伸满栏，下划线落在栏底；三栏一级文字统一 `--fs-subhead`（14px，页签原为 12px）。
+- **单行不换行（review.css + PdfPane.tsx）**：`.viewer-toolbar` 改 `flex-wrap: nowrap`、`padding: 0 var(--sp-3)`；`.review-viewer-controls` 吃满中间剩余宽度并 `overflow-x: auto; overscroll-behavior-x: contain`，子控件 `flex: none`；图例菜单从滚动区里移出（否则浮层会被 `overflow` 裁剪）钉在行尾。放不下的页序/缩放/结构框等控件改为横向滚动。
+- **证据**：`tests/manual/toc_overlay_check.cjs` 新增断言：三栏头部高度全为 52px 且相等、三栏标题字号全为 14px、拖窄中栏后工具栏高度 ≤56px（未换行且大概控制区 `scrollWidth > clientWidth`（可横滑）。共 11 项 PASS；跨页续接 23 项回归仍全 PASS。
+- **打包安装**：内嵌前端 `index-__nO-9dI.js` / `index-Cz8XKgc8.css` 与 `frontend/dist` 同名；sidecar sha `315945c9…` 与 manifest 一致；adhoc 签名校验通过。安装前 `osascript` 退出客户端，旧包备份 `launcher/.rollback-Literature-20261017014307.app`。未启动客户端。
+
+状态：已编码 / 前端 tsc + Vite 生产构建通过 / 已新增并跑通隔离浏览器验收（7 项 PASS、0 脚本错误，截图 `tmp/toc-overlay.png`）/ **已打包并安装到 `launcher/Literature.app`**（内嵌前端 `index--03VxfS1.js` / `index-CGO9UY-w.css`；sidecar 未变 `8e505fd1c6e616dd8a93`）；**未由用户真机验收、未提交**。
+
+- **用户反馈**：目录页的框体互相堆叠/遮挡（拉窄分栏后更明显）；并要求三栏宽度变化时元素不要重叠/被遮挡，参照 MinerU；同时移除右侧「2635 个内容块 · 点击后调整层级」提示条。
+- **根因（读真实数据 + 实看运行中的客户端定位）**：库内 *Making Transcendents* 目录页（page_index 8）的 14 个块 bbox 经校验**两两不交**（最短行高仅 16–22/1000），但渲染出来却互相压叠。真因是 `frontend/src/shell.css` 的全局 `button { min-height: 32px }`——`.bbox` 是 `<button>`，行高不足 32px 时被强行撑到 32px；分栏拉窄后页面缩放变小、更多矮行低于 32px，堆叠就更明显。与 MinerU 的对照：MinerU 同样逐块描边但不会被撑高，因为它的框不继承按钮最小高度。
+- **修复 1（堆叠）**：`frontend/src/review/review.css` 的 `.pdf-overlay .bbox` 显式 `min-height: 0; padding: 0; transform: none`（覆盖全局 button 规则与 `:active` 缩放）。目录/脚注这类矮行恢复真实 bbox 尺寸。
+- **修复 2（遮挡）**：`ReviewWorkspace` 的 `SplitPane` 原本 `minPx={[0,0,0]}`，三栏可被拖到 0 而相互遮挡；改为 `minPx={[200,360,280]}`（窗口 `minWidth=1024`，三栏最小和 840 + 内边距/分隔条 32 < 992，不会溢出）。
+- **修复 3（提示条）**：`ResultPane` 删除了常驻的「N 个内容块 · 点击后调整层级」行；`.result-toolbar` 现在仅在有批量选择时才渲染（“已选 N / 调整为… / 清空”）。
+- **参照 MinerU 的局限**：本轮尝试用 desktop 驱动拉拽 MinerU 分栏，但它已重启且主窗口未在前台（只有菜单栏/图标窗），未能实时拖拽；已依赖上轮对该应用的实看截图（均匀描边框 + 虚线折线）作为风格基准。
+- **证据**：新增 `tests/manual/toc_overlay_browser_check.py` + `toc_overlay_check.cjs`（7 项）：目录 14 个 bbox 全渲染、最矮 bbox 未被撑到 32px、相邻框不重叠、已移除提示条、左栏/预览栏拖到最左仍保留最小宽度、0 控制台错误；`structure_flow_browser_check.py` 回归仍 23 项全 PASS。全量 tsc + Vite 通过；后端未改。
+- **边界**：预览栏工具栏在极窄宽度下仍会换行成两行（不遮挡内容，只是变高）；未做原生窗口/真机回归。待用户验收。
+- **打包安装**：内嵌前端 `index--03VxfS1.js` / `index-CGO9UY-w.css` 与 `frontend/dist` 同名；sidecar sha `315945c9…` 与 manifest 一致；adhoc 签名校验通过。安装前 `osascript` 优雅退出运行中的客户端，旧包备份 `launcher/.rollback-Literature-20261017013119.app`。未启动客户端。
+
+状态：已编码 / 前端 tsc + Vite 生产构建通过 / 已在隔离真实浏览器验收（23 项 PASS、0 脚本错误，截图 `tmp/structure-flow-review.png`）/ **已打包并安装到 `launcher/Literature.app`**（内嵌前端 `index-CMkxwcwa.js` / `index-CadXZUNp.css`；sidecar 未变 `8e505fd1c6e616dd8a93`）；**未由用户真机验收、未提交**。
+
+- **用户反馈**：虚线连线穿过了正文；「续上页」的框用了与普通块不同的颜色——与 MinerU 不一致；要求我实际打开 MinerU 比对后做一致。
+- **用本机桌面驱动实看 MinerU**：经 `cindy_computer` 捕获运行中的 MinerU 窗口（正在看 The Eminent Monk，p14→p15），放大到页缝处逐像素比对。MinerU 的实际画法：**两段都是同样的空白框**（细实线描边、无填充、不做额外标记），**连线是一条带两端圆点的虚线折线**——从源段**左下角**出发向下、在页缝空白里横向拉过去、再向下落到续页**右上角**；全程走在空白处，不压正文；框上没有任何文字角标。
+- **前端改动**：`PdfPageCanvas` 不再给源块加虚线下边框、也不再给续页区域加强调色/虚线/角标，两者都按普通正文块渲染（验收用 computed style 断言两者边框色/样式/背景色一致）；`PdfPane` 的连线从“过正文的贝塞尔”改为 MinerU 式折线 `M x1 y1 V gapY H x2 V y2`，`gapY` 取源页底边与续页顶边的中点（即页缝），两端各一个圆点；清理了 `.bbox-continued/.bbox-continues/.bbox-flow-region/.bbox-label.is-flow` 死样式。
+- **工具痕迹**：本次为比对样式调用了本机 computer-use（`get_window_state` 截取 MinerU 窗口，非操作），截图存 `tmp/mineru-full.png`、裁切 `tmp/mineru-merge-zoom.png`。
+- **证据**：`structure_flow_check.cjs` 扩充到 23 项全 PASS、0 控制台错误（新增：续页区域与普通块同色、源块无特殊类、框上无「续」字角标、连线为 `MVHV` 折线且横段在两页之间）；`tsc --noEmit` 与 `vite build` 通过。后端未改，全量 pytest 仍为 605 passed。
+- **打包安装**：内嵌前端 `index-CMkxwcwa.js` / `index-CadXZUNp.css` 与 `frontend/dist` 同名；sidecar sha `315945c9…` 与 manifest 一致；adhoc 签名校验通过。安装前用 `osascript` 优雅退出正在运行的客户端（用户上轮已授权），旧包备份 `launcher/.rollback-Literature-20261017011701.app`。未启动客户端。
+- **保留**：右侧「结构编辑」卡片仍显示「续下页」小标签（属结果列表标注，不是预览层的框配色）；若也要对齐 MinerU 可后续移除。
+
+状态：已编码 / 已自动测试（全量 pytest 605 passed）/ 前端 tsc + Vite 生产构建通过 / 已在隔离真实浏览器验收（20 项 PASS、0 脚本错误，截图 `tmp/structure-flow-review.png`、`tmp/structure-flow-review-legend.png`）/ **已打包并安装到 `launcher/Literature.app`**（sidecar `8e505fd1c6e616dd8a93`，内嵌前端 `index-D10Ihbkh.js` / `index-Nvu6t-ts.css`）；**未由用户真机验收、未提交**。
+
+- **用户反馈（上一版判定方向错误）**：左边选中的是被跨页分开的段落（前页部分），右侧解析结果证明 MinerU 其实已把跨页两部分**合并成一个块**，缺的只是下页续行区域的框和标识续接的虚线；要求按 MinerU 的真实做法重做。
+- **MinerU 的真实做法（读原始输出确认）**：`layout.json` 在续页顶部留一个 `lines_deleted: true` 的空块（bbox 即续行区域），续行文字被并回上一页承载整段的块（其 `lines` 里保留该续行、bbox 仍是续页坐标）；`content_list_v2.json` 里对应一个**空 `paragraph` 块**，其 bbox 就是续行区域。逐本统计：On Being Authentic 113 页 61 个 `lines_deleted` 与 61 个空 paragraph **完全相等**；8 本库内书空块数与 `lines_deleted` 数逐一相等（176/181/61/173/224/137/36/134）。规范化会丢弃空块，所以旧文档里只剩上一页的框。
+- **后端重写** `literature/flow.py`：不再用几何+文本启发式，改读回不可变的 `content_list_v2`，取 MinerU 留下的空 `paragraph` 块作为续页区域，向前找最近的非空正文块（跳过页眉/页码与连续空块），用 `(page_index, bbox)` 定位承载整段的 block，产出 `{block_id: {"next_region": {"page_index", "bbox"}}}`。只读派生、不写回 `document.json`；因数据来自 `ocr/raw`，**已导入项目无需重新解析**即可生效。三处 API（`/projects/{id}/document`、`PATCH /projects/{id}`、`mineru/import`）改传项目根目录；content_list_v2 按 (路径,大小,mtime) LRU 缓存。库内回归：176/178/61/168/221/134/36/131 条续接；On Being Authentic `blk-00000116`（p28，含整段 Merge 文本）→ `next_region {page_index:28, bbox:[74,83,918,118]}`，正好是用户指出的 p29 顶部续行两行。
+- **前端**：`PdfPageCanvas` 对承载块画虚线底边 + 「↕ 续下页」，对 `next_region` 在续页补出虚线框 + 「↕ 续上页」（可点选回源块）；`PdfPane` 在 `.pdf-stack` 叠 SVG，从承载块底边连到续页区域顶边（虚线 + 两端圆点）；`ResultPane` 卡片标记改为按 `next_region` 显示「续下页」。选中源块时续页区域一并高亮。
+- **视觉（用户反馈“新增 banner 突兀、头重脚轻”）**：把常驻工具栏的七项类型图例改为「图例」按钮 + 按需浮层（2 列，点外部/Esc 关闭），工具栏恢复单行；修掉浮层被 `.pdf-scroll` 盖住的问题（`.viewer-toolbar` 加 `position:relative; z-index:30`）。
+- **证据**：`tests/test_flow_links.py` 重写为 6 项（区域挂载/正常段落不误判/无 project 或无 bbox 契约/缺文件/非 content_list_v2/找不到承载块时不连）；`tests/test_api.py` 端到端断言改为 `next_region`；`structure_flow_check.cjs` 扩到 20 项全 PASS、0 控制台错误。全量 pytest 605 passed；`tsc --noEmit` 与 `vite build` 通过。
+- **边界**：只对 MinerU 留下空占位块的情形画续接（宁可少连）；legacy `content_list`、纯 Markdown 导入无此标记，不画。少数 `lines_deleted` 找不到对应承载块时跳过、不误连。未做原生窗口回归。
+- **打包安装**：sidecar `runtime_revision 8e505fd1c6e616dd8a93`、sha256 `315945c9272e977fb703e36dcb21a94ebf230c1396fd137d0970b8212e391b68`、47884688 字节，与 `src-tauri/binaries/manifest.json` 及 `.app` 内嵌副本一致；压缩内嵌前端 `index-D10Ihbkh.js` / `index-Nvu6t-ts.css` 与 `frontend/dist` 同名；adhoc `codesign --verify --deep --strict` 通过。用户完全退出后安装；旧包备份 `launcher/.rollback-Literature-20261017010553.app`。未启动客户端。
+
+## 2026-10-17 · 结构校对跨页续接（虚线框+连线）与对照观看优化
+状态：已编码 / 已自动测试（全量 pytest 607 passed）/ 前端 tsc + Vite 生产构建通过 / 已在隔离真实浏览器验收（18 项 PASS、0 脚本错误、截图 `tmp/structure-flow-review.png`）/ **已打包并安装到 `launcher/Literature.app`**（sidecar `8afc64384bb8e7a0f2ec`，内嵌前端 `index-DSJ-n58Z.js`）；**未由用户真机启动验收、未提交**。
+
+> 后续修正见上一条：本节基于“MinerU `merge_prev` 恒为 false”的错误前提提出的几何+文本启发式已被 MinerU 原生空占位块判定取代。
+
+- **问题定位（用户反映跨页断行第二页段落没有文本框）**：核对代码后确认不是“框选规则筛块”——`frontend/src/review/PdfPageCanvas.tsx` 对每页 `blocks.filter(hasBBox)` 全量画框，分组按 `block.page_index`，有合法 bbox 的块一定会画框。真正原因：(1) 规范化只读 `content_list_v2.json`，MinerU 的 `layout.json` `para_blocks[].merge_prev/merge_next` 从未被读取（本机 19 份 raw 里也全为 `false`），规范文档里因此不存在跨页续接关系；(2) 空文本段落被 `_normalized_block` 丢弃（`.e2e/library/E2E Rhetoric` 原始 118 个空文本 paragraph，`page_index ∈ {12,15,22,33,53,149,152,177,186}` 整页无正文块），这些区域必然无框。MinerU 客户端能画虚线，是因为它自持 merge 关系并生成 `mergeConnections`（见 `/Applications/MinerU.app` asar 内的实现说明：虚线折线 + 起止圆点 + 「合并」标签）。
+- **后端新增** `literature/flow.py`：`detect_cross_page_flow(document)` 用“相邻页 + 页边几何（`bbox[3]≥760`、`bbox[1]≤200`）+ 文本信号（无句末标点、下一页首字符小写/CJK、或上一页以 `-` 断词；两侧最小长度 60；索引/参考书目页按整页数字密度排除）”恢复双向链接 `{block_id: {prev?, next?}}`。只读派生：不写回 `document.json`、不改阅读顺序、只在 `mineru-1000` 契约下生效。经三处 API 暴露：`/projects/{id}/document`、`PATCH /projects/{id}`、`POST /projects/{id}/mineru/import`；`/health` 增加 `structure_flow_v1`（信息性，前端未列为必需，旧后端缺字段时退化为不画虚线）。
+- **前端对照观看**：`PdfPageCanvas` 续接块改虚线框 + 「↕ 续上页/续下页」角标与类型角标；`PdfPane` 在 `.pdf-stack` 上叠 SVG 画页间虚线折线 + 起止圆点，新增上/下页按钮、缩放百分比读数、七项类型图例；`ResultPane` 的 Markdown 页签从整段 `<pre>` 改为按块渲染，点击/选中与 PDF 双向同步并自动滚入视野，块卡片显示跨页标记。
+- **证据**：`tests/test_flow_links.py` 8 项（续接/句末/页边/断词/非相邻/非 PDF/索引页/类型边界）；`tests/test_api.py` 新增跨页文档 `flow_links` 端到端断言；`tests/manual/structure_flow_browser_check.py` + `structure_flow_check.cjs` 18 项 PASS；全量 pytest 607 passed。库内 8 本书回归：正文续接命中合理（如 Writing and Authority p5→p6），索引页误连已被数字密度排除。
+- **边界**：判定是保守启发式（宁可少连不错连），尚未在用户指定书目上人工核对召回/误连；“MinerU 把跨页段落合并成单块、第二页根本没有 block”的情形本轮仍无法画框。
+- **打包安装**：按 `docs/PACKAGING.md` 的环境回退流程（机器无系统 `node`，借用 ms-playwright-go 的 node 副本并 adhoc 重签、塞 `NAPI_RS_NATIVE_LIBRARY_PATH`、用 `scripts/tauri-run.cjs`）。安装前校验 `.app/Contents/MacOS/literature-sidecar` 的 sha256/大小与 `src-tauri/binaries/manifest.json` 一致，且 Tauri 压缩内嵌前端 `index-DSJ-n58Z.js` 与 `frontend/dist` 同名；`codesign --verify --deep --strict` 通过。用户完全退出客户端后安装；旧包保留在 `launcher/.rollback-Literature-BSNt2f9U-20261017.app`。未启动客户端。
+
+## 2026-10-16 · 修复任务选择列表项目名不显示（grid 限高压扁条目）
+状态：已编码 / 前端 tsc 与 Vite 生产构建通过 / 已在真实数据 + headless Chrome 复现并验证修复 / **已打包并安装**；未做原生窗口回归、未提交。
+
+- 现象：未打开任务时进入「结构校对 / 对照翻译」的空白页，TaskPicker 列出已在库文档，但每行标题/文件名不可见（用户截图）。
+- 复现与定位：用当前源码 + 真实运行中的 sidecar（`/projects` 返回 8 条 `title` 正常）在 headless Chrome 打开 `#/review`，DOM 中 `<strong>` 文案完整；CDP 量到 `.task-picker-item strong` 计算高度 **1px**、按钮内 `grid-template-rows: 1px 1px`。根因是 `.task-picker-list` 用 `display:grid` + `max-height`（240px）：条目超出限高时 grid 轨道被压到按钮的 `min-height: 32px`，而 `.task-picker-item` 有 12px 内边距，内容区只剩 ~6px，两行文字各被挤成 1px，再被 `overflow:hidden` 裁剪 → 不可见。
+- 修复：`.task-picker-list` 改为 `display:flex; flex-direction:column`，条目 `flex:none`，滚动交给 `overflow-y:auto`；reading.css（`.task-picker-v3` 作用域）与 app-settings.css（基类）两处同步。
+- 验证：静态用例（内置 dist CSS + 8 条长标题）与真实 sidecar 数据的 `#/review` 截图均恢复显示标题与文件名，超出时列表内滚动；`tsc --noEmit` 通过；`vite build` 产出 `index-BSNt2f9U.js` 854.63 kB / `index-D2bDGs6A.css` 174.82 kB。
+- 边界：未做原生窗口回归；工作区含他人在途改动，不提交。
+- **交付（用户授权「打包安装」）**：本轮把 2026-10-15 的 F1–F7 与本条修复一起打包安装。sidecar revision `9934ab4b55881b2e9148`、sha256 `badd6de516dc96b072cc7af9fc6c89ba489fb90146313266858d8611744856ff`、47879920 字节；内嵌前端 `index-BSNt2f9U.js` / `index-D2bDGs6A.css`。冻结冒烟 **15/15 PASS**；bundle 与 `frontend/dist`、`src-tauri/binaries/manifest.json` 逐项一致；adhoc codesign 校验通过。安装前把旧包完整备份到 `launcher/.rollback-Literature-B5rqP2lv-20261016.app`（签名校验通过），再安装到 `launcher/Literature.app`。未启动客户端，由用户验收。
+
+## 2026-10-15 · 资源页与对照翻译交互修复（设置空白页 / 队列对齐 / 翻译单键）
+状态：已编码 / 前端 tsc 与 Vite 生产构建通过；未打包安装、未真机验收、未提交。
+
+- 设置空白页（F1）：未打开任务时 `document` 为 null，`Settings`「通用」段用 `needsProject(<>{document!…}</>)` 提前构造 JSX，读取 `document!` 抛错使整棵 React 树卸载成白屏。改为传入惰性 render 函数，仅在 `projectId && document` 时求值；未打开任务时显示「先在文件资源打开任务」提示。
+- 导入页队列对齐与滚动（F2）：`.intake-card` 由 `align-items:start` 改为 `stretch`；左卡片改 flex 纵向布局；`.intake-queue` 设 `flex:1 1 auto; min-height:0; max-height:min(46vh,480px); overflow-y:auto`。左「待处理文件」卡片底边与右「解析设置」对齐，列表列满时在卡片内滚动，不再溢出下边界。
+- 文件资源（F3/F4）：展开后「翻译」行移除「导出…」按钮（导出仍在卡片、••• 菜单与详情页脚）；校对状态不再显示「部分校对」——`review.state` 为 `done` 或 `partial` 均显示「已校对」（tone=done），「待校对」筛选与徽标同步只统计 `todo`/`confirm`。
+- 模块更名（F5）：「阅读与翻译」统一改为「对照翻译」（顶栏标签、资源页按钮与提示、导出对话框、占位提示与注释）。
+- 目录进度环（F6）：`.rdg-root .miniring` 由 32px（`--sp-7`）增到 40px（`--sp-8`），内圈文字加 `line-height:1` / `letter-spacing:-0.02em` / `nowrap`，`100%` 不再溢出外圈。
+- 翻译单键（F7）：对照翻译页脚与侧栏「任务」面板的「开始 / 暂停 / 恢复」三个独立按钮合并为一个状态按钮——运行中=「⏸ 暂停」，暂停/预算暂停=「▶ 继续翻译」，失败/部分失败=「▶ 重试失败段落」，排队中=禁用「排队中…」，否则=「开始翻译…」（打开范围弹窗）。
+- 验证：`frontend` 下以 `.tools/node/bin/node` 运行 `tsc --noEmit` 通过；`vite build` 通过（`index-B0LhY4iM.js` 854.63 kB / `index-DFhuQFvN.css` 174.72 kB，既有单 chunk 提示仍在）。本轮仅前端改动，未跑后端 pytest。
+- 边界：工作区含他人在途改动；未打包 sidecar、未安装客户端、未做浏览器/原生交互回归，F1–F7 均待用户真机验收。
+
+## 2026-10-15 · 模型服务支持内网明文 HTTP（逐服务显式确认）
+状态：已编码 / 已全量自动测试 / 前端 tsc 与 Vite 生产构建通过 / 已打包安装 / 已对内网 http 端点做无凭据联网验证；未用真实密钥做计费调用、未提交。
+
+- 用户诉求：自己的 MaaS 是内网地址 `http://maas.home.hgh.cn.akafeng.me/v1`（解析到 192.168.21.3，无 https），被 2026-10-15 加固轮加入的「明文 HTTP 不发密钥」拦截，要求项目支持 http 远程服务地址。
+- 方案（安全默认不变 + 逐服务显式确认）：`ProviderConfig`/`ModelProvider`/`ModelServiceInput`/`ModelProbeInput`/`ProviderInput` 新增 `allow_plaintext_http`（默认 `False`）；`plaintext_http_blocked(base_url, allow_plaintext=...)` 与 `assert_key_transport_safe(..., allow_plaintext=...)` 只在显式确认时放行。公网 http 地址默认仍被拦截，loopback 行为不变。
+- 留痕：provider 放行后每个实例只打一条 warning（`_plaintext_warned`），避免整本书翻译时刷屏，但不静默。后端错误文案补上可行动指引（「设置 → 模型服务」勾选）。
+- 传递链：`ModelEntry.config(allow_plaintext_http=...)` ← `ModelServiceStore.config_for` ← 服务配置；`list_remote_models(..., allow_plaintext_http=...)` ← `probe_models`（带 service_id 时用服务上保存的值，新建服务用表单提交的值）。
+- 前端：「设置 → 模型服务」在基础 URL 为明文 http 且非 loopback 时就地显示提醒与「允许明文 HTTP」勾选；`normalizeProviderError` 把拦截错误映射成可行动提示，不再落进「端点无法连接」；`addSelected` 保存模型列表时保留表单里未保存的名称/类型/地址/开关，不因勾选模型被回退。
+- 能力标记新增 `model_services_v4`（后端 `/health` 与前端 `requiredCapabilities` 同步）。
+- 验证：`.venv/bin/python -m pytest -q -p no:cacheprovider -o addopts=` **598 passed、0 failed、6 warnings，22.78s**（含本轮新增：明文放行/默认拦截、旧配置缺字段按 False 读、服务级开关传入 `list_remote_models`、API 往返、MockTransport 下 provider 仅在确认后完成请求）。前端 `tsc --noEmit` 通过；`vite build` 产出 `index-Ccc9GQdz.js` 854.64 kB / `index-CiVE1Lte.css` 96.27 kB（既有单 chunk 提示仍在）。前端 `isPlaintextRemote` 的 loopback 判定已与后端 `_is_loopback_host` 逐例对齐（127.0.0.0/8、`::1`、`localhost` 不拦，`127.attacker.example`、`0.0.0.0` 拦）。
+- 边界：未在真实内网 MaaS 上做带真实密钥的模型调用（只验证了通道与拦截边界，见下）；未提交 Git（工作区含他人在途改动）。
+- **交付（用户授权重打包并安装）**：sidecar revision `9934ab4b55881b2e9148`、sha256 `1608dda93ba2af78dc8c6820ed4eb5eb12d63d4ad2b282413126dc7ce91ed26d`、47878896 字节；内嵌前端 `index-Ccc9GQdz.js` / `index-CiVE1Lte.css`。冻结冒烟 15/15 PASS，adhoc codesign 校验通过，安装到 `launcher/Literature.app`（安装前完整备份旧包 `launcher/.rollback-Literature-0207bf2e.app`），未启动客户端。本轮工作区含其它未提交改动（export 相关文件等），已随包一并构建。
+- **联网验证（不使用真实凭据）**：以占位密钥对用户的内网端点 `http://maas.home.hgh.cn.akafeng.me/v1` 调用 `list_remote_models`——默认在发请求前拦截；显式放行后请求真实到达服务，被服务端以 `Invalid token` 拒绝，证明该地址的明文通道可用。另已把本机 `~/Library/Application Support/Literature/model-services.json` 中 `yellowbee` 服务置为 `allow_plaintext_http: true`（备份 `.bak-before-plaintext-optin`），默认无需用户再手动勾选。
+- 未验收：真实密钥下的模型对话/翻译/结构任务未跑（避免计费与代操作）；本轮不代表该特性在真实任务链路上已验收。
+- 边界：不提交 Git（工作区含他人在途改动）；未做浏览器与原生窗口交互回归。
 
 ## 2026-10-15 · 安全加固与前端优化客户端交付
 状态：已自动测试 / 已前端生产构建 / 已打包安装；未真实服务或原生交互验收。
