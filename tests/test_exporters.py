@@ -25,6 +25,7 @@ from literature.exporters import (
     split_sections,
     validate_epub,
 )
+from literature.footnote_refs import build_plan
 from literature.models import Block, Cell, Document, TocNode, TranslationEntry, TranslationLayer
 from literature.storage import ProjectStore
 
@@ -570,6 +571,163 @@ class ExportManageTests(unittest.TestCase):
             json={"display_name": "   "},
         )
         self.assertEqual(response.status_code, 400, response.text)
+
+
+class FootnoteExportTests(unittest.TestCase):
+    """页下注 → 真脚注：EPUB noteref/aside 与 DOCX word/footnotes.xml。
+
+    匹配规则：正文 ``^{N}`` 上标标记 ↔ 注文 ``^{N} …`` / ``N. …``；
+    同号重复引用同脚注；无编号或无对应标记的注文保持原样渲染。
+    """
+
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.root = Path(self.temporary.name)
+        source = self.root / "source.html"
+        source.write_text("<h1>Book</h1>", encoding="utf-8")
+        self.store = ProjectStore(self.root / "library")
+        created = self.store.create_project(source, title="Book")
+        self.project_id = created["project_id"]
+        self.project_dir = Path(created["path"])
+        blocks = [
+            Block("ft1", "title", 0, 0, source_text="Chapter One", level=1),
+            Block("fp1", "paragraph", 1, 0, source_text="Body one^{1} continues^{2}."),
+            Block("fp2", "paragraph", 2, 0, source_text="Body two^{1} again."),
+            Block("fn1", "footnote", 3, 0, source_text="1. First note."),
+            Block("fn2", "footnote", 4, 0, source_text="^{2} Second note."),
+            Block("fn3", "footnote", 5, 0, source_text="Running head without number."),
+            Block("ft2", "title", 6, 0, source_text="Chapter Two", level=1),
+            Block("fp3", "paragraph", 7, 0, source_text="Second chapter^{9} end."),
+            Block("fp4", "paragraph", 8, 0, source_text="Stray^{7} marker without note."),
+            Block("fn9", "footnote", 9, 0, source_text="^{9} Ninth note."),
+            Block("fn8", "footnote", 10, 0, source_text="8. Never referenced."),
+        ]
+        self.document = Document(
+            project_id=self.project_id,
+            title="Book",
+            source_language="en",
+            target_language="zh-CN",
+            blocks=blocks,
+            toc=[TocNode("n1", "Chapter One", 1, "ft1", 0, []), TocNode("n2", "Chapter Two", 1, "ft2", 0, [])],
+        )
+        self.store.save_document(self.document)
+        self.store.save_translation(TranslationLayer(
+            project_id=self.project_id,
+            locale="zh-CN",
+            entries={
+                "fp1": TranslationEntry("fp1", text="正文一^{1}继续^{2}。"),
+                "fp2": TranslationEntry("fp2", text="正文二^{1}。"),
+                "fp3": TranslationEntry("fp3", text="第二章^{9}结束。"),
+                "fn1": TranslationEntry("fn1", text="第一条注。"),
+                "fn2": TranslationEntry("fn2", text="^{2} 第二条注。"),
+                "fn9": TranslationEntry("fn9", text="第九条注。"),
+            },
+        ))
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def _export(self, **payload):
+        return create_export(self.store, self.project_id, **payload)
+
+    def test_plan_binds_markers_to_notes_and_repeats_share_one_note(self) -> None:
+        plan = build_plan(self.document.blocks)
+        self.assertEqual(set(plan.links), {"fn1", "fn2", "fn9"})
+        self.assertEqual(plan.links["fn1"].number, "1")
+        self.assertEqual([ref.host_block_id for ref in plan.links["fn1"].refs], ["fp1", "fp2"])
+        self.assertEqual(plan.links["fn2"].number, "2")
+        self.assertEqual(plan.links["fn2"].text, "Second note.")
+        self.assertEqual(plan.links["fn9"].number, "9")
+        self.assertNotIn("fn3", plan.links)
+        self.assertNotIn("fn8", plan.links)
+        # 无注文可绑的标记不生成任何链接。
+        self.assertEqual(plan.refs_by_host.get("fp4"), None)
+
+    def test_epub_converts_linked_notes_to_asides(self) -> None:
+        value = self._export(formats=["epub"], mode="source")
+        path = Path(value["path"]) / "Book.epub"
+        validate_epub(path)
+        with zipfile.ZipFile(path) as archive:
+            bodies = {name: archive.read(name).decode("utf-8")
+                      for name in archive.namelist() if name.startswith("EPUB/text/")}
+        text = "".join(bodies.values())
+        self.assertIn('<a class="noteref" epub:type="noteref" href="#fn-fn1"><sup>1</sup></a>', text)
+        self.assertIn('<a class="noteref" epub:type="noteref" href="#fn-fn2"><sup>2</sup></a>', text)
+        self.assertIn('<aside epub:type="footnote" id="fn-fn1">', text)
+        self.assertIn("First note.", text)
+        self.assertIn("Second note.", text)
+        # 注文文本不再含引导标记；全文只出现一次（aside 内），正文流不重复。
+        self.assertNotIn("^{2} Second note.", text)
+        self.assertEqual(text.count("1. First note."), 1)
+        # 未匹配的注文照常保留，未绑定的标记降级为印刷上标（不再留 ``^{7}``）。
+        self.assertIn("Running head without number.", text)
+        self.assertIn("Stray<sup>7</sup> marker without note.", text)
+        self.assertIn("8. Never referenced.", text)
+        self.assertNotIn("^{", text)
+        # 绑定注文的正文标记不再是字面量。
+        self.assertNotIn("^{9}", text)
+
+    def test_epub_bilingual_aside_has_source_and_translation(self) -> None:
+        value = self._export(formats=["epub"], mode="bilingual")
+        path = Path(value["path"]) / "Book.epub"
+        validate_epub(path)
+        with zipfile.ZipFile(path) as archive:
+            text = "".join(archive.read(name).decode("utf-8")
+                           for name in archive.namelist() if name.startswith("EPUB/text/"))
+        self.assertIn('<aside epub:type="footnote" id="fn-fn1">', text)
+        self.assertIn('<p class="footnote source" xml:lang="en" lang="en">1. First note.</p>', text)
+        self.assertIn('<p class="footnote translation">第一条注。</p>', text)
+        # 注文自身的引导标记在译文里同样不渲染（``^{2} 第二条注。`` → 正文）。
+        self.assertIn('<p class="footnote translation">第二条注。</p>', text)
+        # 原文 + 译文角色里的同号标记都转成引用（fp1 2+2、fp2 1+1、fp3 1+1）。
+        self.assertEqual(text.count('epub:type="noteref"'), 8)
+
+    def test_epub_renders_plain_superscripts(self) -> None:
+        """未绑到脚注的 ``^{…}``（指数/分数/序数）按上标渲染，不当 LaTeX 留在成品里。"""
+        self.document.blocks.append(Block("fp5", "paragraph", 11, 0, source_text="Area 3^{2} m and 1/2^{1/2} and the 4^{th} line."))
+        self.store.save_document(self.document)
+        value = self._export(formats=["epub"], mode="source")
+        path = Path(value["path"]) / "Book.epub"
+        with zipfile.ZipFile(path) as archive:
+            text = "".join(archive.read(name).decode("utf-8")
+                           for name in archive.namelist() if name.startswith("EPUB/text/"))
+        self.assertIn("Area 3<sup>2</sup> m and 1/2<sup>1/2</sup> and the 4<sup>th</sup> line.", text)
+        self.assertNotIn("^{", text)
+
+    def test_docx_writes_real_footnotes(self) -> None:
+        value = self._export(formats=["docx"], mode="bilingual")
+        path = Path(value["path"]) / "Book.docx"
+        self.assertTrue(zipfile.is_zipfile(path))
+        with zipfile.ZipFile(path) as archive:
+            names = archive.namelist()
+            self.assertIn("word/footnotes.xml", names)
+            footnotes = archive.read("word/footnotes.xml").decode("utf-8")
+            document_xml = archive.read("word/document.xml").decode("utf-8")
+            content_types = archive.read("[Content_Types].xml").decode("utf-8")
+        self.assertIn("footnotes+xml", content_types)
+        self.assertIn("w:footnoteReference", document_xml)
+        self.assertIn("First note.", footnotes)
+        self.assertIn("Second note.", footnotes)
+        self.assertIn("第一条注。", footnotes)
+        self.assertNotIn("^{2} Second", footnotes)
+        # 未匹配注文仍是普通段落；已绑定注文不再出现在正文流。
+        self.assertIn("Running head without number.", document_xml)
+        self.assertIn("Never referenced.", document_xml)
+        self.assertNotIn("First note.", document_xml)
+        # 未绑定标记同样降级为上标 run，文档里不留 ``^{…}``。
+        self.assertNotIn("^{", document_xml)
+        self.assertNotIn("^{", footnotes)
+        self.assertIn('w:vertAlign w:val="superscript"', document_xml)
+        from docx import Document as WordDocument
+
+        word = WordDocument(str(path))  # 能正常打开
+        self.assertTrue(word.paragraphs)
+
+    def test_markdown_keeps_page_note_rendering(self) -> None:
+        value = self._export(formats=["markdown"], mode="source")
+        markdown = (Path(value["path"]) / "full.md").read_text(encoding="utf-8")
+        self.assertIn("> [页下注] 1. First note.", markdown)
+        self.assertIn("^{1}", markdown)
 
 
 if __name__ == "__main__":

@@ -6,8 +6,10 @@
 项目目录下的 ``exports/<export_id>/``。
 
 格式：
-- ``epub``：EPUB3 单文件。
-- ``docx``：Word 单文件（需要 python-docx）。
+- ``epub``：EPUB3 单文件；页下注块（``type=="footnote"``）能匹配到正文 ``^{N}``
+  上标标记时，转成 EPUB3 noteref/aside 真脚注（阅读器弹层）。
+- ``docx``：Word 单文件（需要 python-docx）；匹配到的页下注转成 Word 真脚注
+  （``word/footnotes.xml`` + 上标引用），未匹配到的保持普通段落。
 - ``markdown``：单文件 ``full.md`` + 同级 ``assets/``。
 - ``html``：分章节多页 ``index.html`` + ``chapter-0001.html`` … + ``style.css`` + ``assets/``。
 
@@ -30,6 +32,13 @@ from pathlib import Path
 from typing import Any, Iterable, Iterator, Literal
 from xml.etree import ElementTree as ET
 
+from .footnote_refs import (
+    FootnotePlan,
+    SUPERSCRIPT_RE,
+    annotate as annotate_footnote_markers,
+    build_plan,
+    superscript_content,
+)
 from .models import Block, Document, TranslationEntry, TranslationLayer, utc_now
 from .storage import ProjectStore, StorageError, atomic_json, safe_locale, safe_name
 
@@ -187,6 +196,9 @@ table{
 td,th{border:1px solid;padding:.4em .55em;text-align:left;vertical-align:top}
 
 a{color:inherit}
+
+/* 页下注转真脚注：正文上标引用 + aside 注文（阅读器弹层展示，不占正文流） */
+a.noteref{color:inherit;text-decoration:none;font-size:.72em;line-height:0;vertical-align:super}
 
 /* 目录页 */
 nav > h1{margin:2em 0 1em}
@@ -473,7 +485,7 @@ def _render_nav(nodes: list[dict[str, Any]]) -> str:
         return ""
     parts = ["<ol>"]
     for node in nodes:
-        parts.append(f'<li><a href="{html.escape(node["href"])}">{html.escape(node["title"])}</a>')
+        parts.append(f'<li><a href="{html.escape(node["href"])}">{html.escape(_plain_superscripts(node["title"]))}</a>')
         parts.append(_render_nav(node["children"]))
         parts.append("</li>")
     parts.append("</ol>")
@@ -610,9 +622,100 @@ def _lang_attr(role: str, mode: ExportMode, source_language: str) -> str:
     return ""
 
 
+def _epub_note_anchor(note_block_id: str) -> str:
+    return "fn-" + re.sub(r"[^A-Za-z0-9_-]", "_", note_block_id)
+
+
+def _epub_noteref(number: str, note_block_id: str) -> str:
+    anchor = _epub_note_anchor(note_block_id)
+    return f'<a class="noteref" epub:type="noteref" href="#{anchor}"><sup>{html.escape(number)}</sup></a>'
+
+
+def _escape_with_refs(text: str, plan: FootnotePlan | None, block: Block, role: str,
+                      by_offset: bool | None = None) -> str:
+    """HTML 转义；已绑定的 ``^{N}`` 标记换成 noteref，其余 ``^{…}`` 按上标渲染。"""
+    if not text:
+        return ""
+    if plan is None:
+        return _html_text(text)
+    segments = annotate_footnote_markers(text, plan, block, role, by_offset)
+    return _render_html_segments(segments)
+
+
+def _html_text(value: str) -> str:
+    """转义文本，并把剩余的 ``^{…}`` 渲染为 ``<sup>``。"""
+    parts: list[str] = []
+    cursor = 0
+    for match in SUPERSCRIPT_RE.finditer(value):
+        if match.start() > cursor:
+            parts.append(html.escape(value[cursor:match.start()]))
+        parts.append(f"<sup>{html.escape(superscript_content(match.group(1)))}</sup>")
+        cursor = match.end()
+    if not parts:
+        return html.escape(value)
+    if cursor < len(value):
+        parts.append(html.escape(value[cursor:]))
+    return "".join(parts)
+
+
+def _render_html_segments(segments: list[tuple[str, str, str]]) -> str:
+    parts: list[str] = []
+    for kind, value, note_id in segments:
+        if kind == "ref":
+            parts.append(_epub_noteref(value, note_id))
+        else:
+            parts.append(_html_text(value))
+    return "".join(parts)
+
+
+def _drop_leading_note_marker(segments: list[tuple[str, str, str]], number: str) -> list[tuple[str, str, str]]:
+    """脚注正文自身的引导编号（``^{N}``）不渲染成引用，也不留在注文里。"""
+    if not segments or segments[0][0] != "text" or not number:
+        return segments
+    prefix = f"^{{{number}}}"
+    value = segments[0][1]
+    if not value.startswith(prefix):
+        return segments
+    rest = value[len(prefix):]
+    if rest.strip():
+        return [("text", rest.lstrip(), "")] + segments[1:]
+    return segments[1:]
+
+
+def _epub_footnote_asides(note_ids: list[str], plan: FootnotePlan, layer: TranslationLayer | None,
+                          mode: ExportMode, source_language: str) -> str:
+    """把锚定在该正文块之后的页下注渲染为 EPUB3 footnote aside。"""
+    parts: list[str] = []
+    for note_id in note_ids:
+        link = plan.links.get(note_id)
+        if link is None:
+            continue
+        block = link.block
+        inner = [
+            f'<section class="block block-footnote" data-block-id="{html.escape(block.block_id)}"'
+            f' data-page="{block.page_index + 1}">'
+        ]
+        for role, text in _text_roles(block, entry_for(layer, block), mode):
+            if not text:
+                continue
+            segments = annotate_footnote_markers(text, plan, block, role)
+            segments = _drop_leading_note_marker(segments, link.number)
+            if not segments:
+                continue
+            inner.append(
+                f'<p class="footnote {role}"{_lang_attr(role, mode, source_language)}>'
+                f'{_render_html_segments(segments)}</p>'
+            )
+        inner.append("</section>")
+        parts.append(f'<aside epub:type="footnote" id="{_epub_note_anchor(note_id)}">{"".join(inner)}</aside>')
+    return "".join(parts)
+
+
 def _block_html(block: Block, entry: TranslationEntry | None, mode: ExportMode, assets: dict[str, str],
-                source_language: str = "") -> str:
+                source_language: str = "", plan: FootnotePlan | None = None) -> str:
     kind = block.type
+    if kind == "footnote" and plan is not None and block.block_id in plan.links:
+        return ""  # 已绑定页下注：移到锚点后的 aside，正文流不再重复
     output = [
         f'<section class="block block-{html.escape(kind)}"'
         f' data-block-id="{html.escape(block.block_id)}" data-page="{block.page_index + 1}">'
@@ -620,18 +723,24 @@ def _block_html(block: Block, entry: TranslationEntry | None, mode: ExportMode, 
     if kind == "title":
         tag = f"h{max(1, min(6, int(block.level or 1)))}"
         for role, text in _text_roles(block, entry, mode):
-            output.append(f'<{tag} class="{role}"{_lang_attr(role, mode, source_language)}>{html.escape(text)}</{tag}>')
+            output.append(f'<{tag} class="{role}"{_lang_attr(role, mode, source_language)}>'
+                          f'{_escape_with_refs(text, plan, block, role)}</{tag}>')
     elif kind in {"paragraph", "code"}:
         tag = "pre" if kind == "code" else "p"
         for role, text in _text_roles(block, entry, mode):
-            output.append(f'<{tag} class="{role}"{_lang_attr(role, mode, source_language)}>{html.escape(text)}</{tag}>')
+            output.append(f'<{tag} class="{role}"{_lang_attr(role, mode, source_language)}>'
+                          f'{_escape_with_refs(text, plan, block, role)}</{tag}>')
     elif kind == "footnote":
         for role, text in _text_roles(block, entry, mode):
-            output.append(f'<p class="footnote {role}"{_lang_attr(role, mode, source_language)}>{html.escape(text)}</p>')
+            output.append(f'<p class="footnote {role}"{_lang_attr(role, mode, source_language)}>'
+                          f'{_escape_with_refs(text, plan, block, role)}</p>')
     elif kind == "list":
         for role, values in _list_roles(block, entry, mode):
             attr = _lang_attr(role, mode, source_language)
-            output.append(f'<ul class="{role}"{attr}>' + "".join(f"<li>{html.escape(value)}</li>" for value in values) + "</ul>")
+            items = "".join(
+                f"<li>{_escape_with_refs(value, plan, block, role, by_offset=False)}</li>" for value in values
+            )
+            output.append(f'<ul class="{role}"{attr}>{items}</ul>')
     elif kind == "equation":
         output.append(f'<pre class="equation source">{html.escape(block.source_text)}</pre>')
     elif kind == "table":
@@ -647,12 +756,17 @@ def _block_html(block: Block, entry: TranslationEntry | None, mode: ExportMode, 
                 output.append(f'<img src="assets/{html.escape(filename)}" alt=""/>')
         for role, captions in _caption_roles(block, entry, mode):
             for caption in captions:
-                output.append(f'<figcaption class="{role}"{_lang_attr(role, mode, source_language)}>{html.escape(caption)}</figcaption>')
+                output.append(f'<figcaption class="{role}"{_lang_attr(role, mode, source_language)}>{_html_text(caption)}</figcaption>')
     else:
         if block.source_text:
-            output.append(f'<p class="source">{html.escape(block.source_text)}</p>')
+            output.append(f'<p class="source">{_html_text(block.source_text)}</p>')
     output.append("</section>")
     return "".join(output)
+
+
+def _plain_superscripts(title: str) -> str:
+    """章节标题（``<title>`` / 导航用）里不留 ``^{…}``，只保留上标内容本身。"""
+    return SUPERSCRIPT_RE.sub(lambda match: superscript_content(match.group(1)), title or "")
 
 
 def _page_html(title: str, language: str, body: str, *, stylesheet: str) -> str:
@@ -660,7 +774,7 @@ def _page_html(title: str, language: str, body: str, *, stylesheet: str) -> str:
         "<!doctype html>\n"
         f'<html lang="{html.escape(language)}"><head><meta charset="utf-8"/>'
         '<meta name="viewport" content="width=device-width,initial-scale=1"/>'
-        f"<title>{html.escape(title)}</title>"
+        f"<title>{html.escape(_plain_superscripts(title))}</title>"
         f'<link rel="stylesheet" href="{html.escape(stylesheet)}"/></head>'
         f"<body><main>{body}</main></body></html>\n"
     )
@@ -670,9 +784,9 @@ def _xhtml(title: str, language: str, body: str) -> str:
     return (
         '<?xml version="1.0" encoding="utf-8"?>\n'
         "<!DOCTYPE html>\n"
-        '<html xmlns="http://www.w3.org/1999/xhtml" '
+        '<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops" '
         f'lang="{html.escape(language)}" xml:lang="{html.escape(language)}">'
-        f"<head><title>{html.escape(title)}</title>"
+        f"<head><title>{html.escape(_plain_superscripts(title))}</title>"
         '<link rel="stylesheet" type="text/css" href="../styles/book.css"/></head>'
         f"<body>{body}</body></html>"
     )
@@ -784,12 +898,15 @@ def _write_epub(project: Path, root: Path, document: Document, blocks: list[Bloc
     spine: list[str] = []
     if cover is not None:
         spine.append('<itemref idref="cover-page" linear="yes"/>')
+    plan = build_plan(blocks)
+    host_notes = plan.host_first_note_ids()
     nav_items: list[tuple[str, str, int]] = []
     bodies: list[tuple[str, str]] = []
     for index, section in enumerate(sections, 1):
         filename = f"text/section-{index:04d}.xhtml"
         body = "".join(
-            _block_html(block, entry_for(layer, block), mode, assets, source_language)
+            _block_html(block, entry_for(layer, block), mode, assets, source_language, plan)
+            + _epub_footnote_asides(host_notes.get(block.block_id, []), plan, layer, mode, source_language)
             for block in section.blocks
         )
         bodies.append((filename, _xhtml(section.title, language, body)))
@@ -869,6 +986,83 @@ def _docx_quote(paragraph: Any) -> None:
         run.font.color.rgb = RGBColor(0x2F, 0x51, 0x42)
 
 
+def _split_superscripts(text: str) -> list[tuple[str, str]]:
+    """把文本按 ``^{…}`` 切开：``("text", 片段)`` / ``("sup", 上标)``。"""
+    parts: list[tuple[str, str]] = []
+    cursor = 0
+    for match in SUPERSCRIPT_RE.finditer(text or ""):
+        if match.start() > cursor:
+            parts.append(("text", text[cursor:match.start()]))
+        parts.append(("sup", superscript_content(match.group(1))))
+        cursor = match.end()
+    if cursor < len(text or ""):
+        parts.append(("text", text[cursor:]))
+    return parts or [("text", text or "")]
+
+
+def _docx_add_text(paragraph: Any, text: str, *, italic: bool = False) -> None:
+    """写一段文本：``^{…}`` 转成上标 run（与印刷版一致），不再留 LaTeX 形态。"""
+    from docx.shared import RGBColor
+
+    for kind, value in _split_superscripts(text):
+        if not value:
+            continue
+        run = paragraph.add_run(value)
+        if kind == "sup":
+            run.font.superscript = True
+        if italic:
+            run.italic = True
+            run.font.color.rgb = RGBColor(0x2F, 0x51, 0x42)
+
+
+def _docx_paragraph_with_refs(word: Any, segments: list[tuple[str, str, str]],
+                              footnote_marks: dict[str, tuple[str, str]], style: Any = None) -> Any:
+    """带脚注引用的段落：文本段照常，ref 段插入上标 ``w:footnoteReference``。
+
+    用 ``w:customMarkFollows`` 保留印刷版编号（书里按章重新编号），不依赖 Word 的
+    全文连续自动编号，避免正文/注文对不上。Word 不允许同一个脚注被引用两次，
+    重复引用降级为普通上标（与印刷版观感一致），由调用方在 ``segments`` 里改写。
+    """
+    from docx.oxml import OxmlElement
+    from docx.oxml.ns import qn
+
+    paragraph = word.add_paragraph(style=style) if style is not None else word.add_paragraph()
+    for kind, value, note_id in segments:
+        if kind == "text":
+            _docx_add_text(paragraph, value)
+        elif kind == "sup":
+            run = paragraph.add_run(value)
+            run.font.superscript = True
+        elif note_id in footnote_marks:
+            footnote_id, label = footnote_marks[note_id]
+            run = paragraph.add_run()
+            run.font.superscript = True
+            reference = OxmlElement("w:footnoteReference")
+            reference.set(qn("w:customMarkFollows"), "1")
+            reference.set(qn("w:id"), footnote_id)
+            run._r.append(reference)
+            mark = OxmlElement("w:t")
+            mark.set(qn("xml:space"), "preserve")
+            mark.text = label
+            run._r.append(mark)
+    return paragraph
+
+
+def _docx_unique_refs(segments: list[tuple[str, str, str]], seen: set[str]) -> list[tuple[str, str, str]]:
+    """同一个脚注只能被 Word 引用一次；后续同号引用降级为上标文字。"""
+    output: list[tuple[str, str, str]] = []
+    for kind, value, note_id in segments:
+        if kind != "ref" or not note_id:
+            output.append((kind, value, note_id))
+            continue
+        if note_id in seen:
+            output.append(("sup", value, ""))
+        else:
+            seen.add(note_id)
+            output.append((kind, value, note_id))
+    return output
+
+
 def _docx_default_font(word: Any) -> None:
     try:
         from docx.oxml.ns import qn
@@ -915,6 +1109,76 @@ def _docx_table(word: Any, block: Block, entry: TranslationEntry | None, role: s
             continue
 
 
+def _docx_runs_xml(text: str, *, italic: bool = False) -> str:
+    """脚注部件用：文本按 ``^{…}`` 拆成普通/上标 run（``w:t`` XML 片段）。"""
+    run_pr = '<w:rPr><w:i/><w:color w:val="2F5142"/></w:rPr>' if italic else ""
+    parts: list[str] = []
+    for kind, value in _split_superscripts(text):
+        if not value:
+            continue
+        rpr = '<w:rPr><w:vertAlign w:val="superscript"/></w:rPr>' if kind == "sup" else run_pr
+        parts.append(f'<w:r>{rpr}<w:t xml:space="preserve">{html.escape(value)}</w:t></w:r>')
+    return "".join(parts)
+
+
+def _docx_footnotes_part(word: Any, plan: FootnotePlan, blocks: list[Block],
+                         layer: TranslationLayer | None, mode: ExportMode) -> None:
+    """把已绑定页下注写入 ``word/footnotes.xml`` 并建立关系；无绑定注时不建 part。"""
+    from docx.opc.constants import CONTENT_TYPE as CT
+    from docx.opc.constants import RELATIONSHIP_TYPE as RT
+    from docx.opc.part import Part
+    from docx.opc.packuri import PackURI
+
+    note_ids = [block.block_id for block in blocks if block.block_id in plan.links]
+    if not note_ids:
+        return
+    entries: list[str] = [
+        '<w:footnote w:type="separator" w:id="-1"><w:p><w:pPr><w:spacing w:after="0" w:line="240" w:lineRule="auto"/>'
+        '</w:pPr><w:r><w:separator/></w:r></w:p></w:footnote>',
+        '<w:footnote w:type="continuationSeparator" w:id="0"><w:p><w:pPr><w:spacing w:after="0" w:line="240" '
+        'w:lineRule="auto"/></w:pPr><w:r><w:continuationSeparator/></w:r></w:p></w:footnote>',
+    ]
+    for ordinal, note_id in enumerate(note_ids, 1):
+        link = plan.links[note_id]
+        block = link.block
+        paragraphs_xml: list[str] = []
+        for role, text in _text_roles(block, entry_for(layer, block), mode):
+            if not text:
+                continue
+            stripped = link.body if text == (block.source_text or "") else text
+            if role == "source":
+                paragraphs_xml.append(
+                    f'<w:p><w:pPr><w:spacing w:after="60"/></w:pPr>'
+                    f'<w:r><w:rPr><w:vertAlign w:val="superscript"/></w:rPr>'
+                    f'<w:t xml:space="preserve">{html.escape(link.number)}</w:t></w:r>'
+                    f'<w:r><w:t xml:space="preserve"> </w:t></w:r>'
+                    f'{_docx_runs_xml(stripped)}</w:p>'
+                )
+            else:
+                paragraphs_xml.append(
+                    f'<w:p><w:pPr><w:spacing w:after="60"/></w:pPr>'
+                    f'{_docx_runs_xml(stripped, italic=True)}</w:p>'
+                )
+        if not paragraphs_xml:
+            paragraphs_xml.append(
+                f'<w:p><w:pPr><w:spacing w:after="60"/></w:pPr><w:r><w:footnoteRef/></w:r>'
+                f'<w:r><w:t xml:space="preserve"> </w:t></w:r></w:p>'
+            )
+        entries.append(f'<w:footnote w:id="{ordinal}">{"".join(paragraphs_xml)}</w:footnote>')
+    blob = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+        '<w:footnotes xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+        f'{"".join(entries)}</w:footnotes>'
+    ).encode("utf-8")
+    part = Part(
+        PackURI("/word/footnotes.xml"),
+        CT.WML_FOOTNOTES,
+        blob=blob,
+        package=word.part.package,
+    )
+    word.part.relate_to(part, RT.FOOTNOTES)
+
+
 def _write_docx(project: Path, root: Path, document: Document, blocks: list[Block], layer: TranslationLayer | None,
                 mode: ExportMode, assets: dict[str, str], name: str) -> list[tuple[Path, bool]]:
     try:
@@ -927,28 +1191,56 @@ def _write_docx(project: Path, root: Path, document: Document, blocks: list[Bloc
     word = WordDocument()
     word.core_properties.title = document.title
     _docx_default_font(word)
+    plan = build_plan(blocks)
+    footnote_marks = {
+        block.block_id: (str(ordinal), plan.links[block.block_id].number)
+        for ordinal, block in enumerate((item for item in blocks if item.block_id in plan.links), 1)
+    }
+    seen_notes: set[str] = set()  # Word 不允许同一脚注被引用两次
     for block in blocks:
         entry = entry_for(layer, block)
         kind = block.type
         if kind == "title":
             level = max(1, min(9, int(block.level or 1)))
+            style = word.styles[f"Heading {level}"]
             for role, text in _text_roles(block, entry, mode):
                 if not text:
                     continue
-                heading = word.add_heading(text, level=level)
+                segments = _docx_unique_refs(annotate_footnote_markers(text, plan, block, role), seen_notes)
+                heading = _docx_paragraph_with_refs(word, segments, footnote_marks, style=style)
                 if mode == "bilingual" and role == "translation":
                     _docx_quote(heading)
-        elif kind in {"paragraph", "footnote", "code"}:
+        elif kind == "footnote":
+            if block.block_id in plan.links:
+                continue  # 已写入 word/footnotes.xml，正文流不再重复
+            for role, text in _text_roles(block, entry, mode):
+                if not text:
+                    continue
+                segments = _docx_unique_refs(annotate_footnote_markers(text, plan, block, role), seen_notes)
+                paragraph = _docx_paragraph_with_refs(word, segments, footnote_marks)
+                if role == "translation" and mode != "source":
+                    _docx_quote(paragraph)
+        elif kind == "code":
             for role, text in _text_roles(block, entry, mode):
                 if not text:
                     continue
                 paragraph = word.add_paragraph(text)
                 if role == "translation" and mode != "source":
                     _docx_quote(paragraph)
+        elif kind == "paragraph":
+            for role, text in _text_roles(block, entry, mode):
+                if not text:
+                    continue
+                segments = _docx_unique_refs(annotate_footnote_markers(text, plan, block, role), seen_notes)
+                paragraph = _docx_paragraph_with_refs(word, segments, footnote_marks)
+                if role == "translation" and mode != "source":
+                    _docx_quote(paragraph)
         elif kind == "list":
             for role, values in _list_roles(block, entry, mode):
                 for value in values:
-                    paragraph = word.add_paragraph(value, style="List Bullet")
+                    segments = _docx_unique_refs(
+                        annotate_footnote_markers(value, plan, block, role, by_offset=False), seen_notes)
+                    paragraph = _docx_paragraph_with_refs(word, segments, footnote_marks, style="List Bullet")
                     if mode == "bilingual" and role == "translation":
                         _docx_quote(paragraph)
         elif kind == "equation":
@@ -970,10 +1262,13 @@ def _write_docx(project: Path, root: Path, document: Document, blocks: list[Bloc
                     word.add_paragraph(f"[图片：{filename}]")
             for _role, captions in _caption_roles(block, entry, mode):
                 for caption in captions:
-                    word.add_paragraph(caption, style="Caption")
+                    paragraph = word.add_paragraph(style="Caption")
+                    _docx_add_text(paragraph, caption)
         else:
             if block.source_text:
-                word.add_paragraph(block.source_text)
+                paragraph = word.add_paragraph()
+                _docx_add_text(paragraph, block.source_text)
+    _docx_footnotes_part(word, plan, blocks, layer, mode)
     word.save(output)
     return [(output, True)]
 
