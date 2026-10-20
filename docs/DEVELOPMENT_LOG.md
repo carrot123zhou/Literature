@@ -6,7 +6,7 @@
 
 
 ## 2026-10-20（第三轮）· 结构校准目录页死锁修复与高级选项分层（用户报告：单页目录被识别为 6+ 页且指定目录页后仍报错）
-状态：已编码 / 全量 pytest 622 passed（新增 2 项回归）/ tsc --noEmit 与 Vite 生产构建通过；**未打包安装、未真机验收、未提交**。
+状态：已编码 / 全量 pytest 622 passed（新增 2 项回归）/ tsc --noEmit 与 Vite 生产构建通过 / 已随本轮重建打包安装到 `launcher/Literature.app`（旧包备份 `launcher/.rollback-Literature.app`）；**未启动客户端、未真机验收**。
 
 用户报告：一本书只有 1 页目录，校准报“目录页超过 6 页，请缩小范围后重试”；在高级选项里指定目录页后重试仍报同样错误。定位到两个叠加缺陷：
 
@@ -15,7 +15,7 @@
 
 高级选项分层（用户反馈“太复杂”）：`OutlinePane` 把单次响应等待、复核模式、目录来源、规划策略、复核并发五个诊断型覆盖收进子折叠「诊断覆盖（默认即可，一般不用改）」；主面板只留影响结果方向的项（目录基准、限定目录页、本地读取/本地校准、对照原页图片、自动采用、确认审查范围）。新增 `.review-advanced-diagnostics` 样式（review.css）。
 
-新增回归测试（`tests/test_structure_calibration.py`）：自动识别超限截断不报错（`find_toc_pages` 返回 7+ 页时 `plan_structure_analysis` 成功且只用 6 页、首页为标记页）；显式指定 7 页仍拒绝。验收边界：全量 pytest 622 passed、tsc/Vite 通过；未做隔离浏览器验收、未真实模型复跑、未打包安装客户端。
+新增回归测试（`tests/test_structure_calibration.py`）：自动识别超限截断不报错（`find_toc_pages` 返回 7+ 页时 `plan_structure_analysis` 成功且只用 6 页、首页为标记页）；显式指定 7 页仍拒绝。验收边界：未做隔离浏览器验收、未真实模型复跑；已打包安装（`scripts/build_desktop.sh`），未启动客户端、待用户真机验收。
 
 ## 2026-10-20（第二轮）· 注文统一章末、双向链接、回退锚定与续行合并（用户反馈调整）
 状态：已编码 / 全量 pytest 620 passed（新增 2 项）/ 库内 10 本书导出回归 10/10 PASS（aside 数==绑定数、aside id 全书唯一、noteref 断链 0、`^{` 残留 0）/ Word 16.114 实开 754 注 docx 无修复、PDF 目视确认 / calibre 解析 EPUB 通过；**未打包安装（客户端运行中）、待用户 Apple Books 真机验收**。
