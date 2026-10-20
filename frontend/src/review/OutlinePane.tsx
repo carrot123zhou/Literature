@@ -6,11 +6,12 @@ import { flattenToc, formatTocDraft, parseTocDraft } from "./projection";
 
 export type TocCandidate = { page_index: number; page_number: number; confidence: number; reasons: string[] };
 export type StructureMode = "coarse" | "fine";
-export type StructureOptions = { extractToc: boolean; proofread: boolean; autoApply: boolean; useVision: boolean; requestTimeoutSeconds: number; reviewMode: "sample" | "full" | "off"; tocExtraction: "auto" | "local" | "model"; proofreadConcurrency: number; planningMode: "global" | "adaptive" };
-/** 档位派生的服务端 preset：主流程只传 mode；下列字段仅当高级选项里被显式改动时才随请求覆盖。 */
-export const MODE_PRESET: Record<StructureMode, Omit<StructureOptions, "requestTimeoutSeconds" | "proofreadConcurrency">> = {
-  coarse: { extractToc: true, proofread: true, autoApply: true, useVision: false, reviewMode: "off", tocExtraction: "auto", planningMode: "global" },
-  fine: { extractToc: true, proofread: true, autoApply: true, useVision: false, reviewMode: "off", tocExtraction: "auto", planningMode: "global" },
+/** 用户真正需要选的只剩两项；执行参数（复核模式/并发/超时/目录来源等）一律由后端档位预设决定。 */
+export type StructureOptions = { extractToc: boolean; useVision: boolean };
+/** 档位派生的服务端 preset：主流程只传 mode；此处仅决定界面初始态。 */
+export const MODE_PRESET: Record<StructureMode, StructureOptions> = {
+  coarse: { extractToc: true, useVision: false },
+  fine: { extractToc: true, useVision: false },
 };
 export const MODE_HINTS: Record<StructureMode, string> = {
   coarse: "以原书目录为基准：剔除误标标题、补齐漏标标题、按目录父子关系校准层级。快、省 token。",
@@ -179,18 +180,10 @@ export default memo(function OutlinePane(props: Props) {
           </div>}
           <button className="link-button block-button" onClick={onReadLocalToc} disabled={blocked}>本地读取目录 · 0 费用</button>
           <button className="block-button" onClick={onAnalyze} disabled={blocked}>只做本地校准 · 无模型费用</button>
-          <button className="link-button block-button" onClick={onPreviewAudit} disabled={blocked}>预览启动输入</button>
           <label className="structure-option"><input type="checkbox" checked={options.useVision} disabled={blocked} onChange={() => onOptions({ useVision: !options.useVision })}/>对照原页图片 <small>需视觉模型</small></label>
-          <label className="structure-option"><input type="checkbox" checked={options.autoApply} disabled={blocked} onChange={() => onOptions({ autoApply: !options.autoApply })}/>自动采用高置信修正</label>
-          <details className="review-advanced-diagnostics"><summary>诊断覆盖（默认即可，一般不用改）</summary>
-            <label>单次模型响应等待（秒）<input aria-label="单次模型响应等待（秒）" type="number" min={30} max={1800} value={options.requestTimeoutSeconds} disabled={blocked} onChange={event => onOptions({ requestTimeoutSeconds: Number(event.target.value) })}/></label>
-            <label>复核模式<select aria-label="复核模式" value={options.reviewMode} disabled={blocked} onChange={event => onOptions({ reviewMode: event.target.value === "full" ? "full" : event.target.value === "off" ? "off" : "sample" })}><option value="off">只跑第一遍（默认）</option><option value="sample">定案 + 抽查</option><option value="full">全量双遍（更慢）</option></select></label>
-            <label>目录来源<select aria-label="目录来源" value={options.tocExtraction} disabled={blocked} onChange={event => onOptions({ tocExtraction: event.target.value === "model" ? "model" : event.target.value === "local" ? "local" : "auto" })}><option value="auto">有目录标记时用本地（默认）</option><option value="local">总是用本地解析</option><option value="model">总是让模型核对</option></select></label>
-            <label>规划策略<select aria-label="规划策略" value={options.planningMode} disabled={blocked} onChange={event => onOptions({ planningMode: event.target.value === "adaptive" ? "adaptive" : "global" })}><option value="global">整体串行（默认）</option><option value="adaptive">自适应分支（试用）</option></select></label>
-            <label>复核并发（1–4 路）<input aria-label="复核并发" type="number" min={1} max={4} value={options.proofreadConcurrency} disabled={blocked} onChange={event => onOptions({ proofreadConcurrency: Math.max(1, Math.min(4, Number(event.target.value) || 1)) })}/></label>
-          </details>
+          <button className="link-button block-button" onClick={onPreviewAudit} disabled={blocked}>预览启动输入</button>
           <button className="block-button" onClick={onConfirmReview} disabled={blocked}>确认当前审查范围（全书）</button>
-          <small>高级选项改动后按当前档位覆盖预设；主流程只按「粗校/精校」运行。自适应分支质量未经真实 A/B，属试用。校准修改默认自动应用，全部可撤销。</small>
+          <small>校准修改自动应用，可随时在修订历史撤销；复核方式、并发、超时等执行参数由档位自动决定，无需手动配置。</small>
           {proposedToc?.length ? <details className="review-baseline" open><summary>待确认目录草稿 · {draftEntries.length} 条</summary><p className="review-hint">请对照原目录编辑文字与层级，每行用 # 至 ###### 表示层级；未定位条目也可能超出当前解析页范围。</p><textarea aria-label="待确认目录草稿" value={draftText} disabled={blocked} onChange={event => setDraftText(event.target.value)} rows={8} spellCheck={false}/>{invalidDraftLines > 0 && <p role="alert">有 {invalidDraftLines} 行格式无效，请按“# 标题”格式修改后确认。</p>}<button className="block-button" disabled={blocked || !draftEntries.length || invalidDraftLines > 0} onClick={() => onAdoptProposed(draftEntries)}>确认目录并保存基准</button></details> : null}
           {job?.result && <button className="link-button block-button" onClick={props.onPreviewActualAudit}>查看实际模型请求</button>}
         </details>

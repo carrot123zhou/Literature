@@ -182,9 +182,6 @@
 .source-preview-body > .link-button:hover { background: var(--accent-tint-strong); }
 .review-advanced { min-width: 0; margin-top: var(--sp-3); padding-top: var(--sp-3); border-top: 1px solid var(--separator); }
 .review-advanced textarea { margin-bottom: var(--sp-2); }
-.review-advanced-diagnostics { margin-top: var(--sp-2); }
-.review-advanced-diagnostics > summary { color: var(--label-2); font-size: var(--fs-caption2); font-weight: var(--fw-semibold); cursor: pointer; }
-.review-advanced-diagnostics[open] > summary { margin-bottom: var(--sp-2); }
 .review-baseline > div { max-height: 180px; overflow: auto; font-size: var(--fs-caption2); }
 .review-baseline p { margin: var(--sp-2) 0; }
 

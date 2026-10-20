@@ -91,7 +91,7 @@ export default function ReviewWorkspace(props: Props) {
   const [reasoningMode, setReasoningMode] = useState<ReasoningMode>("inherit");
   const [reasoningBudget, setReasoningBudget] = useState(0);
   // 主流程只传 mode：初始选项直接取档位预设，只有高级选项里被显式改动的字段才随请求覆盖。
-  const [options, setOptions] = useState<StructureOptions>(() => ({ ...MODE_PRESET.coarse, requestTimeoutSeconds: 600, proofreadConcurrency: 2 }));
+  const [options, setOptions] = useState<StructureOptions>(() => ({ ...MODE_PRESET.coarse }));
   const [structureJob, setStructureJob] = useState<Job | null>(null);
   const [structureRunning, setStructureRunning] = useState(false);
   const [proposedToc, setProposedToc] = useState<StructureTocEntry[] | null>(null);
@@ -267,7 +267,7 @@ export default function ReviewWorkspace(props: Props) {
 
   const analyze = () => void run(async () => {
     const draft = options.extractToc ? [] : parseTocDraft(tocText);
-    const value = await api<{ suggestions: StructureSuggestion[]; applied: unknown[]; proposed_toc: StructureTocEntry[] }>(`/projects/${projectId}/structure/analyze`, { method: "POST", body: JSON.stringify({ toc: draft, toc_page_indexes: options.extractToc ? selectedPages() : [], auto_apply: options.autoApply }) });
+    const value = await api<{ suggestions: StructureSuggestion[]; applied: unknown[]; proposed_toc: StructureTocEntry[] }>(`/projects/${projectId}/structure/analyze`, { method: "POST", body: JSON.stringify({ toc: draft, toc_page_indexes: options.extractToc ? selectedPages() : [], auto_apply: true }) });
     if (draft.length) persistBaseline(draft, "confirmed");
     if (value.proposed_toc?.length) setProposedToc(value.proposed_toc);
     onSuggestions(value.suggestions.filter(item => !item.automatic && suggestionFresh(document, item)));
@@ -283,7 +283,7 @@ export default function ReviewWorkspace(props: Props) {
   });
 
   // 异步结构分析：后台作业 + 轮询状态，界面展示进度与活动摘要。
-  // 主流程只传 mode（服务端按档位派生 preset）；高级选项里被显式改动的字段才随请求覆盖。
+  // 主流程只传 mode；执行参数由服务端按档位预设派生，界面不再覆盖。
   const runModel = () => {
     if (posting.current || structureRunning || busy) return;
     const resumable = structureJob && structureJob.status === "paused" ? structureJob.job_id : "";
@@ -291,26 +291,19 @@ export default function ReviewWorkspace(props: Props) {
     // 否则用户改完高级设置（如重新指定目录页）点「开始校准」，实际会静默沿用失败
     // 作业的旧参数重新报同样的错。新建时指向旧作业，已完成请求仍然可复用。
     const resuming = Boolean(resumable);
-    const preset = MODE_PRESET[mode];
     const body: Record<string, unknown> = { service_id: taskModel.service_id, model: taskModel.model, mode, reasoning_mode: reasoningMode, reasoning_budget: reasoningMode === "inherit" ? 0 : reasoningBudget };
     if (!resumable) {
       // 只有新建任务才在客户端校验/拼装参数；续跑交给后端 resume 契约复用已存配置，避免与暂停时快照不一致。
       let tocPages: number[];
       try {
-        if (!Number.isInteger(options.requestTimeoutSeconds) || options.requestTimeoutSeconds < 30 || options.requestTimeoutSeconds > 1800) throw new Error("模型响应等待时间应为 30 至 1800 秒。");
         tocPages = options.extractToc ? selectedPages() : [];
         if (!options.extractToc && !parseTocDraft(tocText).length) throw new Error("请填写已确认目录，每行按“# 标题”格式标记层级。");
       } catch (error) { setMessage((error as Error).message); return; }
       if (!options.extractToc) persistBaseline(parseTocDraft(tocText), "confirmed");
       if (!options.extractToc) { body.extract_toc = false; body.toc = parseTocDraft(tocText); }
       if (tocPages.length) body.toc_page_indexes = tocPages;
-      if (options.requestTimeoutSeconds !== 600) body.request_timeout_seconds = options.requestTimeoutSeconds;
-      if (options.useVision !== preset.useVision) body.use_vision = options.useVision;
-      if (options.autoApply !== preset.autoApply) body.auto_apply = options.autoApply;
-      if (options.reviewMode !== preset.reviewMode) body.proofread_mode = options.reviewMode;
-      if (options.tocExtraction !== preset.tocExtraction) body.toc_extraction = options.tocExtraction;
-      if (options.proofreadConcurrency !== 2) body.proofread_concurrency = options.proofreadConcurrency;
-      if (options.planningMode !== preset.planningMode) body.planning_mode = options.planningMode;
+      if (options.useVision) body.use_vision = true;
+      // 其余执行参数（auto_apply/proofread_mode/toc_extraction/并发/超时）由后端档位预设决定，不再随请求覆盖。
       if (structureJob?.status === "failed" && structureJob.job_id) body.reuse_job_id = structureJob.job_id;
     }
     posting.current = true;
@@ -430,7 +423,7 @@ export default function ReviewWorkspace(props: Props) {
   });
 
   const previewAudit = () => void run(async () => {
-    const value = await api<unknown>(`/projects/${projectId}/structure/plan`, { method: "POST", body: JSON.stringify({ toc: parseTocDraft(tocText), extract_toc: options.extractToc, proofread: options.proofread, toc_page_indexes: selectedPages(), use_vision: options.useVision }) });
+    const value = await api<unknown>(`/projects/${projectId}/structure/plan`, { method: "POST", body: JSON.stringify({ toc: parseTocDraft(tocText), extract_toc: options.extractToc, proofread: true, toc_page_indexes: selectedPages(), use_vision: options.useVision }) });
     setAuditPayload(value);
     setTab("json");
     setMessage("模型输入已展开，visual_evidence 包含将发送的目录页与标题裁片。");

@@ -5,6 +5,16 @@
 > 条目为「最新在上」。2026-10-14 前的手工「第N轮」编号是遗留标记（历史上出现过重复，已用 `·` 后缀消歧），不再续编；新条目用 `## YYYY-MM-DD · 主题`，引用时以上文日期与主题为准。
 
 
+## 2026-10-20（第四轮）· 高级选项精简重构：执行参数全部归档位决定
+状态：已编码 / 全量 pytest 622 passed / tsc --noEmit 与 Vite 生产构建通过 / 隔离真实浏览器验收 19 项 PASS、0 脚本错误（`tests/manual/advanced_simplify_browser_check.py` + `.cjs`，截图 `tmp/advanced-simplify.png`）/ 已打包安装到 `launcher/Literature.app`（旧包备份 `launcher/.rollback-Literature-20261020231058.app`）；**未启动客户端、待真机验收**。
+
+- **需求**：用户反馈高级选项繁复、存在冗余功能与交互选项，要求去除并简化逻辑。
+- **设计依据**：后端 `structure_mode_config` 本就把档位展开为完整执行参数（`auto_apply=True`、`proofread_mode=off`、`toc_extraction=auto`、并发 2、整体串行、关视觉）；前端原有七个控件只是在重复后端预设，且部分（如“自动采用高置信修正”取消勾选）与 2026-10-14「全部自动应用」的拍板相矛盾。
+- **前端精简（`OutlinePane.tsx` / `ReviewWorkspace.tsx`）**：`StructureOptions` 从 8 字段减到 2（`extractToc`、`useVision`）；移除“自动采用高置信修正”勾选、复核模式/目录来源/规划策略/复核并发/单次等待五个诊断控件及上一轮加的「诊断覆盖」子折叠；`runModel` 只传 `mode` + 任务级模型/思考档位 + `use_vision`（勾选时）+ 目录基准相关字段，其余由服务端档位预设派生（显式字段覆盖机制与 `advanced` 容器保留，API 兼容不变）。主面板仅剩：目录基准选择（自动识别/已确认）、限定目录页 + 查找目录页、本地读取目录、只做本地校准、对照原页图片、预览启动输入、确认当前审查范围。
+- **行为变化**：「只做本地校准」的 `auto_apply` 固定为 `true`（本地高置信可逆补丁自动执行，与产品原则一致，原勾选框已移除）。
+- **新增验收**：`tests/manual/advanced_simplify_browser_check.py` + `advanced_simplify_check.cjs` 19 项（保留控件存在、移除控件不存在、目录基准切换、本地校准端到端落库完成、0 脚本错误）。
+- **边界**：后端未改（API 字段全部保留，兼容旧客户端）；未真实模型复跑；未由用户真机验收。
+
 ## 2026-10-20（第三轮）· 结构校准目录页死锁修复与高级选项分层（用户报告：单页目录被识别为 6+ 页且指定目录页后仍报错）
 状态：已编码 / 全量 pytest 622 passed（新增 2 项回归）/ tsc --noEmit 与 Vite 生产构建通过 / 已随本轮重建打包安装到 `launcher/Literature.app`（旧包备份 `launcher/.rollback-Literature.app`）；**未启动客户端、未真机验收**。
 
