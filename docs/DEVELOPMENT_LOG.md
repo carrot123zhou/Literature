@@ -5,6 +5,21 @@
 > 条目为「最新在上」。2026-10-14 前的手工「第N轮」编号是遗留标记（历史上出现过重复，已用 `·` 后缀消歧），不再续编；新条目用 `## YYYY-MM-DD · 主题`，引用时以上文日期与主题为准。
 
 
+## 2026-10-20（第二轮）· 注文统一章末、双向链接、回退锚定与续行合并（用户反馈调整）
+状态：已编码 / 全量 pytest 620 passed（新增 2 项）/ 库内 10 本书导出回归 10/10 PASS（aside 数==绑定数、aside id 全书唯一、noteref 断链 0、`^{` 残留 0）/ Word 16.114 实开 754 注 docx 无修复、PDF 目视确认 / calibre 解析 EPUB 通过；**未打包安装（客户端运行中）、待用户 Apple Books 真机验收**。
+
+- **用户反馈**：EPUB 里脚注仍大量混在正文、注文条目和正文标注没有链接；随后拍板「所有注释条目统一放在章节末尾」。
+- **根因（读真实数据定位）**：① 混在正文的大头是**未绑定注文**——MinerU 在不少书里把正文上标整个丢了（如 Once upon a future time 全书正文几乎无 `^{N}`，页 14/27 有注文但正文无标记），精确匹配无能为力；② 一批「无编号注块」其实是**上一条注文的续行**（MinerU 拆块），被当成独立注段落排进正文；③ 之前 aside 跟在首锚正文块后面，没有 ↩ 回链，且同一注文被多章同号标记共享时会在每个章节各渲染一份 aside（重复 id，EPUB 非法）。
+- **调整（`literature/footnote_refs.py` + `exporters.py`）**：
+  - **注文统一章末**：EPUB/HTML 的 aside 全部移到所属章节末尾（`section_note_ids` 只收录首锚，重复引用走跨文件链接 `text/section-XXXX.xhtml#fn-…`，aside 全书唯一）；aside 加 `class="footnotes"`（章末分隔线样式），注文末尾加 `↩` 回链（`epub:type="footnote-return"` 指回首锚 `id="ref-…"`）。DOCX 是 Word 原生页底脚注，保持页底。
+  - **续行合并**：无编号注块若以小写/引号/括号开头、或上一条注文未以句末标点收尾，并入上一条（`plan.absorbed`），导出时跳过被吸收块；其译文拼进同一条注文。
+  - **编号格式扩充**：新增 Unicode 上标（`¹`）、`N␣`+文字（`15 On the dates…`）、`*†‡§¶` 记号；`NoteLink.body` 统一剥前缀供 Word 自定义标记。
+  - **页位回退锚定**：有编号但正文无对应标记（或标记已被同号前注占用）的注，绑到该注之前最近的正文块（paragraph/list/text，跳过标题）末尾，导出器在锚点补回印刷编号的上标——恢复被 MinerU 丢掉的上标，而不是把注留在正文里。回退锚点 `Ref.start=-1`，渲染时追加在宿主文本末尾。
+- **绑定率变化（bilingual）**：Making 721→754/767、White Lotus 531→707/815、Once upon 401→554/830（其余 554 条中约 331 条为续行已并入前注）、Writing and Authority 43→62/70、sincerity 26/63；新增《中国的道教》《Taoism Under the Tang》两本入库书（234/236 注）。中国的道教绑定 0 属正确行为：其 "footnote" 块实为页眉/目录误标（MinerU `page_footnote` 误判），应在结构校对里改正，不应伪装成脚注。
+- **证据**：全量 pytest 620 passed（新增续行/多格式编号解析、章末位置两项）；`tests/manual/export_footnote_check.py` 扩到 10 本书并新增「aside id 全书唯一」「noteref href 全部可解析（含跨文件）」两项校验，10/10 PASS；Word 16.114 打开 making.docx（754 注，`saved=true`）并导出 PDF 目视确认；calibre `ebook-convert` 解析 EPUB 成功、全文 `^{` 0 处。
+- **边界**：回退锚定把注挂到「注所在页最近的正文块」末尾，页内精确位置是推断（印刷书该页上标被 OCR 丢失，只能恢复到页级粒度）；跨章共享的注文只有首锚章节有 aside，其余章节的引用跳转到该书；DOCX 脚注仍是页底（章末注需 Word 端注，未做）；未打包安装（客户端运行中，等待退出后安装），未在 Apple Books 真机点验弹注。
+
+
 ## 2026-10-20 · 导出 EPUB/DOCX 把页下注转成真脚注（Word 16.114 实开 + PDF 目视验收）
 状态：已编码 / 全量 pytest 618 passed（新增 6 项）/ **真实验收**：Microsoft Word 16.114 直接打开 721 注的 docx 无修复提示、导出 281 页 PDF 目视确认正文上标与页底脚注；calibre `ebook-convert` 完整解析 EPUB / **已打包安装到 `launcher/Literature.app`**（sidecar `95078d5c…` / sha256 `58f55530…` / 47906752 字节；内嵌前端未变 `index-DCZcdqbt.js`），冻结冒烟 15/15 / **已提交 Git**；未在 Apple Books 真机验收。
 

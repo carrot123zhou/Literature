@@ -632,16 +632,21 @@ class FootnoteExportTests(unittest.TestCase):
 
     def test_plan_binds_markers_to_notes_and_repeats_share_one_note(self) -> None:
         plan = build_plan(self.document.blocks)
-        self.assertEqual(set(plan.links), {"fn1", "fn2", "fn9"})
+        self.assertEqual(set(plan.links), {"fn1", "fn2", "fn9", "fn8"})
         self.assertEqual(plan.links["fn1"].number, "1")
         self.assertEqual([ref.host_block_id for ref in plan.links["fn1"].refs], ["fp1", "fp2"])
         self.assertEqual(plan.links["fn2"].number, "2")
         self.assertEqual(plan.links["fn2"].text, "Second note.")
         self.assertEqual(plan.links["fn9"].number, "9")
+        # fn8 有编号但正文无对应标记（MinerU 丢上标的场景）：回退锚定到最近正文块末尾。
+        fallback = plan.links["fn8"].refs[0]
+        self.assertTrue(fallback.is_fallback)
+        self.assertEqual(fallback.host_block_id, "fp4")
+        self.assertEqual(plan.links["fn8"].body, "Never referenced.")
+        # fn3 无编号且上一条注文以句号收尾：不算续行，保持页末注原样。
         self.assertNotIn("fn3", plan.links)
-        self.assertNotIn("fn8", plan.links)
-        # 无注文可绑的标记不生成任何链接。
-        self.assertEqual(plan.refs_by_host.get("fp4"), None)
+        # ^{7} 没有对应注文，不生成任何引用。
+        self.assertEqual([ref.number for ref in plan.refs_by_host["fp4"]], ["8"])
 
     def test_epub_converts_linked_notes_to_asides(self) -> None:
         value = self._export(formats=["epub"], mode="source")
@@ -651,18 +656,28 @@ class FootnoteExportTests(unittest.TestCase):
             bodies = {name: archive.read(name).decode("utf-8")
                       for name in archive.namelist() if name.startswith("EPUB/text/")}
         text = "".join(bodies.values())
-        self.assertIn('<a class="noteref" epub:type="noteref" href="#fn-fn1"><sup>1</sup></a>', text)
-        self.assertIn('<a class="noteref" epub:type="noteref" href="#fn-fn2"><sup>2</sup></a>', text)
-        self.assertIn('<aside epub:type="footnote" id="fn-fn1">', text)
+        self.assertIn('<a id="ref-fn-fn1-1" class="noteref" epub:type="noteref" href="#fn-fn1"><sup>1</sup></a>', text)
+        self.assertIn('<a id="ref-fn-fn2-1" class="noteref" epub:type="noteref" href="#fn-fn2"><sup>2</sup></a>', text)
+        self.assertIn('<aside class="footnotes" epub:type="footnote" id="fn-fn1">', text)
         self.assertIn("First note.", text)
         self.assertIn("Second note.", text)
         # 注文文本不再含引导标记；全文只出现一次（aside 内），正文流不重复。
         self.assertNotIn("^{2} Second note.", text)
         self.assertEqual(text.count("1. First note."), 1)
-        # 未匹配的注文照常保留，未绑定的标记降级为印刷上标（不再留 ``^{7}``）。
-        self.assertIn("Running head without number.", text)
-        self.assertIn("Stray<sup>7</sup> marker without note.", text)
-        self.assertIn("8. Never referenced.", text)
+        # 回退锚定：fp4 末尾补回编号 8 的上标引用（印刷书里有、MinerU 丢了）。
+        self.assertIn("Stray<sup>7</sup> marker without note."
+                      '<a id="ref-fn-fn8-1" class="noteref" epub:type="noteref" href="#fn-fn8">'
+                      "<sup>8</sup></a>", text)
+        # 注文统一在章节末尾：fn9/fn8 的 aside 排在第二章正文之后，fn8 不再是页末注段落。
+        self.assertLess(text.find("Stray<sup>7</sup>"), text.find('id="fn-fn9"'))
+        self.assertLess(text.find('id="fn-fn9"'), text.find('id="fn-fn8"'))
+        # fn8 的注文只出现一次，且位于 fn8 aside 内（章节末尾），紧跟 ↩ 回链。
+        self.assertEqual(text.count('<p class="footnote source">8. Never referenced.</p>'), 1)
+        self.assertIn('<p class="footnote source">8. Never referenced.</p>'
+                      '</section><p class="noteref-back">'
+                      '<a epub:type="footnote-return" href="#ref-fn-fn8-1">\u21a9</a></p>', text)
+        # 无编号注（上一条以句号收尾）保持页末注段落。
+        self.assertIn('<p class="footnote source">Running head without number.</p>', text)
         self.assertNotIn("^{", text)
         # 绑定注文的正文标记不再是字面量。
         self.assertNotIn("^{9}", text)
@@ -674,13 +689,14 @@ class FootnoteExportTests(unittest.TestCase):
         with zipfile.ZipFile(path) as archive:
             text = "".join(archive.read(name).decode("utf-8")
                            for name in archive.namelist() if name.startswith("EPUB/text/"))
-        self.assertIn('<aside epub:type="footnote" id="fn-fn1">', text)
+        self.assertIn('<aside class="footnotes" epub:type="footnote" id="fn-fn1">', text)
         self.assertIn('<p class="footnote source" xml:lang="en" lang="en">1. First note.</p>', text)
         self.assertIn('<p class="footnote translation">第一条注。</p>', text)
         # 注文自身的引导标记在译文里同样不渲染（``^{2} 第二条注。`` → 正文）。
         self.assertIn('<p class="footnote translation">第二条注。</p>', text)
-        # 原文 + 译文角色里的同号标记都转成引用（fp1 2+2、fp2 1+1、fp3 1+1）。
-        self.assertEqual(text.count('epub:type="noteref"'), 8)
+        # 原文 + 译文角色里的同号标记都转成引用（fp1 2+2、fp2 1+1、fp3 1+1），
+        # 另加 fn8 的回退锚点（fp4 原文段末尾）。
+        self.assertEqual(text.count('epub:type="noteref"'), 9)
 
     def test_epub_renders_plain_superscripts(self) -> None:
         """未绑到脚注的 ``^{…}``（指数/分数/序数）按上标渲染，不当 LaTeX 留在成品里。"""
@@ -710,10 +726,14 @@ class FootnoteExportTests(unittest.TestCase):
         self.assertIn("Second note.", footnotes)
         self.assertIn("第一条注。", footnotes)
         self.assertNotIn("^{2} Second", footnotes)
-        # 未匹配注文仍是普通段落；已绑定注文不再出现在正文流。
+        # 未编号注（上一条以句号收尾）仍是普通段落；已绑定注文不再出现在正文流。
         self.assertIn("Running head without number.", document_xml)
-        self.assertIn("Never referenced.", document_xml)
+        # fn8 经页位回退锚定进入真脚注，正文流不再保留。
+        self.assertIn("Never referenced.", footnotes)
+        self.assertNotIn("Never referenced.", document_xml)
         self.assertNotIn("First note.", document_xml)
+        # 引用数：fn1 首锚、fn2、fn9、fn8 回退锦各一次（重复引用降级为上标文字）。
+        self.assertEqual(document_xml.count("<w:footnoteReference"), 4)
         # 未绑定标记同样降级为上标 run，文档里不留 ``^{…}``。
         self.assertNotIn("^{", document_xml)
         self.assertNotIn("^{", footnotes)
@@ -722,6 +742,41 @@ class FootnoteExportTests(unittest.TestCase):
 
         word = WordDocument(str(path))  # 能正常打开
         self.assertTrue(word.paragraphs)
+
+
+    def test_plan_merges_continuations_and_parses_more_leading_numbers(self) -> None:
+        """无编号续行并入上一条；Unicode 上标、``N␣`` 前缀也能识别。"""
+        blocks = [
+            Block("t0", "title", 0, 0, source_text="C", level=1),
+            Block("p0", "paragraph", 1, 0, source_text="Text.^{1}"),
+            Block("fa", "footnote", 2, 0, source_text="1. See the chart below"),
+            Block("fb", "footnote", 3, 0, source_text="which was redrawn for this edition."),
+            Block("fc", "footnote", 4, 0, source_text="\u00b9 Unicode leading."),
+            Block("fd", "footnote", 5, 0, source_text="15 Bare leading."),
+        ]
+        plan = build_plan(blocks)
+        self.assertEqual(set(plan.absorbed), {"fb"})
+        self.assertEqual(plan.links["fa"].text, "1. See the chart below which was redrawn for this edition.")
+        self.assertEqual(plan.links["fa"].number, "1")
+        self.assertEqual(plan.links["fc"].number, "1")
+        self.assertEqual(plan.links["fd"].number, "15")
+        # 三条注都经页位回退（或精确）锦到正文块末尾。
+        self.assertEqual(plan.links["fa"].refs[0].host_block_id, "p0")
+        self.assertEqual(plan.links["fc"].refs[0].host_block_id, "p0")
+        self.assertEqual(plan.links["fd"].refs[0].host_block_id, "p0")
+        self.assertEqual(plan.links["fd"].body, "Bare leading.")
+
+    def test_epub_asides_live_at_section_end(self) -> None:
+        """aside 顺序 = 锚点顺序，全部在章节正文之后、nav 之外。"""
+        value = self._export(formats=["epub"], mode="source")
+        path = Path(value["path"]) / "Book.epub"
+        with zipfile.ZipFile(path) as archive:
+            chapter_two = archive.read("EPUB/text/section-0002.xhtml").decode("utf-8")
+        body_end = chapter_two.rindex("</body>")
+        for note in ("fn-fn9", "fn-fn8"):
+            anchor = chapter_two.index(f'id="{note}"')
+            self.assertLess(anchor, body_end)
+        self.assertGreater(chapter_two.index('id="fn-fn8"'), chapter_two.index("Stray<sup>7</sup>"))
 
     def test_markdown_keeps_page_note_rendering(self) -> None:
         value = self._export(formats=["markdown"], mode="source")

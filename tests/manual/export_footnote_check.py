@@ -38,10 +38,29 @@ def check_project(store: ProjectStore, project_id: str, title: str, locale: str)
         with zipfile.ZipFile(next(root.glob("**/*.epub"))) as archive:
             names = [n for n in archive.namelist() if n.endswith((".xhtml", ".opf"))]
             text = "".join(archive.read(name).decode("utf-8") for name in names)
-        asides = len(re.findall(r'<aside epub:type="footnote"', text))
+        asides = len(re.findall(r'<aside class="footnotes" epub:type="footnote"', text))
         refs = len(re.findall(r'epub:type="noteref"', text))
+        aside_ids = re.findall(r'<aside class="footnotes" epub:type="footnote" id="([^"]+)"', text)
+        duplicate_ids = {i for i in aside_ids if aside_ids.count(i) > 1}
+        # 每个 noteref 的 href 都要能解析（含跨文件 text/section-XXXX.xhtml#fn-…）。
+        anchors: dict[str, set[str]] = {}
+        broken = 0
+        for name in [n for n in archive.namelist() if n.startswith("EPUB/text/") and n.endswith(".xhtml")]:
+            page = archive.read(name).decode("utf-8")
+            anchors[name] = set(re.findall(r'id="(fn-[^"]+)"', page))
+        for name in anchors:
+            page = archive.read(name).decode("utf-8")
+            for match in re.finditer(r'<a class="noteref"[^>]*href="([^"]+)"', page):
+                href = match.group(1)
+                if href.startswith("#"):
+                    broken += href[1:] not in anchors[name]
+                else:
+                    target, fragment = href.split("#", 1)
+                    broken += fragment not in anchors.get(f"EPUB/{target}", set())
         ok &= asides == len(plan.links) and "^{" not in text
-        print(f"  EPUB  asides={asides} 生成noteref={refs} 残留标记={text.count('^{')}")
+        ok &= not duplicate_ids and broken == 0
+        print(f"  EPUB  asides={asides} 生成noteref={refs} 重复aside id={len(duplicate_ids)} "
+              f"断链={broken} 残留标记={text.count('^{')}")
 
         docx = next(root.glob("**/*.docx"))
         with zipfile.ZipFile(docx) as archive:

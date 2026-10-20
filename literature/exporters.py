@@ -92,6 +92,10 @@ figcaption{color:#63716b;font-size:.92em}
 .block{margin:.7rem 0}
 pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#eeeee6;padding:.6rem;border-radius:.3rem}
 .footnote{color:#63716b;font-size:.94em}
+a.noteref{color:inherit;text-decoration:none;font-size:.72em;vertical-align:super}
+aside.footnotes{margin-top:1.5rem;padding-top:.9rem;border-top:1px solid #bac5bd}
+p.noteref-back{margin:.5rem 0 0;font-size:.85em}
+p.noteref-back a{text-decoration:none;color:#2f5142}
 """.strip() + "\n"
 
 _INDEX_CSS_EXTRA = """
@@ -197,8 +201,11 @@ td,th{border:1px solid;padding:.4em .55em;text-align:left;vertical-align:top}
 
 a{color:inherit}
 
-/* 页下注转真脚注：正文上标引用 + aside 注文（阅读器弹层展示，不占正文流） */
+/* 页下注转真脚注：正文上标引用 + 章末 aside 注文（阅读器弹层或章末注列表） */
 a.noteref{color:inherit;text-decoration:none;font-size:.72em;line-height:0;vertical-align:super}
+aside.footnotes{margin-top:1.5em;padding-top:.9em;border-top:1px solid}
+p.noteref-back{margin:.5em 0 0;text-indent:0;font-size:.85em}
+p.noteref-back a{text-decoration:none}
 
 /* 目录页 */
 nav > h1{margin:2em 0 1em}
@@ -598,11 +605,13 @@ def _markdown_block(block: Block, entry: TranslationEntry | None, mode: ExportMo
 
 def render_markdown(
     document: Document, blocks: list[Block], layer: TranslationLayer | None, mode: ExportMode,
-    assets: dict[str, str] | None = None,
+    assets: dict[str, str] | None = None, plan: FootnotePlan | None = None,
 ) -> str:
     mapping = assets if assets is not None else asset_plan(document, Path("."))
     lines: list[str] = []
     for block in blocks:
+        if plan is not None and block.block_id in plan.absorbed:
+            continue  # 续行块已并入前注，不重复输出
         lines.extend(_markdown_block(block, entry_for(layer, block), mode, mapping))
     text = "\n".join(lines).rstrip() + "\n"
     for resource_id, filename in mapping.items():
@@ -622,24 +631,45 @@ def _lang_attr(role: str, mode: ExportMode, source_language: str) -> str:
     return ""
 
 
+class _RefContext:
+    """一次导出内的引用渲染状态：noteref 序号、注文所在文件、当前输出文件。
+
+    同一注文被多章同号标记共享时，aside 只在首锚章节渲染一次；其他章节的
+    noteref 需要跨文件链接（``text/section-0007.xhtml#fn-…``）。
+    """
+
+    def __init__(self) -> None:
+        self.counters: dict[str, int] = {}
+        self.note_file: dict[str, str] = {}
+        self.current: str = ""
+
+
 def _epub_note_anchor(note_block_id: str) -> str:
     return "fn-" + re.sub(r"[^A-Za-z0-9_-]", "_", note_block_id)
 
 
-def _epub_noteref(number: str, note_block_id: str) -> str:
+def _epub_noteref(number: str, note_block_id: str, ctx: "_RefContext | None" = None) -> str:
     anchor = _epub_note_anchor(note_block_id)
-    return f'<a class="noteref" epub:type="noteref" href="#{anchor}"><sup>{html.escape(number)}</sup></a>'
+    if ctx is None:
+        return f'<a class="noteref" epub:type="noteref" href="#{anchor}"><sup>{html.escape(number)}</sup></a>'
+    ordinal = ctx.counters.get(note_block_id, 0) + 1
+    ctx.counters[note_block_id] = ordinal
+    target = ctx.note_file.get(note_block_id) or ""
+    href = f"#{anchor}" if not target or target == ctx.current else f"{target}#{anchor}"
+    return (f'<a id="ref-{anchor}-{ordinal}" class="noteref" epub:type="noteref" '
+            f'href="{href}"><sup>{html.escape(number)}</sup></a>')
 
 
 def _escape_with_refs(text: str, plan: FootnotePlan | None, block: Block, role: str,
-                      by_offset: bool | None = None) -> str:
+                      by_offset: bool | None = None,
+                      ctx: "_RefContext | None" = None) -> str:
     """HTML 转义；已绑定的 ``^{N}`` 标记换成 noteref，其余 ``^{…}`` 按上标渲染。"""
     if not text:
         return ""
     if plan is None:
         return _html_text(text)
     segments = annotate_footnote_markers(text, plan, block, role, by_offset)
-    return _render_html_segments(segments)
+    return _render_html_segments(segments, ctx)
 
 
 def _html_text(value: str) -> str:
@@ -658,11 +688,12 @@ def _html_text(value: str) -> str:
     return "".join(parts)
 
 
-def _render_html_segments(segments: list[tuple[str, str, str]]) -> str:
+def _render_html_segments(segments: list[tuple[str, str, str]],
+                          ctx: "_RefContext | None" = None) -> str:
     parts: list[str] = []
     for kind, value, note_id in segments:
         if kind == "ref":
-            parts.append(_epub_noteref(value, note_id))
+            parts.append(_epub_noteref(value, note_id, ctx))
         else:
             parts.append(_html_text(value))
     return "".join(parts)
@@ -682,40 +713,70 @@ def _drop_leading_note_marker(segments: list[tuple[str, str, str]], number: str)
     return segments[1:]
 
 
+def _note_role_texts(link: "NoteLink", plan: FootnotePlan, layer: TranslationLayer | None,
+                     mode: ExportMode) -> list[tuple[str, str]]:
+    """注文的角色文本；续行块并入后，其译文也拼进同一条注文。"""
+    source = link.text
+    translated_parts: list[str] = []
+    entry = entry_for(layer, link.block)
+    if entry is not None and entry.text:
+        translated_parts.append(entry.text)
+    for absorbed_id, target_id in plan.absorbed.items():
+        if target_id != link.block_id:
+            continue
+        absorbed_entry = entry_for(layer, plan.absorbed_blocks[absorbed_id])
+        if absorbed_entry is not None and absorbed_entry.text:
+            translated_parts.append(absorbed_entry.text)
+    translated = " ".join(part.strip() for part in translated_parts if part and part.strip())
+    if mode == "source":
+        return [("source", source)]
+    if mode == "translation":
+        return [("translation", translated or source)]
+    roles = [("source", source)]
+    if translated:
+        roles.append(("translation", translated))
+    return roles
+
+
 def _epub_footnote_asides(note_ids: list[str], plan: FootnotePlan, layer: TranslationLayer | None,
-                          mode: ExportMode, source_language: str) -> str:
-    """把锚定在该正文块之后的页下注渲染为 EPUB3 footnote aside。"""
+                          mode: ExportMode, source_language: str,
+                          ctx: "_RefContext | None" = None) -> str:
+    """把一组页下注渲染为章节末尾的 EPUB3 footnote aside（含 ↩ 回链）。"""
     parts: list[str] = []
     for note_id in note_ids:
         link = plan.links.get(note_id)
         if link is None:
             continue
         block = link.block
+        anchor = _epub_note_anchor(note_id)
         inner = [
             f'<section class="block block-footnote" data-block-id="{html.escape(block.block_id)}"'
             f' data-page="{block.page_index + 1}">'
         ]
-        for role, text in _text_roles(block, entry_for(layer, block), mode):
+        for role, text in _note_role_texts(link, plan, layer, mode):
             if not text:
                 continue
-            segments = annotate_footnote_markers(text, plan, block, role)
-            segments = _drop_leading_note_marker(segments, link.number)
-            if not segments:
+            segments = _drop_leading_note_marker([("text", text, "")], link.number)
+            rendered = _render_html_segments(segments, ctx)
+            if not rendered:
                 continue
             inner.append(
-                f'<p class="footnote {role}"{_lang_attr(role, mode, source_language)}>'
-                f'{_render_html_segments(segments)}</p>'
+                f'<p class="footnote {role}"{_lang_attr(role, mode, source_language)}>{rendered}</p>'
             )
         inner.append("</section>")
-        parts.append(f'<aside epub:type="footnote" id="{_epub_note_anchor(note_id)}">{"".join(inner)}</aside>')
+        back = f"#ref-{anchor}-1"
+        inner.append(f'<p class="noteref-back"><a epub:type="footnote-return" href="{back}">↩</a></p>')
+        parts.append(f'<aside class="footnotes" epub:type="footnote" id="{anchor}">{"".join(inner)}</aside>')
     return "".join(parts)
 
 
 def _block_html(block: Block, entry: TranslationEntry | None, mode: ExportMode, assets: dict[str, str],
-                source_language: str = "", plan: FootnotePlan | None = None) -> str:
+                source_language: str = "", plan: FootnotePlan | None = None,
+                ctx: "_RefContext | None" = None) -> str:
     kind = block.type
-    if kind == "footnote" and plan is not None and block.block_id in plan.links:
-        return ""  # 已绑定页下注：移到锚点后的 aside，正文流不再重复
+    if kind == "footnote" and plan is not None and (
+            block.block_id in plan.links or block.block_id in plan.absorbed):
+        return ""  # 已绑定注文移到章末 aside（续行块已并入前注），正文流不再重复
     output = [
         f'<section class="block block-{html.escape(kind)}"'
         f' data-block-id="{html.escape(block.block_id)}" data-page="{block.page_index + 1}">'
@@ -724,21 +785,22 @@ def _block_html(block: Block, entry: TranslationEntry | None, mode: ExportMode, 
         tag = f"h{max(1, min(6, int(block.level or 1)))}"
         for role, text in _text_roles(block, entry, mode):
             output.append(f'<{tag} class="{role}"{_lang_attr(role, mode, source_language)}>'
-                          f'{_escape_with_refs(text, plan, block, role)}</{tag}>')
+                          f'{_escape_with_refs(text, plan, block, role, ctx=ctx)}</{tag}>')
     elif kind in {"paragraph", "code"}:
         tag = "pre" if kind == "code" else "p"
         for role, text in _text_roles(block, entry, mode):
             output.append(f'<{tag} class="{role}"{_lang_attr(role, mode, source_language)}>'
-                          f'{_escape_with_refs(text, plan, block, role)}</{tag}>')
+                          f'{_escape_with_refs(text, plan, block, role, ctx=ctx)}</{tag}>')
     elif kind == "footnote":
         for role, text in _text_roles(block, entry, mode):
             output.append(f'<p class="footnote {role}"{_lang_attr(role, mode, source_language)}>'
-                          f'{_escape_with_refs(text, plan, block, role)}</p>')
+                          f'{_escape_with_refs(text, plan, block, role, ctx=ctx)}</p>')
     elif kind == "list":
         for role, values in _list_roles(block, entry, mode):
             attr = _lang_attr(role, mode, source_language)
             items = "".join(
-                f"<li>{_escape_with_refs(value, plan, block, role, by_offset=False)}</li>" for value in values
+                f"<li>{_escape_with_refs(value, plan, block, role, by_offset=False, ctx=ctx)}</li>"
+                for value in values
             )
             output.append(f'<ul class="{role}"{attr}>{items}</ul>')
     elif kind == "equation":
@@ -800,7 +862,7 @@ def _write_markdown(project: Path, root: Path, document: Document, blocks: list[
                     mode: ExportMode, assets: dict[str, str]) -> list[tuple[Path, bool]]:
     root.mkdir(parents=True, exist_ok=True)
     target = root / "full.md"
-    target.write_text(render_markdown(document, blocks, layer, mode, assets), encoding="utf-8")
+    target.write_text(render_markdown(document, blocks, layer, mode, assets, build_plan(blocks)), encoding="utf-8")
     files: list[tuple[Path, bool]] = [(target, True)]
     for path in _copy_assets(project, root / "assets", document, assets):
         files.append((path, True))
@@ -814,9 +876,22 @@ def _write_html(project: Path, root: Path, document: Document, blocks: list[Bloc
     language = _display_language(document, layer, mode)
     files: list[tuple[Path, bool]] = []
     nav_items: list[tuple[str, str, int]] = []
-    for index, section in enumerate(sections, 1):
+    plan = build_plan(blocks)
+    ctx = _RefContext()
+    source_language = str(document.source_language or "")
+    section_notes = [plan.section_note_ids(section.blocks) for section in sections]
+    for index, notes in enumerate(section_notes, 1):
+        for note_id in notes:
+            ctx.note_file[note_id] = f"chapter-{index:04d}.html"
+    for index, (section, notes) in enumerate(zip(sections, section_notes), 1):
         filename = f"chapter-{index:04d}.html"
-        body = "".join(_block_html(block, entry_for(layer, block), mode, assets) for block in section.blocks)
+        ctx.current = filename
+        body = "".join(
+            _block_html(block, entry_for(layer, block), mode, assets, source_language, plan, ctx)
+            for block in section.blocks
+        )
+        # 注文统一放章节末尾（与 EPUB 一致）。
+        body += _epub_footnote_asides(notes, plan, layer, mode, source_language, ctx)
         (root / filename).write_text(_page_html(section.title, language, body, stylesheet="style.css"), encoding="utf-8")
         files.append((root / filename, False))
         if section.nav:
@@ -899,16 +974,22 @@ def _write_epub(project: Path, root: Path, document: Document, blocks: list[Bloc
     if cover is not None:
         spine.append('<itemref idref="cover-page" linear="yes"/>')
     plan = build_plan(blocks)
-    host_notes = plan.host_first_note_ids()
+    ctx = _RefContext()  # 同一注文可被多次引用：aside 只在首锚章节，其余跨文件链接
+    section_notes = [plan.section_note_ids(section.blocks) for section in sections]
+    for index, notes in enumerate(section_notes, 1):
+        for note_id in notes:
+            ctx.note_file[note_id] = f"text/section-{index:04d}.xhtml"
     nav_items: list[tuple[str, str, int]] = []
     bodies: list[tuple[str, str]] = []
-    for index, section in enumerate(sections, 1):
+    for index, (section, notes) in enumerate(zip(sections, section_notes), 1):
         filename = f"text/section-{index:04d}.xhtml"
+        ctx.current = filename
         body = "".join(
-            _block_html(block, entry_for(layer, block), mode, assets, source_language, plan)
-            + _epub_footnote_asides(host_notes.get(block.block_id, []), plan, layer, mode, source_language)
+            _block_html(block, entry_for(layer, block), mode, assets, source_language, plan, ctx)
             for block in section.blocks
         )
+        # 所有注文统一放在章节末尾（章末注），不在正文流里逐段插入。
+        body += _epub_footnote_asides(notes, plan, layer, mode, source_language, ctx)
         bodies.append((filename, _xhtml(section.title, language, body)))
         manifest_items.append(f'<item id="section-{index}" href="{filename}" media-type="application/xhtml+xml"/>')
         spine.append(f'<itemref idref="section-{index}"/>')
@@ -1142,10 +1223,10 @@ def _docx_footnotes_part(word: Any, plan: FootnotePlan, blocks: list[Block],
         link = plan.links[note_id]
         block = link.block
         paragraphs_xml: list[str] = []
-        for role, text in _text_roles(block, entry_for(layer, block), mode):
+        for role, text in _note_role_texts(link, plan, layer, mode):
             if not text:
                 continue
-            stripped = link.body if text == (block.source_text or "") else text
+            stripped = link.body if role == "source" else text
             if role == "source":
                 paragraphs_xml.append(
                     f'<w:p><w:pPr><w:spacing w:after="60"/></w:pPr>'
@@ -1211,8 +1292,8 @@ def _write_docx(project: Path, root: Path, document: Document, blocks: list[Bloc
                 if mode == "bilingual" and role == "translation":
                     _docx_quote(heading)
         elif kind == "footnote":
-            if block.block_id in plan.links:
-                continue  # 已写入 word/footnotes.xml，正文流不再重复
+            if block.block_id in plan.links or block.block_id in plan.absorbed:
+                continue  # 已写入 word/footnotes.xml（续行块已并入前注），正文流不再重复
             for role, text in _text_roles(block, entry, mode):
                 if not text:
                     continue
