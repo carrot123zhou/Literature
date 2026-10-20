@@ -286,7 +286,10 @@ export default function ReviewWorkspace(props: Props) {
   // 主流程只传 mode（服务端按档位派生 preset）；高级选项里被显式改动的字段才随请求覆盖。
   const runModel = () => {
     if (posting.current || structureRunning || busy) return;
-    const resumable = structureJob && ["failed", "paused"].includes(structureJob.status) ? structureJob.job_id : "";
+    const resumable = structureJob && structureJob.status === "paused" ? structureJob.job_id : "";
+    // 注意：只有「暂停」才走续跑契约（后端复用旧作业快照）。失败的任务必须新建作业：
+    // 否则用户改完高级设置（如重新指定目录页）点「开始校准」，实际会静默沿用失败
+    // 作业的旧参数重新报同样的错。新建时指向旧作业，已完成请求仍然可复用。
     const resuming = Boolean(resumable);
     const preset = MODE_PRESET[mode];
     const body: Record<string, unknown> = { service_id: taskModel.service_id, model: taskModel.model, mode, reasoning_mode: reasoningMode, reasoning_budget: reasoningMode === "inherit" ? 0 : reasoningBudget };
@@ -308,6 +311,7 @@ export default function ReviewWorkspace(props: Props) {
       if (options.tocExtraction !== preset.tocExtraction) body.toc_extraction = options.tocExtraction;
       if (options.proofreadConcurrency !== 2) body.proofread_concurrency = options.proofreadConcurrency;
       if (options.planningMode !== preset.planningMode) body.planning_mode = options.planningMode;
+      if (structureJob?.status === "failed" && structureJob.job_id) body.reuse_job_id = structureJob.job_id;
     }
     posting.current = true;
     setStructureRunning(true);

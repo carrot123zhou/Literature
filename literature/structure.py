@@ -314,13 +314,20 @@ def plan_structure_analysis(
     pages: list[int] = []
     if extract_toc:
         candidates = find_toc_page_candidates(document)
-        pages = sorted(set(toc_page_indexes)) if toc_page_indexes else signals.find_toc_pages(document)
-        if not pages and not toc_page_indexes:
-            pages = sorted(int(item["page_index"]) for item in candidates[:toc_page_limit]
-                           if float(item.get("confidence", 0)) >= TOC_PAGE_MIN_CONFIDENCE)
         limit = max(1, min(6, int(toc_page_limit)))
-        if len(pages) > limit:
-            raise StorageError(f"目录页超过 {limit} 页，请缩小范围后重试。")
+        if toc_page_indexes:
+            pages = sorted({int(value) for value in toc_page_indexes})
+            if len(pages) > limit:
+                raise StorageError(
+                    f"目录页最多 {limit} 页，当前选择了 {len(pages)} 页；请在「限定目录页」里减少页数。")
+        else:
+            # 自动识别不硬失败：目录标记页向后扩展可能把版式相似的相邻页（题词、
+            # 版权、图版清单）一并计入，识别出超过上限的页数。这时只取前 limit 页
+            # 继续（标记页是运行起点，不会被截掉），而不是让整个作业无法启动。
+            pages = signals.find_toc_pages(document)[:limit]
+            if not pages:
+                pages = sorted(int(item["page_index"]) for item in candidates[:toc_page_limit]
+                               if float(item.get("confidence", 0)) >= TOC_PAGE_MIN_CONFIDENCE)
         if any(page < 0 or page >= document.page_count for page in pages):
             raise StorageError("目录页超出源文件范围。")
     # 明确选定目录页时只排除这些页；未选定时回退到本地候选。这样不会仅凭候选

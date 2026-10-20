@@ -146,6 +146,8 @@ Tauri macOS 客户端（单实例）
 
 **能力标记**：以 `/health` 的 `capabilities` 为唯一事实来源（`literature/api.py`）——当前含 `intake_items_v1`、`structure_review_v2`、`model_services_v1/v2/v3/v4`、`structure_modes_v1`、`structure_pause_v1`、`structure_flow_v1`、`translation_engine_v2`、`translation_safety_v1`、`parse_lifecycle_v1`、`task_history_v1`、`export_v1`、`export_manage_v1` 等。前端启动时校验关键标记，不静默复用旧后端。注：导出模块（`exporters.py`、`export_v1`）为重新引入版本（与 §2.5 的「已移除」历史决定冲突，待归档计划文本），已于 2026-10-17 随工作区一并提交（`13f3bfd`）；2026-10-17 已重做 EPUB 排版（出版级 CSS：两端对齐+首行缩进+段间距+serif 栈、对照去竖线、导航目录原文·译文/译文纯译文、原书 PDF 首页封面），已重新打包安装（sidecar `4441cacd…`，快照 `.rollback-Literature-20261017024354.app`），未真机验收。
 
+**结构校准目录页死锁修复（2026-10-20）**：自动识别目录页超 6 页不再硬报错（截取前 6 页继续，标记页保留）；失败作业改新建+`reuse_job_id`，用户重设目录页不再被旧快照静默覆盖；高级选项五个诊断覆盖收进子折叠。pytest 622 passed、tsc/Vite 通过；未打包安装、未真机验收。
+
 **尚未完成或尚未真实验收（不混写）**：
 
 - 真实模型验收：粗校/精校真实模型 A/B（准确率/耗时/token 收益均未验证）；真实视觉模型准确率与费用；真实 MinerU Token 多格式在线 smoke test。

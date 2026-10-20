@@ -80,6 +80,39 @@ class StructureCalibrationTests(unittest.TestCase):
         with self.assertRaises(StorageError):
             plan_structure_analysis(self.doc, [], extract_toc=True, proofread=True, toc_page_indexes=[2])
 
+    def test_auto_detected_toc_pages_over_limit_are_truncated_not_rejected(self):
+        """回归（2026-10-20）：自动识别超出 6 页时不再硬报错，截到前 6 页继续。
+
+        真实案例：原书只有 1 页目录，但目录标记页向后扩展把版式相似的相邻页
+        一并计入，返回 7+ 页；旧逻辑直接抛“目录页超过 6 页，请缩小范围后重试”，
+        而自动模式下用户没有范围可缩小，作业无法启动。
+        """
+        from literature import structure_signals as signals
+
+        def toc_page(page_index: int, start: int) -> list[Block]:
+            lines = [f"Chapter {start + i} Sample Entry {start * 3 + i}" for i in range(6)]
+            return [Block(block_id=f"p{page_index}-{i}", type="paragraph", page_index=page_index,
+                          order=page_index * 10 + i, source_text=line, bbox=[100, 100 + i * 40, 900, 130 + i * 40])
+                    for i, line in enumerate(lines)]
+
+        pages = [Block(block_id="mark", type="title", page_index=0, order=0,
+                       source_text="Contents", level=1, bbox=[100, 50, 800, 100]),
+                 Block(block_id="e0", type="paragraph", page_index=0, order=1,
+                       source_text="Preface vii", bbox=[100, 120, 900, 150])]
+        for i in range(1, 8):
+            pages.extend(toc_page(i, i * 6 + 1))
+        doc = Document(project_id=self.project_id, title="ManyToc", source_language="en", page_count=8,
+                       blocks=pages, pages=[Page(page_index=i, width=600, height=800) for i in range(8)])
+        self.assertGreater(len(signals.find_toc_pages(doc)), 6)
+        plan = plan_structure_analysis(doc, self.toc, extract_toc=True, proofread=False)
+        self.assertLessEqual(len(plan["toc_pages"]), 6)
+        self.assertEqual(plan["toc_pages"][0]["page_index"], 0)
+
+    def test_user_specified_toc_pages_over_limit_still_rejected(self):
+        with self.assertRaises(StorageError):
+            plan_structure_analysis(self.doc, [], extract_toc=True, proofread=False,
+                                    toc_page_indexes=list(range(7)))
+
     def test_model_promotion_cannot_be_automatically_applied(self):
         class Provider:
             def complete(inner, **_):
