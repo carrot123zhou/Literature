@@ -5,6 +5,44 @@
 > 条目为「最新在上」。2026-10-14 前的手工「第N轮」编号是遗留标记（历史上出现过重复，已用 `·` 后缀消歧），不再续编；新条目用 `## YYYY-MM-DD · 主题`，引用时以上文日期与主题为准。
 
 
+## 2026-10-25 · 导出主文件统一使用文档名
+状态：已编码 / 全量 pytest 634 passed（exporters+api 66，新增 2 项）；本轮未改前端（tsc/Vite 不适用）；**未打包安装，未在安装客户端真实验收**。
+
+需求（用户）：导出的文件都以「文档名」命名（如 Markdown 目前是 full.md）。
+
+- **Markdown**（续接工作树已有改动并完善）：主文件 ``<名称>.md``；显式 `filename` 优先，缺省回退 `document.title`（私有缺省入口同样回退文档名，清洗后为空才退回 `full`）。
+- **HTML**：主入口由 `index.html` 改为 ``<名称>.html``，并标记为 single_file（与 EPUB/DOCX/MD 一致，可另存/可重命名）；章节 `chapter-*.html`、`style.css`、`assets/` 保持格式所需命名不变；章内互链本就不指向主入口固定名，导航与锚链接改后仍有效（回归断言主入口全部 href 落盘存在、章节页无 index.html 引用）。
+- **命名源**：统一 `safe_name(filename or document.title)`；非法路径字符清洗；不产生双扩展名。下载名=物理名=rel_path（FileResponse filename=path.name，前端按 rel_path 下载）。
+- **不更名**：原始 MinerU `full.md`、canonical `document.json` 是内部证据/数据；历史导出产物不迁移；EPUB 内部 `EPUB/*` 与 DOCX OOXML 固定路径不变。
+- **回归**：多格式产物 rel_path 断言（`html/Book.html` 取代 index.html，主文件均 single_file）；`test_default_names_use_document_title_and_clean_illegal_chars`（中文文档名 + `safe_name` 清洗 + 无双扩展名）；`test_markdown_private_entry_falls_back_to_document_title`；既有 `Book.md`/`scan.md`/自定义名/重命名/穿越用例全绿。
+- **边界**：2026-10-21 Markdown 命名条目保留历史；已随同日打包安装进 `launcher/Literature.app`（见 AI 目录校准条目内的打包安装段），待用户真机验收。
+
+## 2026-10-25 · AI目录校准零高级配置与无目录论文策略完善
+状态：已编码 / 全量 pytest 632 passed / tsc --noEmit 与 Vite 生产构建通过 / 隔离真实浏览器验收：零高级配置 25 项、结构 UI 32 项、对照观看、目录覆盖 4 套全 PASS、0 脚本错误（截图 `tmp/advanced-simplify.png` 等）；**未打包安装、未真实模型复跑、未真机验收**。
+
+需求（用户）：AI 目录校准不应让用户配置任何复杂高级选项，把工作交给 AI、预设 prompt 与自动脚本；补充：无目录的论文应自动调整策略（现有 AI 已能做部分无目录校准），查看并完善该路径，不让用户选“论文/无目录模式”。Lead 复核后已修正 5 项正确性问题（见文末「复核修正」）。
+
+- **前端零高级配置（`OutlinePane.tsx` / `ReviewWorkspace.tsx`）**：删除「高级选项」折叠及全部 7 个手动控件（目录基准 select、已确认目录 textarea、限定目录页、本地读取目录、只做本地校准、对照原页图片、预览启动输入、确认当前审查范围），`StructureOptions`/`MODE_PRESET`/`proposedToc` 草稿编辑与 # Markdown 手工基准全部移除。用户只剩：粗校/精校档位、开始/暂停/继续、按需展开的校对模型选择（已配置时默认折叠）；诊断详情与「查看实际模型请求」为只读展示，不是启动步骤。「目录识别不准？」按需纠错入口仅保留指定真实 PDF 目录页 + 查找目录页候选 + 清空恢复自动。
+- **启动契约**：主流程只传 `mode` + 任务级模型/思考档位；`toc_page_indexes` 仅在纠错入口填写时下发。失败作业仍新建 + `reuse_job_id`；暂停走 resume 契约（沿用冻结快照）。
+- **基准优先级（`api.py _claim_structure_job`，修复）**：显式目录/目录来源 > 显式纠错目录页 > 已保存基准 > 自动定位目录页。此前显式 `toc_page_indexes` 会被已保存基准静默截住（重新提取无法生效）；已回归。
+- **提取结果自动落库（`structure.py`）**：从真实目录页提取成功（本地采信或模型提取）直接 `save_structure_baseline(source="auto_extract")`，下次默认复用不再重复提取；仅提取为空（无目录回退/本地草稿）时不持久化，不把推断结果伪装成原书目录。
+- **无目录论文路径（`structure.py` / `structure_reasoning.py`）**：① 找不到目录页的提示从“可手工指定后重试”警告改为正常的无目录模式说明；② 模型目录提取为空/不可解析不再硬失败，自动回退本地草稿（若有）或无目录推断，作业继续；③ `local_draft` 基准线索明示“无显式目录标记、层级由整体推理复核”，且绝不持久化；④ 粗/精在无目录（baseline 空）时都不做目录收窄，候选仍是有界标题群 + 疑似短块，不做全正文扫描；⑤ `OUTLINE_PROMPT` 补充：无目录是正常文献形态、区分论文题名/作者单位/摘要/关键词/章节/结论/参考文献/附录与图题页眉脚注、按文献实际结构选一致根约定、不强制同一层级、不臆造未出现标题。
+- **目录页兜底排除收紧（`structure_model_payload`）**：未显式选页时的自动排除不再沿用“页码行密度”候选启发式整页抹除——候选页须有显式目录标记，或能本地解析出 ≥2 条目录条目（真目录页强特征；参考文献/尾注页解析不出来），且上限 6 页，避免误识别页把真实标题从候选里抹掉。
+- **只读摘要**：作业结果新增 `baseline_entries`，界面按 `baseline_source` 显示「已确认目录/原书目录（本地解析/AI 提取）/本地线索/无目录模式」，无目录不表述为需用户修复的异常。
+- **测试**：`tests/test_structure_modes_v2.py` 新增 7 项——基准优先级 3 项（mode-only 复用基准、纠错页覆盖基准、清空恢复可预期）、本地采信自动落库、模型提取空回退 local_draft 且不落库、中英文无目录论文（嵌套编号/误标作者图题参考文献）粗精两档零 extract 请求、候选不丢失、自动应用可逆、无伪基准，参考文献页标题在兜底排除下存活。浏览器：`advanced_simplify_check.cjs` 重写（25 项：移除控件不存在、零配置启动落库 coarse 作业、纠错页优先/清空恢复基准、0 错误）；`structure_ui_check.cjs` 同步零高级配置契约（POST 只带 mode、执行参数不下发、resume 契约、只读基准摘要、思考档位改模型级 UI）。
+- **边界**：后端 API 旧字段全部保留（兼容旧客户端）；默认视觉关、未引入自动视觉；未真实模型复跑（无目录论文准确率未验证，模拟桩只验证程序行为与请求契约）；未打包安装客户端，未真机验收。
+- **Lead 复核修正（同日第二轮）**：① 目录提取回退不再捕全部 `ProviderError`——新增 `TocExtractionContentError`（`ProviderError` 子类）只在响应为空/结构不可解析时回退；鉴权/超时/网络故障保持原失败语义，不再继续发后续请求（新增回归：鉴权失败→作业失败、无 outline 请求、不落基准）。② 不可信本地草稿降级为模型只读线索（`local_toc_draft` 随 outline 请求下发、提示词声明可能错误），不再作为 authoritative_toc 参与 reconciliation/粗校收窄；提取为空时自动疑似页恢复候选（显式指定页仍遵从用户选择），未被疑似条目命中的标题不丢（新增回归）。③ 自动提取基准复用不再谎报「已确认」：`StructureJobInput.toc_source` 由 start_structure 载入 stored 时携带（legacy 空源按 confirmed 处理），摘要区分 auto_extract 与 confirmed。④ 测试补真实中文论文样本（摘要/关键词/章与节/参考文献，断言实际层级 H2/H3、候选送达与可逆）；英文样本也改为断言实际输出层级而非仅 applied>0。⑤ MODE_HINTS 覆盖无目录场景；TaskModelPicker 新增 `showThinking` prop（默认 true 不影响翻译页），结构校准隐藏思考档位/预算。
+- **打包安装（用户授权『打包安装吧』，2026-10-25；同时包含同日导出文档名修复）**：安装前客户端经正常退出（osascript quit，进程确认结束后才替换）；按 PACKAGING 环境回退构建——tsc --noEmit + Vite 前端 `index-6ToH_POV.js` / `index-BzfI0fzg.css`、PyInstaller sidecar、Tauri bundle、adhoc 签名 `codesign --verify --deep --strict` 通过；安装包 sidecar runtime_revision `67fcfadd580e2dc006a6` / sha256 `218f508d…f135c433` / 47914656 字节，与 `src-tauri/binaries/manifest.json` 及 `.app` 内嵌副本一致；`strings` 核对内嵌前端资源名与 dist 一致；旧包备份 `launcher/.rollback-Literature-20261025025144.app`（签名校验通过）。冻结 sidecar 隔离冒烟 15/15 PASS（revision/manifest 一致）；新增 `tests/manual/frozen_new_capabilities_check.py` 冻结补充验收 9/9 PASS（导出 markdown/中文书.md + html/中文 书.html、无 full.md/index.html 残留、重命名同步主入口；仅 mode 请求过解析到达模型门控、未配置模型时不建作业不落基准）。未启动客户端、未由用户真机验收、未提交 git。
+
+## 2026-10-21 · Markdown 导出产物改用具体文件名（不再统一为 full.md）
+状态：已编码 / 全量 pytest（exporters + api 64 passed）通过；未做浏览器/真机验收。
+
+用户反馈：导出 Markdown 时产物不应统一命名为 `full.md`，应使用具体文件名。
+
+- `literature/exporters.py`：`_write_markdown` 新增 `name` 参数，产物改为 `<名称>.md`（与 EPUB/DOCX 一致：默认取书名，`filename` 参数传入时取传入值，`safe_name` 清洗）；`_format_files` 向其传递既有 `name`。缺省回退仍为 `full`（仅直接调用兼容，API 路径总会传入名称）。
+- 测试同步：`tests/test_exporters.py`（`Book.md`）、`tests/test_api.py`（`scan.md`，项目名取自源文件 stem）。
+- 边界：重命名导出（`rename_export`）本就按后缀改名单文件产物，无需修改；MinerU 解析层的 `full.md`（不可变证据层）与本次导出命名无关。
+
 ## 2026-10-20（第四轮）· 高级选项精简重构：执行参数全部归档位决定
 状态：已编码 / 全量 pytest 622 passed / tsc --noEmit 与 Vite 生产构建通过 / 隔离真实浏览器验收 19 项 PASS、0 脚本错误（`tests/manual/advanced_simplify_browser_check.py` + `.cjs`，截图 `tmp/advanced-simplify.png`）/ 已打包安装到 `launcher/Literature.app`（旧包备份 `launcher/.rollback-Literature-20261020231058.app`）；**未启动客户端、待真机验收**。
 

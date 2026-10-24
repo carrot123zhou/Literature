@@ -64,8 +64,8 @@
   border-bottom: 1px solid var(--separator);
 }
 .review-outline .outline-section > summary,
-.review-advanced > summary,
-.review-baseline > summary {
+.task-model-details > summary,
+.calib-correct > summary {
   color: var(--label-2);
   font-size: var(--fs-caption1);
   font-weight: var(--fw-semibold);
@@ -117,12 +117,8 @@
 .review-outline .toc-title:hover { color: var(--accent); }
 .review-outline .toc-page { flex: none; color: var(--label-2); font-size: var(--fs-caption1); font-variant-numeric: tabular-nums; }
 .review-hint,
-.review-page-picker small,
-.review-advanced > small { display: block; color: var(--label-2); font-size: var(--fs-caption2); line-height: var(--lh-normal); }
-.review-outline .structure-option { display: flex; align-items: center; gap: var(--sp-2); margin: var(--sp-3) 0; color: var(--label-2); font-size: var(--fs-caption1); }
-.review-outline .structure-option small { min-width: 0; margin-left: auto; color: var(--label-3); font-size: var(--fs-caption2); }
+.review-page-picker small { display: block; color: var(--label-2); font-size: var(--fs-caption2); line-height: var(--lh-normal); }
 .review-page-picker,
-.review-baseline,
 .structure-run-panel {
   min-width: 0;
   margin-top: var(--sp-3);
@@ -131,8 +127,6 @@
   border-radius: var(--r-card);
   background: var(--bg-secondary);
 }
-.review-baseline-mode { display: grid; gap: var(--sp-2); margin: var(--sp-3) 0; color: var(--label-2); font-size: var(--fs-caption1); }
-.review-baseline-mode select,
 .review-page-picker input,
 .review-outline select,
 .review-outline textarea,
@@ -148,7 +142,6 @@
   font-family: var(--font-ui);
   font-size: var(--fs-footnote);
 }
-.review-baseline-mode select,
 .review-page-picker input,
 .review-outline select,
 .review-grid .card-actions select,
@@ -156,8 +149,7 @@
 .review-viewer-controls input,
 .review-viewer-controls select { min-height: var(--sp-7); padding: 0 var(--sp-2); }
 .review-outline textarea { width: 100%; padding: var(--sp-2); resize: vertical; }
-.review-page-picker label,
-.review-advanced label { display: grid; min-width: 0; gap: var(--sp-2); color: var(--label-2); font-size: var(--fs-caption1); }
+.review-page-picker label { display: grid; min-width: 0; gap: var(--sp-2); color: var(--label-2); font-size: var(--fs-caption1); }
 .review-page-picker .toc-candidates { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--sp-2); margin-top: var(--sp-2); }
 .review-page-picker .toc-candidates button,
 .review-suggestion-actions button,
@@ -180,10 +172,13 @@
 .structure-queue > button:hover,
 .structure-queue article button:not(.suggestion-title):hover,
 .source-preview-body > .link-button:hover { background: var(--accent-tint-strong); }
-.review-advanced { min-width: 0; margin-top: var(--sp-3); padding-top: var(--sp-3); border-top: 1px solid var(--separator); }
-.review-advanced textarea { margin-bottom: var(--sp-2); }
-.review-baseline > div { max-height: 180px; overflow: auto; font-size: var(--fs-caption2); }
-.review-baseline p { margin: var(--sp-2) 0; }
+/* 零高级配置后的两处折叠：模型选择按需展开；纠错入口按需展开。 */
+.task-model-details { min-width: 0; margin: 0 0 var(--sp-2); }
+.task-model-details > summary { padding: var(--sp-1) 0; }
+.task-model-details[open] > summary { margin-bottom: var(--sp-2); }
+.calib-correct { min-width: 0; margin-top: var(--sp-3); padding-top: var(--sp-3); border-top: 1px solid var(--separator); }
+.calib-correct > summary { padding: var(--sp-1) 0; }
+.calib-correct[open] > summary { margin-bottom: var(--sp-2); }
 
 /* Calibration uses the shared segmented-control geometry. */
 .calib-modes { display: flex; width: 100%; margin: var(--sp-3) 0 var(--sp-2); }

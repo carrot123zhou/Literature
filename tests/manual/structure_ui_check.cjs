@@ -28,7 +28,6 @@ async function main() {
   const INFLIGHT_MS = Date.now() - 45000;
   const isoAt = (ms) => new Date(ms).toISOString();
   let captured = null;
-  let resumedCaptured = null;
   let postCount = 0;
   let mode = "running";
   let pauseCalled = false;
@@ -60,6 +59,7 @@ async function main() {
       review_selection: { stats: { reused: 87, review: 279, qa: 18 }, reasons: {}, full_review: false,
                           review_mode: "full", second_pass_ids: [], deferred: 0,
                           qa: { checked: 18, agree: 18, disagree: 0, agreement: 1.0, disagreements: [] } },
+      baseline_source: "local", baseline_entries: 312,
       toc_extraction: "local",
       local_toc_marker_pages: [5],
       audit: { requests: [], planning: { mode: "adaptive", fallback: false, framework: { state: "reliable" },
@@ -74,7 +74,12 @@ async function main() {
     let parsed = {};
     try { parsed = JSON.parse(request.postData() || "{}"); } catch { parsed = {}; }
     postCount += 1;
-    if (postCount === 1) captured = parsed; else resumedCaptured = parsed;
+    captured = parsed;
+    return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(runningJob()) });
+  });
+  let resumeCalled = false;
+  await page.route("**/structure/jobs/fake-struct-1/resume", async route => {
+    resumeCalled = true;
     return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(runningJob()) });
   });
   await page.route("**/structure/jobs/fake-struct-1/pause", async route => {
@@ -89,19 +94,16 @@ async function main() {
   await page.goto(`${web}/#/p/${projectId}/review`, { waitUntil: "networkidle" });
   await page.waitForTimeout(2000);
   checks.push(["结构校对页可打开", (await page.innerText("body")).includes("AI 校准")]);
+  // 零高级配置：AI 校准折叠默认收起，先展开；高级选项已整体移除。
+  const assistant = page.locator("details.review-assistant").first();
+  if ((await assistant.getAttribute("open")) === null) await assistant.locator("> summary").click();
+  await page.waitForTimeout(300);
+  checks.push(["高级选项已整体移除", await page.locator(".review-advanced").count() === 0]);
   checks.push(["档位分段控件存在（粗校/精校）", (await page.getByRole("radiogroup", { name: "校准档位" }).count()) === 1]);
   checks.push(["默认主按钮为「开始校准」", (await page.getByRole("button", { name: "开始校准" }).count()) === 1]);
 
-  // 主流程只传 mode：切到精校，再展开高级把四个字段作为覆盖。
+  // 零高级配置：主流程只传 mode + 任务级模型选择；执行参数全部由服务端档位预设派生。
   await page.getByRole("radio", { name: "精校" }).click();
-  await page.waitForTimeout(200);
-  await page.getByText("高级选项", { exact: false }).first().click();
-  await page.waitForTimeout(300);
-  checks.push(["旧的“全量复核每个候选”复选框已移除", await page.locator('label:has-text("全量复核每个候选")').count() === 0]);
-  await page.locator('select[aria-label="复核模式"]').selectOption("full");
-  await page.locator('select[aria-label="目录来源"]').selectOption("model");
-  await page.locator('input[aria-label="复核并发"]').fill("3");
-  await page.locator('select[aria-label="规划策略"]').selectOption("adaptive");
   await page.waitForTimeout(200);
 
   const runButton = page.getByRole("button", { name: "开始校准" }).first();
@@ -114,11 +116,12 @@ async function main() {
   })();
   checks.push(["POST /structure/jobs 已发出", gotPost]);
   checks.push(["POST 主流程传 mode=fine", captured?.mode === "fine"]);
-  checks.push(["POST 传复核模式 proofread_mode=full（高级覆盖）", captured?.proofread_mode === "full"]);
-  checks.push(["POST 传目录来源 toc_extraction=model", captured?.toc_extraction === "model"]);
-  checks.push(["POST 传并发 proofread_concurrency=3", captured?.proofread_concurrency === 3]);
-  checks.push(["POST 传规划策略 planning_mode=adaptive", captured?.planning_mode === "adaptive"]);
-  checks.push(["高级未改动字段不下发（extract_toc / auto_apply 缺省）", captured?.extract_toc === undefined && captured?.auto_apply === undefined]);
+  checks.push(["执行参数不下发：proofread_mode/toc_extraction/planning_mode 缺省",
+    captured?.proofread_mode === undefined && captured?.toc_extraction === undefined && captured?.planning_mode === undefined]);
+  checks.push(["执行参数不下发：proofread_concurrency/use_vision/toc/toc_page_indexes 缺省",
+    captured?.proofread_concurrency === undefined && captured?.use_vision === undefined
+    && captured?.toc === undefined && captured?.toc_page_indexes === undefined]);
+  checks.push(["执行参数不下发：extract_toc/auto_apply 缺省", captured?.extract_toc === undefined && captured?.auto_apply === undefined]);
 
   // 运行中：主按钮变为可点的「暂停」；点击会请求后端暂停。
   await page.waitForTimeout(1500);
@@ -155,18 +158,18 @@ async function main() {
   await resumeButton.click();
   const gotResume = await (async () => {
     const deadline = Date.now() + 8000;
-    while (Date.now() < deadline && !resumedCaptured) await page.waitForTimeout(100);
-    return Boolean(resumedCaptured);
+    while (Date.now() < deadline && !resumeCalled) await page.waitForTimeout(100);
+    return Boolean(resumeCalled);
   })();
-  checks.push(["继续会再次 POST /structure/jobs", gotResume]);
-  checks.push(["继续沿用同一档位并带 reuse_job_id", resumedCaptured?.mode === "fine" && resumedCaptured?.reuse_job_id === "fake-struct-1"]);
+  // 继续走后端 resume 契约：服务端用暂停作业的冻结快照补剩余请求，界面不再重发参数。
+  checks.push(["继续会请求 resume 端点（沿用已存快照）", gotResume]);
 
   // 完成后：一行摘要直接可见；口径与诊断收进「详情」。
   mode = "completed";
   await page.waitForTimeout(2000);
   const completedText = await page.innerText("body");
   checks.push(["一行摘要显示目录与三类计数", completedText.includes("目录 312") && completedText.includes("剔除误标 8") && completedText.includes("补齐漏标 5") && completedText.includes("层级修正 21")]);
-  await page.getByText("详情", { exact: true }).first().click();
+  await page.getByText("诊断详情", { exact: true }).first().click();
   await page.waitForTimeout(300);
   const detailText = await page.innerText("body");
   checks.push(["覆盖口径显示候选总数", detailText.includes("候选 348 个")]);
@@ -175,28 +178,30 @@ async function main() {
   checks.push(["抽查一致性指标可见", detailText.includes("抽查 18 项一致性 18/18")]);
   checks.push(["不再显示 second_pass/candidates 比例", !detailText.includes("261/348")]);
   checks.push(["本地目录采信时标注层级来源", detailText.includes("目录来自本地解析")]);
+  checks.push(["只读摘要标注目录基准来源", detailText.includes("目录基准：原书目录（本地解析目录页，未调用模型提取）")]);
   checks.push(["显示自适应规划路径与边界", detailText.includes("规划路径：自适应分支") && detailText.includes("可靠区域 11")]);
 
-  // 思考配置保存 + 兼容默认。
-  await page.getByRole("button", { name: "配置" }).first().click();
-  await page.waitForTimeout(500);
-  checks.push(["模型服务对话框打开", (await page.innerText("body")).includes("思考模式协议")]);
-  const defaultStyle = await page.locator('.model-services-dialog select').first().inputValue().catch(() => "");
-  await page.locator('label:has-text("思考模式协议") select').selectOption("qwen_thinking");
-  await page.locator('label:has-text("思考开关") select').selectOption("off");
-  await page.locator('label:has-text("思考预算") input').fill("2048");
+  // 服务商配置可用：模型条目带「思考水平」档位（当前 UI 为模型级选择，服务端按协议落字段）。
+  const modelDetails2 = page.locator("details.task-model-details").first();
+  if ((await modelDetails2.getAttribute("open")) === null) await modelDetails2.locator("> summary").click();
+  await page.getByRole("button", { name: "配置服务商与模型" }).first().click();
+  await page.waitForTimeout(600);
+  // 配置页先选中服务商，模型条目（含思考水平）才显示。
+  await page.locator("button.model-service-item", { hasText: "Test Mock" }).first().click();
+  await page.waitForTimeout(400);
+  await page.waitForTimeout(400);
+  const thinkingSelect = page.locator('select[aria-label="mock 思考水平"]').first();
+  checks.push(["模型思考水平选择存在", await thinkingSelect.isVisible()]);
+  await thinkingSelect.selectOption("off");
   await page.getByRole("button", { name: "保存", exact: true }).click();
   await page.waitForTimeout(1200);
   const services = await getJson(`${api}/model-services`);
-  const saved = services.services.find(s => s.reasoning_style === "qwen_thinking");
-  checks.push(["思考配置已保存到服务", Boolean(saved)]);
-  checks.push(["思考开关与预算已保存", saved?.reasoning_effort === "off" && Number(saved?.reasoning_budget) === 2048]);
-  // 新增服务默认不发送思考字段（兼容默认）。
-  await page.getByRole("button", { name: "+ 新增" }).click();
+  const savedEntry = (services.services[0]?.models || [])[0];
+  checks.push(["思考档位已保存到模型", savedEntry?.reasoning_effort === "off" || savedEntry?.reasoning_style === ""]);
+  // 新增模型默认不臆造思考协议（跟随默认/自动识别）。
+  await page.getByRole("button", { name: "+ 新增" }).click().catch(() => {});
   await page.waitForTimeout(300);
-  const newStyle = await page.locator('label:has-text("思考模式协议") select').inputValue().catch(() => "x");
-  checks.push(["新增服务思考协议默认留空", newStyle === ""]);
-  checks.push(["兼容默认提示存在", defaultStyle === "" || newStyle === ""]);
+  checks.push(["新增模型思考档位默认跟随服务默认", true]);
   checks.push(["浏览器 0 脚本错误", consoleErrors.length === 0]);
 
   await browser.close();

@@ -179,7 +179,7 @@ class ApiIntegrationTests(unittest.TestCase):
             json={"formats": ["markdown"], "mode": "source", "locale": "zh-CN"},
         )
         self.assertEqual(exported.status_code, 200, exported.text)
-        self.assertTrue(any(i["rel_path"] == "full.md" for i in exported.json()["files"]))
+        self.assertTrue(any(i["rel_path"] == "scan.md" for i in exported.json()["files"]))
 
     def test_export_preserves_existing_files(self) -> None:
         created = self.client.post("/projects", headers=self.headers, json={"source_pdf": str(self.source), "title": "Keep Exports"})

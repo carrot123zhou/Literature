@@ -2,14 +2,14 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import "./review.css";
 import { api } from "../api";
 import SplitPane from "../SplitPane";
-import type { DocumentGraph, FlowLinks, Job, ModelRoleBinding, ModelService, PageMeta, StructureBaseline, StructurePatch, StructureSuggestion, StructureTocEntry } from "../types";
+import type { DocumentGraph, FlowLinks, Job, ModelRoleBinding, ModelService, PageMeta, StructurePatch, StructureSuggestion } from "../types";
 import type { TaskModelPatch } from "../workbench/TaskModelPicker";
-import OutlinePane, { MODE_PRESET, type StructureAnalysis, type StructureMode, type StructureOptions, type TocCandidate } from "./OutlinePane";
+import OutlinePane, { type StructureAnalysis, type StructureMode, type TocCandidate } from "./OutlinePane";
 import type { ReasoningMode } from "../workbench/ThinkingLevelField";
 import PdfPane, { type FocusRequest } from "./PdfPane";
 import ResultPane, { type PatchProposal, type ResultTab } from "./ResultPane";
 import SourcePreview from "./SourcePreview";
-import { documentProjection, formatTocDraft, parseTocDraft } from "./projection";
+import { documentProjection } from "./projection";
 import { usePdfDocument } from "./usePdfDocument";
 
 type Props = {
@@ -69,7 +69,6 @@ export default function ReviewWorkspace(props: Props) {
   // 后端只读派生：跨页续接双向链接，供原页虚线框/连线与结果栏提示使用。
   const flowLinks: FlowLinks = document.flow_links ?? {};
 
-  const [tocText, setTocText] = useState(() => { try { return localStorage.getItem(`literature.review.baseline.${projectId}`) || ""; } catch { return ""; } });
   const [pageText, setPageText] = useState("");
   const [tocCandidates, setTocCandidates] = useState<TocCandidate[]>([]);
   const [auditPayload, setAuditPayload] = useState<unknown>(null);
@@ -90,34 +89,17 @@ export default function ReviewWorkspace(props: Props) {
   }, [boundServiceId, boundModel]);
   const [reasoningMode, setReasoningMode] = useState<ReasoningMode>("inherit");
   const [reasoningBudget, setReasoningBudget] = useState(0);
-  // 主流程只传 mode：初始选项直接取档位预设，只有高级选项里被显式改动的字段才随请求覆盖。
-  const [options, setOptions] = useState<StructureOptions>(() => ({ ...MODE_PRESET.coarse }));
+  // 零高级配置：主流程只传 mode + 任务级模型选择；目录准备、执行参数与视觉策略全部
+  // 由后端档位预设与自动流程决定（有已确认基准则复用，否则自动定位目录页本地优先提取，
+  // 无目录回退有界校准；纠错入口的显式目录页优先于已保存基准）。
   const [structureJob, setStructureJob] = useState<Job | null>(null);
   const [structureRunning, setStructureRunning] = useState(false);
-  const [proposedToc, setProposedToc] = useState<StructureTocEntry[] | null>(null);
   const nonce = useRef(0);
   // 防止双击/同帧重入造成重复 POST 结构分析作业。
   const posting = useRef(false);
   // 手动结构修改的提交锁：React busy 是异步状态，同帧连续事件会绕过它。
   const submitting = useRef(false);
 
-  useEffect(() => { try { localStorage.setItem(`literature.review.baseline.${projectId}`, tocText); } catch { /* optional preference storage */ } }, [projectId, tocText]);
-
-  // 项目基准优先于本机偏好：换客户端或清空 WebView 偏好后仍可复用已确认目录。
-  // 只回填目录文本供「高级 · 使用已确认的目录」取用；不改变主流程的档位预设（extract_toc=true）。
-  useEffect(() => {
-    let cancelled = false;
-    api<StructureBaseline>(`/projects/${projectId}/structure/baseline`).then(value => {
-      if (cancelled || !value.toc?.length) return;
-      setTocText(formatTocDraft(value.toc));
-    }).catch(() => { /* 旧后端或尚未保存基准时保留本机偏好 */ });
-    return () => { cancelled = true; };
-  }, [projectId]);
-
-  const persistBaseline = useCallback((entries: StructureTocEntry[], source: string) => {
-    void api(`/projects/${projectId}/structure/baseline`, { method: "PUT", body: JSON.stringify({ toc: entries, source }) })
-      .catch(() => { /* 基准保存失败不应阻断当前校准 */ });
-  }, [projectId]);
   const mounted = useRef(true);
   const trackedJob = useRef("");
   const documentRef = useRef(document);
@@ -134,16 +116,10 @@ export default function ReviewWorkspace(props: Props) {
     } catch { return []; }
   }, [projectId, onSuggestions]);
 
-  /** 回填一次已完成作业的源目录基准；建议本身从服务端待处理列表读取。 */
-  const applyJobResult = useCallback((job: Job) => {
-    const result = (job.result ?? {}) as { proposed_toc?: StructureTocEntry[] };
-    setProposedToc(result.proposed_toc?.length ? result.proposed_toc : null);
-  }, []);
-
   // 进入工作区时恢复项目内仍待处理的建议。
   useEffect(() => { void refreshSuggestions(); }, [projectId]);
+  // 纠错入口：把用户填写的目录页解析为 0 基页索引；留空 = 交给后端自动识别。
   const selectedPages = () => {
-    if (!options.extractToc) return [];
     // 留空表示交给后端自动识别目录页；不强制用户先选页。
     if (!pageText.trim()) return [];
     const indexes = new Set<number>();
@@ -265,52 +241,30 @@ export default function ReviewWorkspace(props: Props) {
     if (patch.reasoningBudget !== undefined) setReasoningBudget(patch.reasoningBudget);
   }, []);
 
-  const analyze = () => void run(async () => {
-    const draft = options.extractToc ? [] : parseTocDraft(tocText);
-    const value = await api<{ suggestions: StructureSuggestion[]; applied: unknown[]; proposed_toc: StructureTocEntry[] }>(`/projects/${projectId}/structure/analyze`, { method: "POST", body: JSON.stringify({ toc: draft, toc_page_indexes: options.extractToc ? selectedPages() : [], auto_apply: true }) });
-    if (draft.length) persistBaseline(draft, "confirmed");
-    if (value.proposed_toc?.length) setProposedToc(value.proposed_toc);
-    onSuggestions(value.suggestions.filter(item => !item.automatic && suggestionFresh(document, item)));
-    await refresh();
-    setMessage(`自动应用 ${value.applied.length} 项，另有 ${value.suggestions.length - value.applied.length} 项待核对`);
-  });
-
-  // 显式确认当前审查范围：绑定文档结构版本；文档改动后确认自动失效。
-  const confirmReview = () => void run(async () => {
-    await api(`/projects/${projectId}/structure/confirm`, { method: "POST" });
-    await refresh();
-    setMessage("已确认当前校对范围为已审查；文档之后改动会自动失效");
-  });
-
   // 异步结构分析：后台作业 + 轮询状态，界面展示进度与活动摘要。
-  // 主流程只传 mode；执行参数由服务端按档位预设派生，界面不再覆盖。
+  // 零高级配置：主流程只传 mode + 任务级模型选择；目录基准来源、执行参数与视觉策略
+  // 由服务端档位预设与自动流程派生。唯一例外是纠错入口的显式目录页
+  // （优先于已保存基准）；留空则完全由后端自动决定。
   const runModel = () => {
     if (posting.current || structureRunning || busy) return;
     const resumable = structureJob && structureJob.status === "paused" ? structureJob.job_id : "";
     // 注意：只有「暂停」才走续跑契约（后端复用旧作业快照）。失败的任务必须新建作业：
-    // 否则用户改完高级设置（如重新指定目录页）点「开始校准」，实际会静默沿用失败
+    // 否则用户改完纠错设置（如重新指定目录页）点「开始校准」，实际会静默沿用失败
     // 作业的旧参数重新报同样的错。新建时指向旧作业，已完成请求仍然可复用。
     const resuming = Boolean(resumable);
     const body: Record<string, unknown> = { service_id: taskModel.service_id, model: taskModel.model, mode, reasoning_mode: reasoningMode, reasoning_budget: reasoningMode === "inherit" ? 0 : reasoningBudget };
     if (!resumable) {
       // 只有新建任务才在客户端校验/拼装参数；续跑交给后端 resume 契约复用已存配置，避免与暂停时快照不一致。
-      let tocPages: number[];
       try {
-        tocPages = options.extractToc ? selectedPages() : [];
-        if (!options.extractToc && !parseTocDraft(tocText).length) throw new Error("请填写已确认目录，每行按“# 标题”格式标记层级。");
+        const tocPages = selectedPages();
+        if (tocPages.length) body.toc_page_indexes = tocPages;
       } catch (error) { setMessage((error as Error).message); return; }
-      if (!options.extractToc) persistBaseline(parseTocDraft(tocText), "confirmed");
-      if (!options.extractToc) { body.extract_toc = false; body.toc = parseTocDraft(tocText); }
-      if (tocPages.length) body.toc_page_indexes = tocPages;
-      if (options.useVision) body.use_vision = true;
-      // 其余执行参数（auto_apply/proofread_mode/toc_extraction/并发/超时）由后端档位预设决定，不再随请求覆盖。
       if (structureJob?.status === "failed" && structureJob.job_id) body.reuse_job_id = structureJob.job_id;
     }
     posting.current = true;
     setStructureRunning(true);
-    if (!resuming) setProposedToc(null);
     setStructureJob(null);
-    setMessage(resuming ? "继续结构校准：已完成的部分直接复用" : "结构校准任务已启动");
+    setMessage(resuming ? "继续结构校准：已完成的部分直接复用" : "结构校准任务已启动：目录准备与执行参数由档位自动决定");
     const request = resumable
       // 续跑真正复用后端 resume 契约：服务端用暂停/失败作业的审计做请求级复用，只补剩余请求。
       ? api<Job>(`/projects/${projectId}/structure/jobs/${resumable}/resume`, { method: "POST" })
@@ -372,7 +326,6 @@ export default function ReviewWorkspace(props: Props) {
       if (job.status === "completed" || job.status === "failed") {
         setStructureRunning(false);
         if (job.status === "failed") { setMessage(`结构校准失败：${job.error}`); return; }
-        applyJobResult(job);
         await refresh();
         const pending = await refreshSuggestions();
         setMessage(`结构校准完成：自动应用 ${(job.result as { applied?: unknown[] } | undefined)?.applied?.length ?? 0} 项，可在修订历史撤销${pending.length ? `；另有 ${pending.length} 项待核对` : ""}`);
@@ -403,9 +356,9 @@ export default function ReviewWorkspace(props: Props) {
     void api<Job>(`/projects/${projectId}/structure/jobs/${latest.job_id}`).then(full => {
       if (trackedJob.current !== full.job_id) return;
       setStructureJob(full);
-      if (full.status === "completed") { applyJobResult(full); void refreshSuggestions(); }
+      if (full.status === "completed") { void refreshSuggestions(); }
     }).catch(() => { /* 详情读取失败时保留摘要，不阻塞工作区 */ });
-  }, [props.jobs, projectId, applyJobResult, refreshSuggestions]);
+  }, [props.jobs, projectId, refreshSuggestions]);
 
   const previewActualAudit = () => {
     if (!structureJob?.result) return;
@@ -414,37 +367,10 @@ export default function ReviewWorkspace(props: Props) {
     setMessage("已展开实际请求记录；图片记录页码、块 ID 和摘要，不重复保存图片数据。");
   };
 
-  const adoptProposed = (entries: StructureTocEntry[]) => void run(async () => {
-    if (!entries.length) return;
-    await api(`/projects/${projectId}/structure/baseline`, { method: "PUT", body: JSON.stringify({ toc: entries, source: "confirmed" }) });
-    setTocText(formatTocDraft(entries));
-    setProposedToc(null);
-    setMessage("已保存源目录基准到项目，下次校准可直接复用。");
-  });
-
-  const previewAudit = () => void run(async () => {
-    const value = await api<unknown>(`/projects/${projectId}/structure/plan`, { method: "POST", body: JSON.stringify({ toc: parseTocDraft(tocText), extract_toc: options.extractToc, proofread: true, toc_page_indexes: selectedPages(), use_vision: options.useVision }) });
-    setAuditPayload(value);
-    setTab("json");
-    setMessage("模型输入已展开，visual_evidence 包含将发送的目录页与标题裁片。");
-  });
-
   const findTocPages = () => void run(async () => {
     const value = await api<TocCandidate[]>(`/projects/${projectId}/structure/toc-page-candidates`);
     setTocCandidates(value);
-    setMessage(value.length ? `找到 ${value.length} 个目录页候选` : "没有找到高置信目录页，请手工定位");
-  });
-
-  // 零成本：直接从规范文档里解析印刷目录，回填为已确认基准，不调用模型。
-  const readLocalToc = () => void run(async () => {
-    const value = await api<{ pages: number[]; entries: StructureTocEntry[] }>(`/projects/${projectId}/structure/local-toc?pages=${selectedPages().join(",")}`);
-    if (!value.entries.length) {
-      setMessage("正文里没有找到可解析的印刷目录，可手工填写基准，或从源目录页提取。");
-      return;
-    }
-    setProposedToc(value.entries);
-    const pages = value.pages.map(page => page + 1).join("、");
-    setMessage(`本地读取目录 ${value.entries.length} 条（第 ${pages} 页），未调用模型。请核对下方目录草稿的层级后确认。`);
+    setMessage(value.length ? `找到 ${value.length} 个目录页候选，点候选按钮可跳转查看` : "没有找到高置信目录页；无目录的书可直接开始校准，AI 会按标题群推断结构");
   });
 
   const togglePick = useCallback((blockId: string, range: boolean) => {
@@ -499,13 +425,8 @@ export default function ReviewWorkspace(props: Props) {
     else { nonce.current += 1; setFocus({ blockId: "", pageIndex: page - 1, nonce: nonce.current }); }
   }, [document.blocks, locate]);
 
-  const analysis = useMemo<StructureAnalysis>(() => ({ job: structureJob, running: structureRunning, paused: !structureRunning && structureJob?.status === "paused", mode, options, proposedToc }), [structureJob, structureRunning, mode, options, proposedToc]);
-  const onOptions = (patch: Partial<StructureOptions>) => setOptions(current => ({ ...current, ...patch }));
-  // 切换档位即回到该档位的预设；高级选项可在切换后再次调整。
-  const onMode = (next: StructureMode) => {
-    setMode(next);
-    setOptions(current => ({ ...current, ...MODE_PRESET[next] }));
-  };
+  const analysis = useMemo<StructureAnalysis>(() => ({ job: structureJob, running: structureRunning, paused: !structureRunning && structureJob?.status === "paused", mode }), [structureJob, structureRunning, mode]);
+  const onMode = (next: StructureMode) => setMode(next);
 
   return (
     <SplitPane
@@ -517,16 +438,11 @@ export default function ReviewWorkspace(props: Props) {
     >
       <OutlinePane
         document={document}
-        tocText={tocText}
-        onTocText={setTocText}
         tocCandidates={tocCandidates}
         pageText={pageText}
         onPageText={setPageText}
         onFindTocPages={findTocPages}
-        onReadLocalToc={readLocalToc}
         onJumpPage={jumpToPage}
-        onAnalyze={analyze}
-        onPreviewAudit={previewAudit}
         onPreviewActualAudit={previewActualAudit}
         suggestions={suggestions}
         patches={patches}
@@ -545,15 +461,12 @@ export default function ReviewWorkspace(props: Props) {
         configured={Boolean(providers.find(item => item.service_id === taskModel.service_id)?.configured)}
         onConfigureModel={onConfigureModel}
         analysis={analysis}
-        onOptions={onOptions}
         onMode={onMode}
         reasoningMode={reasoningMode}
         reasoningBudget={reasoningBudget}
         onModelChange={onTaskModelChange}
         onRunModel={runModel}
         onPause={pauseStructure}
-        onAdoptProposed={adoptProposed}
-        onConfirmReview={confirmReview}
       />
       {isPdf
         ? <PdfPane

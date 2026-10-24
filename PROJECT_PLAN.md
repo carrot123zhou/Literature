@@ -56,7 +56,8 @@ MinerU 官方精准解析 API 当前公开的本地批量上传设置：
 - **印刷目录优先本地解析**（2026-10-14）：有显式目录标记页（`Contents`/`Content`/`目录`/`目次`）且能解析出 ≥2 条时直接采信本地结果，不再为“核对目录”发一次模型请求；无标记、解析为空或用户显式选择时仍由模型读目录页文本。`toc_extraction` 可取 `auto`（默认）/`local`/`model`。
 - **结构路径默认关思考**：与翻译一致，只按已声明协议改字段，用户显式开思考时尊重配置。依据：真实作业 reasoning 占全部 token 的 31%，对“按几何/目录证据选角色”贡献有限。
 - 默认建议待人工确认；**2026-10-14 起用户档位（粗校/精校）改为全部自动应用**（见下），安全网是可逆补丁 + 修订历史 + 撤销，删除/合并正文仍永不自动执行。漏标标题补回必须确认，目录未收录的小标题不能仅凭未匹配而降为正文。
-- **粗校/精校两档（2026-10-14，后端 + 前端均已实现并联调验收）**：用户只选档位 + 开始/暂停/继续，其余由程序决定。两档都本地优先、默认关思考、不做第二遍逐条复核、默认关视觉、默认全部自动应用。**粗校**候选收窄为「与目录相关或本地可疑的块」（目录命中 + 本地误标/精确层级 + 目录命中但未标标题），未收录的正常标题不发送；**精校**额外做「未收录小节发现」（候选不按目录收窄）+「整树父子复核」。目录为空的书自动回退「无目录模式」（本地信号 + 一次有界模型请求），不弹窗打断。内部统一 `mode` 参数；`proofread_mode`/`planning_mode`/`toc_extraction`/`proofread_concurrency`/`use_vision`/`request_timeout_seconds` 收进高级/诊断覆盖。
+- **粗校/精校两档（2026-10-14，后端 + 前端均已实现并联调验收；2026-10-25 零高级配置收口）**：用户只选档位 + 开始/暂停/继续，其余由程序决定。两档都本地优先、默认关思考、不做第二遍逐条复核、默认关视觉、默认全部自动应用。**粗校**候选收窄为「与目录相关或本地可疑的块」（目录命中 + 本地误标/精确层级 + 目录命中但未标标题），未收录的正常标题不发送；**精校**额外做「未收录小节发现」（候选不按目录收窄）+「整树父子复核」；无目录（baseline 空）时两档都不收窄，按有界标题群 + 疑似短块推断，不做全正文扫描。目录为空的书自动回退「无目录模式」，不弹窗打断。内部统一 `mode` 参数；`proofread_mode`/`planning_mode`/`toc_extraction`/`proofread_concurrency`/`use_vision`/`request_timeout_seconds` 全部由后端档位预设决定，界面不暴露（API 兼容保留）。
+- **零高级配置与基准自动管理（2026-10-25）**：界面无高级选项，仅按需「目录识别不准？」纠错入口（指定真实 PDF 目录页/恢复自动）。基准优先级：显式目录/目录来源 > 显式纠错目录页 > 已保存基准 > 自动定位目录页；从真实目录页提取成功（本地采信或模型提取）自动存为项目基准（source=auto_extract）供下次复用；提取为空的本地草稿线索只参与复核、绝不持久化。目录页兜底排除须有显式标记或本地可解析 ≥2 条目，防参考文献等误识别页把真实标题整页抹掉。作业完成后的只读摘要区分已确认目录/原书目录（本地解析或 AI 提取）/本地线索/无目录模式，无目录不表述为异常。
 - **暂停/继续（2026-10-14）**：结构作业在模型请求边界响应暂停（当前在途请求跑完即挂起），已完成响应落审计；继续时以 `reuse_job_id` 指向已暂停作业做请求级复用，只补剩余请求。
 - 本地校准在置信度至少 0.97 且满足既有证据边界时可自动执行可逆补丁；AI 整体推理的修改全部待确认，自报置信度不授权自动采用。
 - 尾注页、参考书目页、索引页不得当作印刷目录（证据见 `docs/verification/structure-review-mode-2026-10-14.md`）。
@@ -132,33 +133,17 @@ Tauri macOS 客户端（单实例）
 
 **当前里程碑**：M1 客户端导入与 MinerU 全能力接入。M2 结构校对（粗校/精校）与 M3 结构化翻译已具备可用纵向切片，见 §6。
 
-**当前交付（2026-10-15）**：后端安全/数据保护、探测预算与前端交互优化，以及「逐服务显式确认的明文 HTTP」（`model_services_v4`）已打包安装到 `launcher/Literature.app`（sidecar `9934ab4b55881b2e9148`）。全量 pytest 598 passed；tsc/Vite 通过；冻结冒烟 15/15，安装内容与构建包一致。真实服务与原生交互待用户验收；交付证据见开发日志。
+**当前安装包（2026-10-25 用户授权打包安装，launcher/Literature.app）**：sidecar `runtime_revision 67fcfadd580e2dc006a6` / sha256 `218f508d…` / 47914656 字节；内嵌前端 `index-6ToH_POV.js` / `index-BzfI0fzg.css`；adhoc 签名校验通过；旧包备份 `launcher/.rollback-Literature-20261025025144.app`。包含：结构校准零高级配置 + 无目录论文策略 + 复核修正（全量 pytest 632、隔离浏览器 4 套 0 脚本错误）与导出主文件统一文档名（Markdown/HTML/EPUB/DOCX 主文件 = `safe_name(filename or document.title)`，HTML 主入口 `<名称>.html`；全量 pytest 634）。冻结 sidecar 冒烟 15/15 + 新能力补充验收 9/9（导出中文名、仅 mode 过门控不落伪基准）。**未启动客户端、未真实模型/真实导出真机验收**；此前各轮交付细节与证据见开发日志（2026-10-15～10-21 各条，含导出真脚注、对照观看 flow_links、导出管理、开源 Release v0.1.0 等，均已打包或推送）。
 
-**前端交付（2026-10-16）**：设置空白页、导入页待处理队列对齐与内滚动、资源页翻译行去导出、校对状态统一「已校对」、模块更名「对照翻译」、目录进度环溢出、翻译单键切换、任务选择列表标题被 grid 压扁不可见——已随本轮重建打包安装到 `launcher/Literature.app`（sidecar `9934ab4b55881b2e9148`，内嵌前端 `index-BSNt2f9U.js` / `index-D2bDGs6A.css`）；冻结冒烟 15/15，旧包备份至 `launcher/.rollback-Literature-B5rqP2lv-20261016.app`。未启动客户端，待真机验收。
-
-**结构校对·对照观看（2026-10-17，已打包安装）**：跨页续接按 **MinerU 原生标记**只读派生 `flow_links`——读回不可变 `content_list_v2`，用 MinerU 在续页留下的空 `paragraph` 占位块作为续行区域，挂到上一页承载整段的 block（`{block_id: {next_region: {page_index, bbox}}}`；`literature/flow.py`；`/projects/{id}/document`、`PATCH /projects/{id}`、`mineru/import` 三处返回，已导入项目无需重新解析）。原页承载块与续页区域都按普通正文块同样式渲染（无额外颜色/角标），两块间用 MinerU 式**虚线折线 + 两端圆点**连接：从源块左下角沿页缝空白折到续页区域右上角，不穿过正文。**框体尺寸修复**：`.pdf-overlay .bbox` 显式 `min-height:0`，不再被全局 `button{min-height:32px}` 撑高（目录/脚注矮行不再堆叠）；三栏 `SplitPane` 设 `minPx=[200,360,280]`，分栏不可被拖到 0 而遮挡。Markdown 页签按块渲染并与 PDF 双向同步高亮；类型图例改为「图例」按需浮层；右侧块列表已移除常驻「N 个内容块」提示行。**顶部三栏头部统一**：`.panel-title`/`.viewer-toolbar`/`.result-tabs` 统一 52px 高、同一底边，一级文字统一 14px；中栏工具栏 `flex-wrap: nowrap`，控制区 `overflow-x:auto` 横向滚动、图例钉在行尾（浮层不被裁剪），拉窄不再换行。全量 pytest 605 passed；tsc/Vite 通过；隔离浏览器 23 + 11 项验收、0 脚本错误（截图 `tmp/structure-flow-review.png`、`tmp/toc-overlay-wide.png`、`tmp/toc-overlay.png`）。已打包安装到 `launcher/Literature.app`（内嵌前端 `index-__nO-9dI.js` / `index-Cz8XKgc8.css`；sidecar `8e505fd1c6e616dd8a93` / sha256 `315945c9…`；旧包备份 `launcher/.rollback-Literature-20261017015852.app`）。**应用图标**换成定稿 monogram（粗体「L」+ 波浪书口的书形底 + 两点）：源图存 `assets/brand/monogram.png`，`scripts/build_icons.py` 新增 `mark` 渲染器（位图墨迹→alpha 蒙版→macOS squircle），默认打包该套，`cards`/矢量 `monogram` 作为备选。未启动客户端、未由用户真机验收、未提交；legacy `content_list` 与纯 Markdown 导入不产出续接。
-
-**导出管理与交互修复（2026-10-17，已打包安装）**：导出记录可管理——`DELETE/PATCH /projects/{id}/exports/{export_id}`（能力 `export_manage_v1`），导出弹窗历史区每条记录可删除（两步确认）与重命名（同步改单文件产物名），不碰 raw/document/translations；翻译确认后自动打开对照翻译页；顶栏 60px + 主导航加宽 + 品牌字前加应用图标；导出结果行限制在卡片内；导出默认 EPUB + 对照版。全量 pytest 612 passed；隔离浏览器验收 14 + 5 项全 PASS；冻结冒烟 15/15。已打包安装到 `launcher/Literature.app`（sidecar `600164e1…` / sha256 `94c8b3b5…`，内嵌前端 `index-DCZcdqbt.js`；旧包备份 `launcher/.rollback-Literature-20261017031104.app`）。未启动客户端、待真机验收。
-
-**开源发布（2026-10-17）**：仓库已推送 `https://github.com/carrot123zhou/Literature.git`（main），README 首页含宣传海报与界面截图；**Release v0.1.0** 提供 Windows x64 NSIS 安装包（GitHub Actions `windows.yml`：PyInstaller + Vite + Tauri/NSIS，`workflow_dispatch`/`v*` 标签触发），包内含 Windows sidecar 与同版本前端；Rust 外壳/密钥存储/sidecar 构建脚本已做 Windows 适配（macOS 行为不变）。未在真机 Windows 运行验收；macOS 仍按本机构建流程交付。
-
-**导出真脚注（2026-10-20，已编码/真实验收，未打包安装）**：EPUB 与 DOCX 导出把 `footnote` 块按「同页/阅读顺序 + 同编号」绑到正文 `^{N}` 上标，分别产出 EPUB3 `noteref`+`aside` 与 Word `word/footnotes.xml` 真脚注（`w:customMarkFollows` 保留印刷编号；同一脚注只允许引用一次，重复引用降级为上标）；未绑定注文与 `^{…}` 一律降级为上标/页末注，不再留 LaTeX 字面量。库内 8 本书绑定率 0–94%（Making 721/767、Once upon 401/830、White Lotus 531/815）；Word 16.114 实开 721 注 docx 无修复、PDF 目视确认；全量 pytest 620 passed。第二轮按用户反馈调整：注文统一章末（aside 首锚章节唯一，跨章引用跨文件链接 + ↩ 回链）、续行注合并、编号格式扩充（`¹`/`N␣`/记号）、页位回退锚定（MinerU 丢正文上标时锚到页内最近正文块并补回上标）；绑定率 Making 754/767、White Lotus 707/815、Once upon 554/830。证据见开发日志同日第二轮条目；重新打包安装与 Apple Books 真机验收待做。
-
-**能力标记**：以 `/health` 的 `capabilities` 为唯一事实来源（`literature/api.py`）——当前含 `intake_items_v1`、`structure_review_v2`、`model_services_v1/v2/v3/v4`、`structure_modes_v1`、`structure_pause_v1`、`structure_flow_v1`、`translation_engine_v2`、`translation_safety_v1`、`parse_lifecycle_v1`、`task_history_v1`、`export_v1`、`export_manage_v1` 等。前端启动时校验关键标记，不静默复用旧后端。注：导出模块（`exporters.py`、`export_v1`）为重新引入版本（与 §2.5 的「已移除」历史决定冲突，待归档计划文本），已于 2026-10-17 随工作区一并提交（`13f3bfd`）；2026-10-17 已重做 EPUB 排版（出版级 CSS：两端对齐+首行缩进+段间距+serif 栈、对照去竖线、导航目录原文·译文/译文纯译文、原书 PDF 首页封面），已重新打包安装（sidecar `4441cacd…`，快照 `.rollback-Literature-20261017024354.app`），未真机验收。
-
-**结构校准目录页死锁修复与高级选项精简（2026-10-20，已打包安装）**：自动识别目录页超 6 页不再硬报错（截取前 6 页继续，标记页保留）；失败作业改新建+`reuse_job_id`，用户重设目录页不再被旧快照静默覆盖。高级选项精简重构：执行参数（复核模式/目录来源/规划策略/并发/超时/自动采用）全部由后端档位预设决定，界面仅保留目录基准与视觉开关，`StructureOptions` 8 字段减到 2；pytest 622 passed、tsc/Vite 通过、隔离浏览器验收 19 项 PASS；已安装到 `launcher/Literature.app`（旧包备份 `launcher/.rollback-Literature-20261020231058.app`），未启动客户端、待真机验收。
+**能力标记**：以 `/health` 的 `capabilities` 为唯一事实来源（`literature/api.py`）；前端启动时校验关键标记，不静默复用旧后端。
 
 **尚未完成或尚未真实验收（不混写）**：
 
-- 真实模型验收：粗校/精校真实模型 A/B（准确率/耗时/token 收益均未验证）；真实视觉模型准确率与费用；真实 MinerU Token 多格式在线 smoke test。
-- 模型配置真实验收：真实外部服务 `/v1/models` 拉取、批量添加、Keychain 保存链路与真实模型端到端（结构 + 翻译）联调未做。
-- 翻译关思考的提速量化：探测已实测通过（reasoning 0%），但**同一本书开/关思考的耗时对比与译文质量抽检仍未做**。
-- 当前安装包已包含 2026-10-15 源码改动；保留旧版回滚包，尚未由用户完成真实窗口验收。
-- 原生客户端：系统性的原生窗口点击/拖放/另存/Finder 与 PDF 解码视觉验收（AX 自动化不可靠）；无 Developer ID / 公证 / Intel 包。
-- 迁移前旧项目 `pages[].width/height` 为 0，缺「从封存 raw 重建规范文档」入口。
-- 大型非 PDF 的本地自动切分；当前依赖 MinerU 转换并反馈限制。
-- 项目回收站浏览与一键恢复（删除数据可恢复，但需在本地目录手工完成）。
-- 完整响应式设计、部署、账号体系与远程多用户隔离。
+- 真实模型验收：粗校/精校真实模型 A/B（准确率/耗时/token 收益均未验证）；真实视觉模型准确率与费用；真实 MinerU 在线 smoke test。
+- 模型配置真实验收：真实外部服务拉取/Keychain 链路/真实模型端到端未做；翻译开/关思考耗时对比与译文质量抽检未做。
+- 本轮安装包未由用户真机验收：零高级配置界面、无目录论文校准、导出文档名均需真实窗口点验。
+- 原生客户端系统性窗口交互与 PDF 解码视觉验收；无 Developer ID / 公证 / Intel 包。
+- 迁移前旧项目 `pages[].width/height` 为 0，缺「从封存 raw 重建规范文档」入口；大型非 PDF 本地切分；项目回收站一键恢复；完整响应式/部署/账号体系。
 
 **下一步**：按 §6 路线图推进；实质变更后同步更新本段（≤30 行）与 `docs/DEVELOPMENT_LOG.md`。
 

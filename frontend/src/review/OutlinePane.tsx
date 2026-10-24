@@ -1,28 +1,20 @@
 import { memo, useEffect, useState } from "react";
 import TaskModelPicker, { type TaskModelPatch } from "../workbench/TaskModelPicker";
 import type { ReasoningMode } from "../workbench/ThinkingLevelField";
-import type { DocumentGraph, Job, ModelRoleBinding, ModelService, StructurePatch, StructureSuggestion, StructureTocEntry, TocNode } from "../types";
-import { flattenToc, formatTocDraft, parseTocDraft } from "./projection";
+import type { DocumentGraph, Job, ModelRoleBinding, ModelService, StructurePatch, StructureSuggestion, TocNode } from "../types";
+import { flattenToc } from "./projection";
 
 export type TocCandidate = { page_index: number; page_number: number; confidence: number; reasons: string[] };
 export type StructureMode = "coarse" | "fine";
-/** 用户真正需要选的只剩两项；执行参数（复核模式/并发/超时/目录来源等）一律由后端档位预设决定。 */
-export type StructureOptions = { extractToc: boolean; useVision: boolean };
-/** 档位派生的服务端 preset：主流程只传 mode；此处仅决定界面初始态。 */
-export const MODE_PRESET: Record<StructureMode, StructureOptions> = {
-  coarse: { extractToc: true, useVision: false },
-  fine: { extractToc: true, useVision: false },
-};
+/** 用户只选档位 + 开始/暂停/继续：目录准备、执行参数与视觉策略全部由后端档位预设与自动流程决定。 */
 export const MODE_HINTS: Record<StructureMode, string> = {
-  coarse: "以原书目录为基准：剔除误标标题、补齐漏标标题、按目录父子关系校准层级。快、省 token。",
-  fine: "包含粗校的全部内容，额外发现目录未收录的小节，并复核整棵标题树的父子关系。更慢、消耗更多 token。",
+  coarse: "有目录的书按目录差分校准（剔除误标、补齐漏标、校准层级）；无目录的论文按标题群与版面推断结构。快、省 token。",
+  fine: "包含粗校的全部内容，额外发现未收录的小节，并复核整棵标题树的父子关系。更慢、消耗更多 token。",
 };
-export type StructureAnalysis = { job: Job | null; running: boolean; paused: boolean; mode: StructureMode; options: StructureOptions; proposedToc: StructureTocEntry[] | null };
+export type StructureAnalysis = { job: Job | null; running: boolean; paused: boolean; mode: StructureMode };
 type Props = {
-  document: DocumentGraph; tocText: string; onTocText: (value: string) => void;
-  tocCandidates: TocCandidate[]; onFindTocPages: () => void; onJumpPage: (page: number) => void;
+  document: DocumentGraph; tocCandidates: TocCandidate[]; onFindTocPages: () => void; onJumpPage: (page: number) => void;
   pageText: string; onPageText: (value: string) => void;
-  onAnalyze: () => void; onPreviewAudit: () => void; onReadLocalToc: () => void;
   onPreviewActualAudit: () => void;
   suggestions: StructureSuggestion[]; patches: StructurePatch[]; selected: string; activeBlock: string;
   onSelect: (blockId: string) => void; onConfirm: (suggestion: StructureSuggestion) => void;
@@ -32,12 +24,10 @@ type Props = {
   /** 全部服务商（含模型列表）与当前任务级选择；默认 = 角色绑定。 */
   providers: ModelService[]; modelValue: ModelRoleBinding; configured: boolean;
   onConfigureModel: () => void; analysis: StructureAnalysis;
-  onOptions: (patch: Partial<StructureOptions>) => void; onMode: (mode: StructureMode) => void;
+  onMode: (mode: StructureMode) => void;
   reasoningMode: ReasoningMode; reasoningBudget: number;
   onModelChange: (patch: TaskModelPatch) => void;
   onRunModel: () => void; onPause: () => void;
-  onAdoptProposed: (entries: StructureTocEntry[]) => void;
-  onConfirmReview: () => void;
 };
 function TocRow({ node, selected, activeBlock, onSelect }: { node: TocNode; selected: string; activeBlock: string; onSelect: (id: string) => void }) {
   return <li>
@@ -65,14 +55,23 @@ function targetLabel(value: unknown): string {
   if (typeof value === "number") return `H${value}`;
   return labels[String(value)] || String(value);
 }
+// 目录基准来源的只读摘要：无目录是正常路径，不提示用户去修复。
+const BASELINE_LABELS: Record<string, string> = {
+  local: "目录基准：原书目录（本地解析目录页，未调用模型提取）",
+  model: "目录基准：原书目录（AI 从目录页提取，已存为项目基准供下次复用）",
+  confirmed: "目录基准：已确认目录",
+  auto_extract: "目录基准：原书目录（上次校准自动提取，未经人工确认；可在纠错入口重新指定目录页）",
+  local_draft: "目录线索：本地解析的疑似目录（无显式目录标记，层级由 AI 复核）",
+  none: "无目录模式：未找到印刷目录，AI 依据标题群与版面推断结构（正常路径，证据不足的项保留待复核）",
+};
 export default memo(function OutlinePane(props: Props) {
-  const { document, tocText, onTocText, tocCandidates, onFindTocPages, onJumpPage, pageText, onPageText, onAnalyze, onPreviewAudit, onReadLocalToc, suggestions, patches, selected, activeBlock, onSelect, onConfirm, onDismiss, onConfirmAll, onRevert, onRevertAll, busy, providers, modelValue, configured, onConfigureModel, analysis, onOptions, onMode, reasoningMode, reasoningBudget, onModelChange, onRunModel, onPause, onAdoptProposed, onConfirmReview } = props;
+  const { document, tocCandidates, onFindTocPages, onJumpPage, pageText, onPageText, onPreviewActualAudit, suggestions, patches, selected, activeBlock, onSelect, onConfirm, onDismiss, onConfirmAll, onRevert, onRevertAll, busy, providers, modelValue, configured, onConfigureModel, analysis, onMode, reasoningMode, reasoningBudget, onModelChange, onRunModel, onPause } = props;
   const [queue, setQueue] = useState("all");
   const allPending = suggestions.filter(value => !value.automatic);
   const group = (value: StructureSuggestion) => value.operation === "set_type" ? "cleanup" : value.operation === "set_title" ? "promotion" : "level";
   const pending = allPending.filter(value => queue === "all" || group(value) === queue);
   const live = patches.filter(value => !value.reverted_at);
-  const { job, running, paused, mode, options, proposedToc } = analysis;
+  const { job, running, paused, mode } = analysis;
   const [clock, setClock] = useState(() => Date.now());
   useEffect(() => {
     if (!running) return;
@@ -80,10 +79,6 @@ export default memo(function OutlinePane(props: Props) {
     const timer = window.setInterval(() => setClock(Date.now()), 1000);
     return () => window.clearInterval(timer);
   }, [running]);
-  const [draftText, setDraftText] = useState("");
-  useEffect(() => { setDraftText(proposedToc ? formatTocDraft(proposedToc) : ""); }, [proposedToc]);
-  const draftEntries = parseTocDraft(draftText);
-  const invalidDraftLines = draftText.split("\n").filter(line => line.trim() && !parseTocDraft(line).length).length;
   const blocked = busy || running;
   const textFor = (id: string) => document.blocks.find(block => block.block_id === id)?.source_text || "结构块";
   const reconciliation = (job?.result as { reconciliation?: Record<string, number> } | undefined)?.reconciliation;
@@ -101,7 +96,6 @@ export default memo(function OutlinePane(props: Props) {
   const inFlightMs = inFlight?.started_at ? Date.parse(inFlight.started_at) : NaN;
   const inFlightElapsed = running && Number.isFinite(inFlightMs) ? Math.max(0, Math.round((clock - inFlightMs) / 1000)) : null;
   const hierarchy = (job?.result as { hierarchy_review?: { checked: number; headings: number }; hierarchy_plan?: { profile?: { toc_scope?: string; root_convention?: string } } } | undefined);
-  const baselineCount = parseTocDraft(tocText).length;
   // 一行摘要：优先读 A/B/C 归类计数（result.categories），旧后端回落到 reconciliation 字段。
   const categories = (job?.result as { categories?: { removed?: number; added?: number; level?: number } } | undefined)?.categories;
   const summaryParts: string[] = [];
@@ -112,6 +106,11 @@ export default memo(function OutlinePane(props: Props) {
     if (reconciliation.level_corrections !== undefined) summaryParts.push(`层级修正 ${reconciliation.level_corrections}`);
   }
   const summary = summaryParts.length ? summaryParts.join(" · ") : null;
+  // 只读的目录基准摘要（含无目录模式与回退原因），来自作业真实结果。
+  const baselineSource = (job?.result as { baseline_source?: string } | undefined)?.baseline_source || "";
+  const baselineEntries = (job?.result as { baseline_entries?: number } | undefined)?.baseline_entries;
+  const boundProvider = providers.find(item => item.service_id === modelValue.service_id);
+  const boundModelLabel = modelValue.model || boundProvider?.models[0]?.model || "";
   return <aside className="sidebar mineru-control-column review-outline">
     <div className="panel-title"><strong>文档目录</strong><span>{flattenToc(document.toc).length} 个标题</span></div>
     <div className="pane-scroll">
@@ -120,26 +119,31 @@ export default memo(function OutlinePane(props: Props) {
       </details>
       <details className="outline-section review-assistant">
         <summary>AI 校准</summary>
-        <TaskModelPicker
-          label="校对模型"
-          providers={providers}
-          value={modelValue}
-          reasoningMode={reasoningMode}
-          reasoningBudget={reasoningBudget}
-          onConfigure={onConfigureModel}
-          onChange={onModelChange}
-        />
+        <details className="task-model-details" open={!configured}>
+          <summary>校对模型{configured && boundProvider ? `：${boundProvider.name}${boundModelLabel ? ` · ${boundModelLabel}` : ""}` : "（未配置）"}</summary>
+          <TaskModelPicker
+            label="校对模型"
+            providers={providers}
+            value={modelValue}
+            reasoningMode={reasoningMode}
+            reasoningBudget={reasoningBudget}
+            showThinking={false}
+            onConfigure={onConfigureModel}
+            onChange={onModelChange}
+          />
+        </details>
         <div className="calib-modes u-segmented u-segmented--fill" role="radiogroup" aria-label="校准档位">
           {(["coarse", "fine"] as StructureMode[]).map(value =>
             <button key={value} type="button" role="radio" aria-checked={mode === value} className={mode === value ? "active is-active" : ""} disabled={blocked || paused} onClick={() => onMode(value)}>{value === "coarse" ? "粗校" : "精校"}</button>)}
         </div>
         <p className="calib-mode-hint">{MODE_HINTS[mode]}</p>
-        {/* 运行中主按钮变「暂停」必须保持可点；档位/基准约束只在未运行时拦截。 */}
-        <button className="primary block-button u-btn u-btn--primary u-btn--block" disabled={busy || (!running && (!configured || (!options.extractToc && !baselineCount)))}
+        {/* 运行中主按钮变「暂停」必须保持可点；模型未配置时才拦截。 */}
+        <button className="primary block-button u-btn u-btn--primary u-btn--block" disabled={busy || (!running && !configured)}
           onClick={() => running ? onPause() : onRunModel()}>
           {running ? "暂停" : paused ? "继续校准" : "开始校准"}
         </button>
-        {!configured && <small className="review-hint">先选择并配置校对模型；校准结果自动应用，可随时在修订历史撤销。</small>}
+        <small className="review-hint">目录准备与执行参数由 AI 与档位自动决定：有已确认基准则复用，否则自动定位目录页并本地优先提取；没有目录的书按无目录模式推断。校准结果自动应用，可随时在修订历史撤销。</small>
+        {!configured && <small className="review-hint">先在上方选择并配置校对模型。</small>}
         {job && <div className={`structure-run-panel${running ? " is-running" : ""}${job.status === "failed" ? " is-failed" : ""}${paused ? " is-paused" : ""}`} role="status">
           <strong><span className={`run-dot${running ? " running" : job.status === "failed" ? " failed" : " done"}`} aria-hidden="true"/> {running ? "正在校准" : paused ? "已暂停" : job.status === "failed" ? "校准失败" : "校准完成"}</strong>
           <progress max={1} value={job.progress || 0}/>
@@ -148,6 +152,7 @@ export default memo(function OutlinePane(props: Props) {
           {job.status === "failed"
             ? <p role="alert" className="review-error">{job.error || job.message}</p>
             : <p>{job.message}</p>}
+          {baselineSource && <p className="review-hint">{BASELINE_LABELS[baselineSource] || `目录基准：${baselineSource}`}{typeof baselineEntries === "number" && baselineEntries > 0 ? ` · ${baselineEntries} 条` : ""}</p>}
           {summary && <p className="reconciliation-summary">{summary}</p>}
           <details><summary>诊断详情</summary>
             {coverage && <p>候选 {coverage.candidates} 个 · 第一遍规划定案 {coverage.reused ?? 0} 个 · 第二遍必须定案 {coverage.second_pass ?? 0} 个{coverage.needs_review > 0 ? `，${coverage.needs_review} 个仍需核对` : ""}{qa && `，抽查 ${qa.checked} 项一致性 ${qa.agree}/${qa.checked}`}。</p>}
@@ -159,34 +164,17 @@ export default memo(function OutlinePane(props: Props) {
             <ul className="structure-activity">{(job.activity ?? []).map((item, index) => <li key={index}>{item.text}</li>)}</ul>
           </details>
         </div>}
-        <details className="review-advanced">
-          <summary>高级选项</summary>
-          <label className="review-baseline-mode">目录基准
-            <select aria-label="目录基准来源" value={options.extractToc ? "source" : "confirmed"} disabled={blocked} onChange={event => onOptions({ extractToc: event.target.value === "source" })}>
-              <option value="source">自动识别印刷目录</option>
-              <option value="confirmed">使用已确认的目录</option>
-            </select>
-          </label>
-          {!options.extractToc && <div className="review-page-picker review-manual-baseline">
-            <label>已确认目录 · {baselineCount} 条<textarea aria-label="已确认的目录基准" value={tocText} disabled={blocked} onChange={event => onTocText(event.target.value)} rows={6} spellCheck={false} placeholder={"# 第一章\n## 第一节"}/></label>
-            <small>每行用 # 至 ###### 表示层级。此模式不需要目录页；没有原书目录时可自行填写。</small>
-            {tocText.trim() && !baselineCount && <small role="alert">尚未识别到目录条目，请按“# 标题”格式填写。</small>}
-          </div>}
-          {options.extractToc && <div className="review-page-picker">
-            <label>限定目录页（留空自动识别）<input aria-label="源文件目录页" value={pageText} disabled={blocked} onChange={event => onPageText(event.target.value)} placeholder="例如 3-5, 7"/></label>
+        {/* 按需纠错入口：仅当目录识别不准时才指定真实 PDF 目录页；留空即自动识别。 */}
+        {!running && <details className="calib-correct">
+          <summary>目录识别不准？指定真实目录页</summary>
+          <div className="review-page-picker">
+            <label>目录页（留空自动识别）<input aria-label="源文件目录页" value={pageText} disabled={blocked} onChange={event => onPageText(event.target.value)} placeholder="例如 3-5, 7"/></label>
             <button className="link-button" disabled={blocked} onClick={onFindTocPages}>查找目录页</button>
             {tocCandidates.length > 0 && <div className="toc-candidates">{tocCandidates.slice(0, 8).map(candidate => <button key={candidate.page_index} disabled={blocked} title={candidate.reasons.join(" · ")} onClick={() => onJumpPage(candidate.page_number)}>查看第 {candidate.page_number} 页</button>)}</div>}
-            <small>自动定位后有显式目录标记页就直接采信本地解析（省一次模型请求）。</small>
-          </div>}
-          <button className="link-button block-button" onClick={onReadLocalToc} disabled={blocked}>本地读取目录 · 0 费用</button>
-          <button className="block-button" onClick={onAnalyze} disabled={blocked}>只做本地校准 · 无模型费用</button>
-          <label className="structure-option"><input type="checkbox" checked={options.useVision} disabled={blocked} onChange={() => onOptions({ useVision: !options.useVision })}/>对照原页图片 <small>需视觉模型</small></label>
-          <button className="link-button block-button" onClick={onPreviewAudit} disabled={blocked}>预览启动输入</button>
-          <button className="block-button" onClick={onConfirmReview} disabled={blocked}>确认当前审查范围（全书）</button>
-          <small>校准修改自动应用，可随时在修订历史撤销；复核方式、并发、超时等执行参数由档位自动决定，无需手动配置。</small>
-          {proposedToc?.length ? <details className="review-baseline" open><summary>待确认目录草稿 · {draftEntries.length} 条</summary><p className="review-hint">请对照原目录编辑文字与层级，每行用 # 至 ###### 表示层级；未定位条目也可能超出当前解析页范围。</p><textarea aria-label="待确认目录草稿" value={draftText} disabled={blocked} onChange={event => setDraftText(event.target.value)} rows={8} spellCheck={false}/>{invalidDraftLines > 0 && <p role="alert">有 {invalidDraftLines} 行格式无效，请按“# 标题”格式修改后确认。</p>}<button className="block-button" disabled={blocked || !draftEntries.length || invalidDraftLines > 0} onClick={() => onAdoptProposed(draftEntries)}>确认目录并保存基准</button></details> : null}
-          {job?.result && <button className="link-button block-button" onClick={props.onPreviewActualAudit}>查看实际模型请求</button>}
-        </details>
+            <small>指定后点「开始校准」会以这些页重新提取目录并覆盖已保存基准；清空输入即恢复自动识别。</small>
+          </div>
+        </details>}
+        {job?.result && <button className="link-button block-button" onClick={onPreviewActualAudit}>查看实际模型请求</button>}
       </details>
       {allPending.length > 0 && <details className="outline-section structure-queue" open>
         <summary>待确认 · {allPending.length}</summary>

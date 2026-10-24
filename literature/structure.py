@@ -167,6 +167,14 @@ def local_printed_toc(document: Document, *, pages: Iterable[int] | None = None)
             "warnings": ["本地提取的层级按编号和标题词推断，请对照原目录确认。"] if entries else []}
 
 
+def _safe_confidence(item: dict[str, Any]) -> float:
+    """目录页候选置信度的容错读取；候选缺字段时按 0 处理（不采信）。"""
+    try:
+        return float(item.get("confidence") or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def structure_model_payload(document: Document, authoritative_toc: Iterable[dict[str, Any]], *, excluded_pages: set[int] | None = None) -> dict[str, Any]:
     """构建模型阶段的可审计输入。
 
@@ -174,9 +182,16 @@ def structure_model_payload(document: Document, authoritative_toc: Iterable[dict
     普通正文仅以有界的疑似标题短块参与，目录页正文排除。
     """
     toc = [{**item, "title": str(item.get("title", "")), "level": max(1, min(6, int(item.get("level", 1))))} for item in authoritative_toc]
-    # 明确指定了目录页时只信任这些页；未指定才回退到本地目录页候选。
+    # 明确指定了目录页时只信任这些页；未指定时的兜底不再沿用“页码行密度”启发式
+    # 直接整页排除：只有该页满足候选判据，且或有显式目录标记、或能本地解析出
+    # ≥2 条目录条目（真目录页的强特征；参考文献/尾注页的条目解析不出来）才排除，
+    # 且上限与 plan 的自动识别一致（6 页），避免误识别页把真实标题从候选里抹掉。
+    marker_pages = set(signals.toc_marker_pages(document))
     toc_pages = set(excluded_pages) if excluded_pages is not None else {
-        item["page_index"] for item in find_toc_page_candidates(document)
+        item["page_index"] for item in find_toc_page_candidates(document)[:DEFAULT_TOC_PAGE_LIMIT]
+        if _safe_confidence(item) >= TOC_PAGE_MIN_CONFIDENCE
+        and (item["page_index"] in marker_pages
+             or len(signals.extract_printed_toc(document, [item["page_index"]])[0]) >= 2)
     }
     reconciliation = reconcile_toc(document, toc, excluded_pages=toc_pages)
     # 只把本地已高置信自动定案的块排除出模型候选；疑似漏标（set_title）与降级候选
@@ -394,6 +409,14 @@ def complete_structure(provider: TextProvider, *, system: str, user: str, eviden
     return method(system=system, user=user, images=evidence)
 
 
+class TocExtractionContentError(ProviderError):
+    """目录提取响应内容不可用（为空/结构不可解析）。
+
+    与传输/鉴权/限流类 ProviderError 的区别：这是对已返回响应的确定性内容校验结论，
+    可以安全地回退本地草稿或无目录推断；服务故障则必须保持原失败/暂停语义。
+    """
+
+
 def extract_toc_with_provider(payload: dict[str, Any], provider: TextProvider) -> tuple[list[dict[str, Any]], ProviderResponse]:
     """让模型从确认的目录页文本提取目录条目（标题 + 层级）。"""
     user = json.dumps(
@@ -414,25 +437,28 @@ def extract_toc_with_provider(payload: dict[str, Any], provider: TextProvider) -
         ),
         user=user,
     )
-    value = extract_json(response.content)
+    try:
+        value = extract_json(response.content)
+    except ProviderError as error:
+        raise TocExtractionContentError(f"目录提取响应不可解析：{error}") from error
     raw_entries = value.get("toc")
     if not isinstance(raw_entries, list):
-        raise ProviderError("目录提取模型响应缺少 toc 数组。")
+        raise TocExtractionContentError("目录提取模型响应缺少 toc 数组。")
     entries: list[dict[str, Any]] = []
     for raw in raw_entries:
         if not isinstance(raw, dict):
-            raise ProviderError("目录条目必须是对象。")
+            raise TocExtractionContentError("目录条目必须是对象。")
         title = str(raw.get("title", "")).strip()
         if not title:
             continue
         try:
             level = _normalize_level(raw.get("level", 1))
         except StorageError as error:
-            raise ProviderError("模型目录层级非法。") from error
+            raise TocExtractionContentError("模型目录层级非法。") from error
         entries.append({"title": title[:300], "level": level,
                         **{key: str(raw[key])[:160] for key in ("author", "printed_page") if raw.get(key)}})
     if not entries:
-        raise ProviderError("模型没有提取到任何目录条目。")
+        raise TocExtractionContentError("模型没有提取到任何目录条目。")
     return entries, response
 
 
@@ -856,20 +882,49 @@ def run_structure_job(
             pages = [item["page_index"] + 1 for item in payload["toc_pages"]]
             line_count = sum(len(item["blocks"]) for item in payload["toc_pages"])
             if not payload["toc_pages"]:
-                emit("本地没有找到可解析的目录，也没有可信的目录页候选；可手工指定目录页后重试。", level="warning", progress=0.35)
+                # 无目录是正常文献形态（论文、期刊文章等）：这里不是失败提示，
+                # 也不要求用户手工指定目录页；自动流程直接进入无目录推断路径。
+                emit("未定位到印刷目录页：按无目录模式继续，稍后由 AI 依据标题群与版面推断结构。",
+                     level="info", progress=0.35)
             else:
                 payload["local_toc_draft"] = [entry.to_dict() for entry in local_entries]
                 emit(f"AI 核对源目录：第 {'、'.join(map(str, pages))} 页，共 {line_count} 个文本块；本地草稿仅作线索", level="model", progress=0.35)
                 check_pause()
-                proposed_toc, response = extract_toc_with_provider(payload, audited_provider)
-                proposed_toc = [{**item, "level_source": "model"} for item in proposed_toc]
-                emit(f"模型提取到 {len(proposed_toc)} 条目录条目", level="success", progress=0.55)
+                try:
+                    proposed_toc, response = extract_toc_with_provider(payload, audited_provider)
+                    proposed_toc = [{**item, "level_source": "model"} for item in proposed_toc]
+                    emit(f"模型提取到 {len(proposed_toc)} 条目录条目", level="success", progress=0.55)
+                except TocExtractionContentError as error:
+                    # 仅对响应内容不可用（提取空/结构不可解析）回退本地草稿或无目录推断；
+                    # 鉴权/超时/网络等真实服务故障仍按原失败语义抛出，不吞错继续跑。
+                    emit(f"模型目录提取响应不可用（{error}）；回退本地解析草稿继续校准。",
+                         level="warning", progress=0.55)
 
+        if extract_toc and proposed_toc and (trust_local or payload["toc_pages"]):
+            # 自动流程：本次从真实目录页提取出的目录直接存为项目基准
+            # （document/toc_baseline.json），下一次校准默认复用，不再重复提取；
+            # 用户在纠错入口指定其它目录页会重新提取并覆盖。仅提取结果为空
+            # （无目录回退/本地草稿）时不持久化，避免把推断结果伪装成原书目录。
+            store.save_structure_baseline(project_id, proposed_toc, source="auto_extract")
+        # 疑似目录页的整页排除边界（提取完成后判定）：用户显式指定的页遵从其选择；
+        # 自动疑似页只有在真的提取出目录时才可信，提取为空（误检页）时必须恢复候选，
+        # 否则页上的正常论文标题会被整页抹掉。
+        user_specified_pages = bool(options.get("toc_page_indexes"))
+        if payload["toc_pages"] and (user_specified_pages or proposed_toc):
+            explicit_toc_pages = excluded_pages
+        elif payload["toc_pages"]:
+            explicit_toc_pages = set()
+        else:
+            explicit_toc_pages = None
         baseline = proposed_toc or payload["authoritative_toc"]
-        if not baseline and proofread and len(local_entries) >= 2:
-            # 未显式选择目录来源时也能自动用本地目录做基准，实现一键校对。
-            baseline = [entry.to_dict() for entry in local_entries]
-            emit(f"本地目录 {len(baseline)} 条作为待验证线索；层级由整体推理复核", progress=0.68)
+        # 无可信目录时，本地解析草稿只作模型只读线索：不作为 authoritative_toc，
+        # 不参与 reconciliation，也不授权粗校 toc_delta 收窄，
+        # 否则误识别的“伪目录”会让正常标题从候选里消失。
+        local_draft = ([entry.to_dict() for entry in local_entries]
+                       if proofread and not baseline and len(local_entries) >= 2 else [])
+        if local_draft:
+            emit(f"本地解析到 {len(local_draft)} 条疑似目录条目（无显式目录标记，不可信）：仅作模型只读线索；按全量标题候选推断结构，层级由整体推理复核",
+                 progress=0.68)
         suggestions: list[dict[str, Any]] = []
         reconciliation: dict[str, Any] = {}
         skipped_model: list[dict[str, Any]] = []
@@ -881,15 +936,18 @@ def run_structure_job(
         full_review = False
         if proofread:
             if not baseline:
-                emit("未找到目录：AI 将依据标题群与版面推断结构；证据不足的项保留待复核。", level="warning", progress=0.7)
+                # 无目录是正常路径，不是异常：AI 依据标题群与版面推断，证据不足的项保留待复核。
+                emit("未找到印刷目录：按无目录模式由 AI 依据标题群与版面推断结构；证据不足的项保留待复核。", level="info", progress=0.7)
             emit(f"按 {len(baseline)} 条源目录校对标题，普通正文不全文发送", progress=0.7)
             # 第一阶段：本地目录↔结构块对账，不调用模型。
             model_payload = structure_model_payload(document, baseline, excluded_pages=explicit_toc_pages)
+            # 不可信的本地疑似目录只作为模型只读线索随请求下发（提示词明确其可能错误）。
+            model_payload["local_toc_draft"] = local_draft
             reconciliation = model_payload["reconciliation"]
             local = model_payload["local_suggestions"]
             model_payload["title_candidates"] = [
                 item for item in model_payload["title_candidates"]
-                if item["page_index"] not in excluded_pages
+                if item["page_index"] not in (explicit_toc_pages or set())
             ]
             model_payload["visual_evidence"] = visual_evidence(document, store.source_path(project_id), {
                 **model_payload, "options": payload["options"], "toc_pages": [],
@@ -1229,8 +1287,9 @@ def run_structure_job(
             } if proofread else {}),
             "baseline_source": ("local" if proposed_toc and trust_local else
                                 "model" if proposed_toc else
-                                "confirmed" if options.get("toc") else
-                                "local_draft" if baseline else "none"),
+                                ("auto_extract" if options.get("toc_source") == "auto_extract" else "confirmed") if options.get("toc") else
+                                "local_draft" if local_draft else "none"),
+            "baseline_entries": len(baseline),
             # 应用完成后（含自动应用）的文档修订时间戳，供恢复时判断建议是否已过时。
             "document_updated_at": store.document_updated_at(project_id),
             "audit": {

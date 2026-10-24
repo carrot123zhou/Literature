@@ -10,8 +10,8 @@
   上标标记时，转成 EPUB3 noteref/aside 真脚注（阅读器弹层）。
 - ``docx``：Word 单文件（需要 python-docx）；匹配到的页下注转成 Word 真脚注
   （``word/footnotes.xml`` + 上标引用），未匹配到的保持普通段落。
-- ``markdown``：单文件 ``full.md`` + 同级 ``assets/``。
-- ``html``：分章节多页 ``index.html`` + ``chapter-0001.html`` … + ``style.css`` + ``assets/``。
+- ``markdown``：单文件 ``<名称>.md``（与 EPUB/DOCX 同名）+ 同级 ``assets/``。
+- ``html``：主入口 ``<名称>.html`` + 分章节 ``chapter-0001.html`` … + ``style.css`` + ``assets/``。
 
 模式：``source``（原文）/ ``translation``（译文，缺译回退原文）/
 ``bilingual``（原文段后紧跟译文段，缺译只出原文段，不重复）。
@@ -859,9 +859,10 @@ def _xhtml(title: str, language: str, body: str) -> str:
 # ---------------------------------------------------------------------------
 
 def _write_markdown(project: Path, root: Path, document: Document, blocks: list[Block], layer: TranslationLayer | None,
-                    mode: ExportMode, assets: dict[str, str]) -> list[tuple[Path, bool]]:
+                    mode: ExportMode, assets: dict[str, str], name: str = "") -> list[tuple[Path, bool]]:
     root.mkdir(parents=True, exist_ok=True)
-    target = root / "full.md"
+    # 主文件用文档名：显式 filename 优先，缺省回退 document.title（清洗后为空才退回 full）。
+    target = root / f"{safe_name(name or document.title) or 'full'}.md"
     target.write_text(render_markdown(document, blocks, layer, mode, assets, build_plan(blocks)), encoding="utf-8")
     files: list[tuple[Path, bool]] = [(target, True)]
     for path in _copy_assets(project, root / "assets", document, assets):
@@ -870,8 +871,11 @@ def _write_markdown(project: Path, root: Path, document: Document, blocks: list[
 
 
 def _write_html(project: Path, root: Path, document: Document, blocks: list[Block], layer: TranslationLayer | None,
-                mode: ExportMode, assets: dict[str, str]) -> list[tuple[Path, bool]]:
+                mode: ExportMode, assets: dict[str, str], name: str = "") -> list[tuple[Path, bool]]:
     root.mkdir(parents=True, exist_ok=True)
+    # 主入口与其它格式一致用文档名（index.html 改为 <名称>.html）；章节/样式/assets 等
+    # 包内辅助文件保持格式所需命名，章内互链不指向主入口，改后导航/锚链接仍然有效。
+    entry_name = f"{safe_name(name or document.title) or 'index'}.html"
     sections = split_sections(document, blocks) or [Section(document.title, 1, blocks, nav=False)]
     language = _display_language(document, layer, mode)
     files: list[tuple[Path, bool]] = []
@@ -904,8 +908,8 @@ def _write_html(project: Path, root: Path, document: Document, blocks: list[Bloc
         f'<p class="meta">{html.escape(language)} · {len(blocks)} blocks</p>'
         f'<nav class="toc">{nav_html or "<ol></ol>"}</nav>'
     )
-    (root / "index.html").write_text(_page_html(document.title, language, index_body, stylesheet="style.css"), encoding="utf-8")
-    files.append((root / "index.html", False))
+    (root / entry_name).write_text(_page_html(document.title, language, index_body, stylesheet="style.css"), encoding="utf-8")
+    files.append((root / entry_name, True))
     (root / "style.css").write_text(BASE_CSS + _INDEX_CSS_EXTRA + "\n", encoding="utf-8")
     files.append((root / "style.css", False))
     for path in _copy_assets(project, root / "assets", document, assets):
@@ -1470,9 +1474,9 @@ def _format_files(
     if fmt == "docx":
         return _write_docx(project, root, document, blocks, layer, mode, assets, name)
     if fmt == "markdown":
-        return _write_markdown(project, root, document, blocks, layer, mode, assets)
+        return _write_markdown(project, root, document, blocks, layer, mode, assets, name)
     if fmt == "html":
-        return _write_html(project, root, document, blocks, layer, mode, assets)
+        return _write_html(project, root, document, blocks, layer, mode, assets, name)
     raise StorageError(f"不支持的导出格式：{fmt}")
 
 

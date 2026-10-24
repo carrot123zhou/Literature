@@ -11,12 +11,14 @@ type Props = {
   value: ModelRoleBinding;
   reasoningMode: ReasoningMode;
   reasoningBudget: number;
+  /** 结构校准等零高级配置场景可关掉思考档位/预算（后端已按任务默认关思考）；翻译页不受影响。 */
+  showThinking?: boolean;
   onChange: (patch: TaskModelPatch) => void;
   onConfigure?: () => void;
 };
 
 /** 任务界面的模型选择器：服务商下拉 → 模型下拉 + 思考水平（默认=角色绑定）。 */
-export default function TaskModelPicker({ label, providers, value, reasoningMode, reasoningBudget, onChange, onConfigure }: Props) {
+export default function TaskModelPicker({ label, providers, value, reasoningMode, reasoningBudget, showThinking = true, onChange, onConfigure }: Props) {
   const provider = providers.find(item => item.service_id === value.service_id);
   // 绑定 model 为空时展示服务商第一个模型，与后端“空回退第一个”的语义保持一致。
   const model = value.model || provider?.models[0]?.model || "";
@@ -29,14 +31,14 @@ export default function TaskModelPicker({ label, providers, value, reasoningMode
       <span className="task-model-picker-label">{label}</span>
       {onConfigure && <button className="link-button" onClick={onConfigure}>配置服务商与模型</button>}
     </div>
-    <ThinkingLevelField
+    {showThinking && <ThinkingLevelField
       value={reasoningMode}
       budget={reasoningBudget}
       service={provider}
       model={model}
       emptyHint={providers.length ? undefined : "还没有模型服务商，请先在「配置服务商与模型」中添加。"}
       onChange={patch => onChange({ reasoningMode: patch.reasoningMode, ...(patch.reasoningBudget !== undefined ? { reasoningBudget: patch.reasoningBudget } : {}) })}
-    />
+    />}
     <div className="model-form-row task-model-picker-row">
       <label>服务商
         <select aria-label={`${label}服务商`} value={value.service_id} onChange={event => changeProvider(event.target.value)}>

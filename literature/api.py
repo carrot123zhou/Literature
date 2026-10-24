@@ -288,6 +288,9 @@ class StructureJobInput(BaseModel):
     reasoning_mode: ReasoningMode = "inherit"
     reasoning_budget: int = Field(default=0, ge=0, le=200000)
     toc: list[dict[str, Any]] = Field(default_factory=list)
+    # 目录基准来源元数据（只读展示用）：confirmed=人工确认；auto_extract=上次校准自动提取。
+    # 由 start_structure 载入已保存基准时写入；客户端无需传，不影响执行参数。
+    toc_source: str = ""
     # 用户档位：coarse=粗校（只校准与目录相关的候选，默认）；fine=精校（额外未收录小节发现）。
     # 设为 None 时保持旧行为（各字段显式生效），用于兼容既有调用。
     mode: Literal["coarse", "fine"] | None = None
@@ -824,19 +827,24 @@ class JobManager:
         # 显式字段 = 调用方真正给出的字段（pydantic ``model_fields_set``）+ ``advanced`` 容器；
         # 只有这些才覆盖档位预设，其余一律由 ``mode`` 派生。
         explicit = {key: getattr(request, key) for key in request.model_fields_set
-                    if key not in {"service_id", "mode", "advanced", "reasoning_mode", "reasoning_budget", "model"}}
+                    if key not in {"service_id", "mode", "advanced", "reasoning_mode", "reasoning_budget", "model", "toc_source"}}
         explicit.update({key: value for key, value in request.advanced.items() if value is not None})
         if request.mode:
             # 界面档位：由服务端展开内部参数，用户不需要选择复核模式/规划策略/视觉等。
             config_value = structure_mode_config(request.mode, explicit, base=config_value)
             # 项目已确认的目录基准就是“原书目录”：主流程只传 mode 时，后端自动采用它，
-            # 不再重跑目录提取；用户显式给了 toc/extract_toc 时不覆盖。
-            if not config_value.get("toc") and "toc" not in explicit and "extract_toc" not in explicit:
+            # 不再重跑目录提取。优先级：显式目录/目录来源 > 显式纠错目录页 > 已保存基准 >
+            # 自动定位目录页；用户在纠错入口指定了真实目录页时必须重新提取
+            # （覆盖旧基准），不能被已保存基准静默截住。
+            if (not config_value.get("toc") and "toc" not in explicit
+                    and "extract_toc" not in explicit and "toc_page_indexes" not in explicit):
                 stored = self.store.load_structure_baseline(project_id)
                 stored_toc = stored.get("toc") if isinstance(stored, dict) else None
                 if stored_toc:
                     config_value["toc"] = stored_toc
                     config_value["extract_toc"] = False
+                    # 携带来源元数据供只读摘要区分“人工确认”与“上次自动提取”，不把自动基准称已确认。
+                    config_value["toc_source"] = str(stored.get("source") or "confirmed")
         else:
             config_value.update(explicit)
             config_value.pop("mode", None)

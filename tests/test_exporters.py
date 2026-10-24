@@ -9,6 +9,7 @@ EPUB 结构校验、DOCX 可打开且含 document.xml、空章节/空文档、ex
 from __future__ import annotations
 
 import json
+import re
 import tempfile
 import unittest
 import zipfile
@@ -270,12 +271,16 @@ class ApiExportTests(unittest.TestCase):
             rels = {item["rel_path"] for item in value["files"]}
             self.assertIn("epub/Book.epub", rels)
             self.assertIn("docx/Book.docx", rels)
-            self.assertIn("markdown/full.md", rels)
-            self.assertIn("html/index.html", rels)
+            self.assertIn("markdown/Book.md", rels)
+            self.assertIn("html/Book.html", rels)
             self.assertTrue(any(rel.startswith("html/chapter-") for rel in rels))
+            # 主入口与其它格式一致：主文件为 single_file（可另存/可重命名）。
+            single = {item["rel_path"] for item in value["files"] if item["single_file"]}
+            self.assertLessEqual({"epub/Book.epub", "docx/Book.docx", "markdown/Book.md", "html/Book.html"}, single)
+            self.assertFalse(any(rel in single for rel in rels if rel.startswith("html/chapter-") or rel.endswith("style.css")))
             for item in value["files"]:
                 self.assertTrue((Path(value["path"]) / item["rel_path"]).is_file())
-            markdown = (Path(value["path"]) / "markdown" / "full.md").read_text(encoding="utf-8")
+            markdown = (Path(value["path"]) / "markdown" / "Book.md").read_text(encoding="utf-8")
             if mode == "source":
                 self.assertIn("Hello world.", markdown)
                 self.assertNotIn("你好，世界。", markdown)
@@ -293,7 +298,7 @@ class ApiExportTests(unittest.TestCase):
     def test_chapter_subset_excludes_other_chapters(self) -> None:
         response = self._export(formats=["markdown"], mode="source", chapters=["t2"])
         self.assertEqual(response.status_code, 200, response.text)
-        path = Path(response.json()["path"]) / "full.md"
+        path = Path(response.json()["path"]) / "Book.md"
         markdown = path.read_text(encoding="utf-8")
         self.assertIn("Second chapter.", markdown)
         self.assertNotIn("Hello world.", markdown)
@@ -301,7 +306,7 @@ class ApiExportTests(unittest.TestCase):
     def test_block_ids_override_chapters(self) -> None:
         response = self._export(formats=["markdown"], mode="source", chapters=["t1"], block_ids=["p3"])
         self.assertEqual(response.status_code, 200, response.text)
-        markdown = (Path(response.json()["path"]) / "full.md").read_text(encoding="utf-8")
+        markdown = (Path(response.json()["path"]) / "Book.md").read_text(encoding="utf-8")
         self.assertIn("Second chapter.", markdown)
         self.assertNotIn("Hello world.", markdown)
 
@@ -413,10 +418,41 @@ class ApiExportTests(unittest.TestCase):
         response = self._export(formats=["html"], mode="source")
         self.assertEqual(response.status_code, 200, response.text)
         root = Path(response.json()["path"])
-        index = (root / "index.html").read_text(encoding="utf-8")
-        self.assertIn("Chapter One", index)
-        self.assertIn("chapter-0001.html", index)
+        self.assertFalse((root / "index.html").exists())
+        entry = (root / "Book.html").read_text(encoding="utf-8")
+        self.assertIn("Chapter One", entry)
+        self.assertIn("chapter-0001.html", entry)
+        # 主入口里的章内链接全部存在（改名为文档名后导航仍有效）。
+        for href in re.findall(r'href="([^"]+)"', entry):
+            if href.startswith("http") or href.startswith("#"):  # 外链与锚点不落盘
+                continue
+            self.assertTrue((root / href).is_file(), href)
         self.assertTrue((root / "style.css").is_file())
+        # 章节页互不指向主入口固定名（index.html），改主入口名不破坏章节内链。
+        chapter = (root / "chapter-0001.html").read_text(encoding="utf-8")
+        self.assertNotIn("index.html", chapter)
+
+    def test_default_names_use_document_title_and_clean_illegal_chars(self) -> None:
+        # 中文文档名直接作为主文件名；非法路径字符被 safe_name 清洗；不出现双扩展名。
+        from literature.storage import safe_name
+        document = self.document
+        document.title = "中国的道教：研究&笔记?"
+        self.store.save_document(document)
+        response = self._export(formats=["markdown", "html"], mode="source")
+        self.assertEqual(response.status_code, 200, response.text)
+        value = response.json()
+        expected = safe_name(document.title)
+        rels = [item["rel_path"] for item in value["files"]]
+        self.assertIn(f"markdown/{expected}.md", rels)
+        self.assertIn(f"html/{expected}.html", rels)
+        for rel in rels:
+            self.assertFalse(rel.endswith(".md.md") or rel.endswith(".html.html"))
+
+    def test_markdown_private_entry_falls_back_to_document_title(self) -> None:
+        # 私有缺省入口（不传 name）也应回退 document.title，而非 full。
+        from literature.exporters import _write_markdown
+        written = _write_markdown(self.project_dir, self.root / "md-out", self.document, self.document.blocks, None, "source", {})
+        self.assertEqual(written[0][0].name, "Book.md")
 
     def test_download_and_path_traversal(self) -> None:
         response = self._export(formats=["epub"], mode="source")
@@ -780,7 +816,7 @@ class FootnoteExportTests(unittest.TestCase):
 
     def test_markdown_keeps_page_note_rendering(self) -> None:
         value = self._export(formats=["markdown"], mode="source")
-        markdown = (Path(value["path"]) / "full.md").read_text(encoding="utf-8")
+        markdown = (Path(value["path"]) / "Book.md").read_text(encoding="utf-8")
         self.assertIn("> [页下注] 1. First note.", markdown)
         self.assertIn("^{1}", markdown)
 
