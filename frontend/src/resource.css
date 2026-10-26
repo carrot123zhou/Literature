@@ -648,7 +648,7 @@
   display: grid;
   place-items: center;
   padding: var(--sp-6);
-  background: rgba(0, 0, 0, 0.32);
+  background: var(--scrim);
   -webkit-backdrop-filter: blur(2px);
   backdrop-filter: blur(2px);
   animation: u-fade var(--dur) var(--ease);

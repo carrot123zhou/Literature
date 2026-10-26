@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { api } from "./api";
-import type { ModelEntry, ModelRole, ModelRoleBinding, ModelRoles, ModelService, RemoteModel } from "./types";
+import type { ModelEntry, ModelRole, ModelRoleBinding, ModelRoles, ModelService, RemoteModel, RoleStateMap } from "./types";
 
 /** 服务商创建/更新载荷：models 整套替换（PUT 传新数组即增/删/改）。 */
 export type ModelServicePayload = {
@@ -15,6 +15,8 @@ export type ModelServicePayload = {
 export type ModelServicesApi = {
   services: ModelService[];
   roles: ModelRoles;
+  /** 全局四角色真状态（origin/source/binding/effective/model_source/problem），Settings/聊天面板据此显示实际在用模型。 */
+  roleStates: RoleStateMap | null;
   ready: boolean;
   /** 角色绑定的服务商；未绑定或服务商已删除时返回 undefined。 */
   serviceFor: (role: ModelRole) => ModelService | undefined;
@@ -34,7 +36,10 @@ export type ModelServicesApi = {
 };
 
 const emptyBinding = (): ModelRoleBinding => ({ service_id: "", model: "" });
-const EMPTY_ROLES: ModelRoles = { structure: emptyBinding(), translation: emptyBinding() };
+const EMPTY_ROLES: ModelRoles = {
+  structure: emptyBinding(), translation: emptyBinding(),
+  reader_fold: emptyBinding(), reader_chat: emptyBinding(),
+};
 
 function legacyProvider(): Record<string, unknown> | null {
   try { return JSON.parse(window.localStorage.getItem("literature.provider") || "null"); } catch { return null; }
@@ -47,19 +52,25 @@ function normalizeRoles(value: unknown): ModelRoles {
     const item = (raw ?? {}) as Partial<ModelRoleBinding>;
     return { service_id: String(item.service_id ?? ""), model: String(item.model ?? "") };
   };
-  return { structure: pick(source.structure), translation: pick(source.translation) };
+  // 旧配置没有阅读角色时给空绑定：后端会回退到翻译角色，升级后阅读模块立即可用。
+  return {
+    structure: pick(source.structure), translation: pick(source.translation),
+    reader_fold: pick(source.reader_fold), reader_chat: pick(source.reader_chat),
+  };
 }
 
 /** 服务商库（provider → models 两层）+ 任务角色绑定；密钥只存在后端 Keychain，前端从不读取。 */
 export function useModelServices(): ModelServicesApi {
   const [services, setServices] = useState<ModelService[]>([]);
   const [roles, setRoleState] = useState<ModelRoles>(EMPTY_ROLES);
+  const [roleStates, setRoleStates] = useState<RoleStateMap | null>(null);
   const [ready, setReady] = useState(false);
 
   const refresh = useCallback(async () => {
     const value = await api<{ services: ModelService[]; roles: ModelRoles }>("/model-services");
     setServices(value.services);
     setRoleState(normalizeRoles(value.roles));
+      setRoleStates((value as { role_states?: RoleStateMap }).role_states ?? null);
   }, []);
 
   // 首次使用时把旧的单一 provider 配置迁移成一个服务商 + 一个模型，避免用户重录。
@@ -145,5 +156,5 @@ export function useModelServices(): ModelServicesApi {
 
   const roleBinding = useCallback((role: ModelRole) => roles[role] ?? emptyBinding(), [roles]);
 
-  return { services, roles, ready, serviceFor, entryFor, roleBinding, refresh, create, update, remove, saveKey, check, fetchModels, setRoles };
+  return { services, roles, roleStates, ready, serviceFor, entryFor, roleBinding, refresh, create, update, remove, saveKey, check, fetchModels, setRoles };
 }

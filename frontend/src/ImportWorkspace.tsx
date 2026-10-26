@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import * as pdfjs from "pdfjs-dist";
 import { api } from "./api";
 import { isDesktop, pickDocuments } from "./desktop";
@@ -10,6 +10,7 @@ type Props = {
   refreshProjects: () => Promise<void>;
   openResources: () => void;
   openHistory: () => void;
+  openEngineSettings?: () => void;
 };
 
 const ACTIVE_PAGE_SIZE = 10;
@@ -33,6 +34,20 @@ const sliceLabel: Record<string, string> = {
   prepared: "等待上传", uploaded: "已上传，等待解析", processing: "MinerU 解析中",
   remote_done: "解析完成，等待下载", downloaded: "已下载并校验", failed: "处理失败",
 };
+
+type ParseBackendId = "mineru_remote" | "mineru_local";
+/** 读取用户在本页的显式来源选择；无记录或非法值一律返回 null（走默认策略）。 */
+function readSavedParseBackend(): ParseBackendId | null {
+  try {
+    const saved = window.localStorage.getItem("literature.parse.backend");
+    if (saved === "mineru_remote" || saved === "mineru_local") return saved;
+    // 无效残留值清掉，避免长期影响默认策略判断。
+    if (saved !== null) window.localStorage.removeItem("literature.parse.backend");
+    return null;
+  } catch {
+    return null; // 隐私模式/存储被禁用：当作没有显式选择，不抛错。
+  }
+}
 
 function extension(name: string) { return name.split(".").pop()?.toUpperCase() || "FILE"; }
 function formatSize(bytes: number) {
@@ -74,7 +89,7 @@ function coverageHint(job: OcrJob) {
   return "";
 }
 
-export default function ImportWorkspace({ refreshProjects, openResources, openHistory }: Props) {
+export default function ImportWorkspace({ refreshProjects, openResources, openHistory, openEngineSettings }: Props) {
   const [pendingFiles, setPendingFiles] = useState<PendingFile[]>([]);
   const [activeData, setActiveData] = useState<TaskPage | null>(null);
   const [recentData, setRecentData] = useState<TaskPage | null>(null);
@@ -84,6 +99,17 @@ export default function ImportWorkspace({ refreshProjects, openResources, openHi
   });
   const [language, setLanguage] = useState("ch");
   const [modelVersion, setModelVersion] = useState("vlm");
+  // 解析来源优先级：用户在导入页的显式选择（localStorage，有效值才算）> 默认策略。
+  // 默认策略：本地引擎/服务就绪时默认本机，否则云端。显式选择一旦存在就绝不
+  // 被本地可用性探测覆盖（避免「选了云端、重启后被本地覆盖」）。
+  const initialBackend = useRef(readSavedParseBackend());
+  const [parseBackend, setParseBackend] = useState<"mineru_remote" | "mineru_local">(
+    () => initialBackend.current ?? "mineru_remote",
+  );
+  // 是否已被用户显式选择（有有效记录即视为显式），refresh 轮询不得覆盖。
+  const backendTouchedRef = useRef(initialBackend.current !== null);
+  const [backendTouched, setBackendTouched] = useState(initialBackend.current !== null);
+  const [localEngine, setLocalEngine] = useState<{ available: boolean; label: string; reason: string } | null>(null);
   const [ocr, setOcr] = useState(true);
   const [tables, setTables] = useState(true);
   const [formulas, setFormulas] = useState(true);
@@ -110,8 +136,8 @@ export default function ImportWorkspace({ refreshProjects, openResources, openHi
   const refreshMineruConnection = useCallback(async () => {
     const value = await api<{configured:boolean}>("/mineru/token");
     setTokenConfigured(value.configured);
-    if (!value.configured) { setMineruConnected(null); return; }
     setMineruConnected(null);
+    if (!value.configured) return;
     try {
       await api("/mineru/token/check", { method: "POST" });
       setMineruConnected(true);
@@ -119,12 +145,41 @@ export default function ImportWorkspace({ refreshProjects, openResources, openHi
       setMineruConnected(false);
     }
   }, []);
+  const refreshLocalEngine = useCallback(async () => {
+    try {
+      const value = await api<{ backends: Record<string, unknown>[] }>("/parse/backends");
+      const local = value.backends.find(item => item.backend_id === "mineru_local") || {};
+      const available = Boolean(local.available);
+      setLocalEngine({
+        available,
+        label: String(local.display_name || "本地解析"),
+        reason: String(local.unavailable_reason || ""),
+      });
+      // 只有「没有任何显式选择」时才按默认策略切到本机；
+      // 显式选择（含显式云端）一律保持，显式本地失效时只提示不可用、不静默转云端。
+      if (available && !backendTouchedRef.current) {
+        setParseBackend(value => (value === "mineru_remote" ? "mineru_local" : value));
+      }
+    } catch { setLocalEngine(null); }
+  }, []);
+  const chooseBackend = (next: "mineru_remote" | "mineru_local") => {
+    backendTouchedRef.current = true;
+    setBackendTouched(true);
+    setParseBackend(next);
+    try { window.localStorage.setItem("literature.parse.backend", next); } catch { /* ignore */ }
+  };
   useEffect(() => {
     Promise.all([
       refreshTasks(activePage),
       refreshMineruConnection(),
+      refreshLocalEngine(),
     ]).catch(error => setMessage(String(error)));
-  }, [refreshTasks, refreshMineruConnection, activePage]);
+  }, [refreshTasks, refreshMineruConnection, refreshLocalEngine, activePage]);
+  useEffect(() => {
+    if (parseBackend !== "mineru_local") return;
+    const timer = window.setInterval(() => refreshLocalEngine().catch(() => {}), 3000);
+    return () => window.clearInterval(timer);
+  }, [parseBackend, refreshLocalEngine]);
   useEffect(() => {
     if (!activeData?.counts.total) return;
     const timer = window.setInterval(() => refreshTasks(activePage).catch(() => {}), 1500);
@@ -196,7 +251,16 @@ export default function ImportWorkspace({ refreshProjects, openResources, openHi
   }));
   const startJobs = async () => {
     if (!pendingFiles.length) return;
-    if (!tokenConfigured) { openTokenSettings(); return; }
+    if (parseBackend === "mineru_remote" && !tokenConfigured) {
+      setMessage("云端解析需要 MinerU Token；如需离线解析，请把解析来源切换为本机。");
+      openTokenSettings();
+      return;
+    }
+    if (parseBackend === "mineru_local" && !localEngine?.available) {
+      setMessage(`本机解析未就绪：${localEngine?.reason || "请先在设置中完成配置。"}`);
+      openEngineSettings?.();
+      return;
+    }
     setBusy(true);
     let uploaded: UploadedFile[] = [];
     try {
@@ -218,6 +282,7 @@ export default function ImportWorkspace({ refreshProjects, openResources, openHi
           language, model_version: modelVersion,
           is_ocr: ocr, enable_table: tables, enable_formula: formulas,
           page_limit: 200,
+          backend_id: parseBackend,
         }),
       });
       setPendingFiles([]);
@@ -301,7 +366,14 @@ export default function ImportWorkspace({ refreshProjects, openResources, openHi
 
   return <>
     <main className="intake-content">
-      <section className="intake-heading"><div><span className="eyebrow">DOCUMENT INTAKE</span><h1>导入与处理</h1><p>从这里导入文献，并通过 MinerU 与 Literature 流程生成标准化文档资源。</p></div><span className={`token-state ${mineruConnected ? "configured" : ""}`}>● {!tokenConfigured ? "MinerU 未配置" : mineruConnected === true ? "MinerU 已连接" : mineruConnected === false ? "MinerU 连接检查失败" : "正在检查 MinerU"}</span></section>
+      <section className="intake-heading"><div><span className="eyebrow">DOCUMENT INTAKE</span><h1>导入与处理</h1><p>从这里导入文献，并通过 MinerU 与 Literature 流程生成标准化文档资源。</p></div>
+        <div className="intake-source-state">
+          <span className={`token-state ${localEngine?.available ? "configured" : ""}`} title={localEngine?.available ? localEngine.label : localEngine?.reason || ""}>
+            ● {localEngine === null ? "正在检查本机解析" : localEngine.available ? `本机解析就绪 · ${localEngine.label}` : "本机解析未就绪"}
+          </span>
+          {(!localEngine?.available || parseBackend === "mineru_remote") && <span className={`token-state ${mineruConnected ? "configured" : ""}`}>● 云端 {!tokenConfigured ? "未配置 Token" : mineruConnected === true ? "已连接" : mineruConnected === false ? "连接检查失败" : "正在检查"}</span>}
+        </div>
+      </section>
       <section className="intake-card">
         <div className="intake-main-column">
           <div className={`intake-dropzone ${dragging ? "dragging" : ""}`} onDragOver={event => { event.preventDefault(); setDragging(true); }} onDragLeave={() => setDragging(false)} onDrop={event => { event.preventDefault(); setDragging(false); if (!isDesktop && !busy) addFiles(event.dataTransfer.files); }}>
@@ -314,14 +386,24 @@ export default function ImportWorkspace({ refreshProjects, openResources, openHi
         </div>
         <aside className="intake-options">
           <div className="intake-option-title"><strong>解析设置</strong><button className={tokenConfigured ? "token-button configured" : "token-button"} onClick={openTokenSettings}>🔑 {tokenConfigured ? "Token 已保存" : "设置 Token"}</button></div>
-          <label>解析模型<select value={modelVersion} onChange={event => setModelVersion(event.target.value)}><option value="vlm">MinerU VLM（推荐）</option><option value="pipeline">MinerU Pipeline</option></select><small>HTML 文件会自动切换到 MinerU-HTML。</small></label>
-          <label>文档语言包<select value={language} onChange={event => setLanguage(event.target.value)}><option value="ch">中英文（默认）</option><option value="ch_server">繁体／手写体</option><option value="en">纯英文</option><option value="japan">日文为主</option><option value="korean">韩文</option><option value="chinese_cht">繁体中文为主</option><option value="ta">泰米尔文</option><option value="te">泰卢固文</option><option value="ka">卡纳达文</option><option value="el">希腊文</option><option value="th">泰文</option><option value="latin">拉丁语系</option><option value="arabic">阿拉伯语系</option><option value="cyrillic">西里尔语系</option><option value="east_slavic">东斯拉夫语系</option><option value="devanagari">天城文语系</option></select></label>
+          <label>解析来源<select value={parseBackend} onChange={event => chooseBackend(event.target.value === "mineru_local" ? "mineru_local" : "mineru_remote")}>
+            <option value="mineru_remote">云端 MinerU（默认）</option>
+            <option value="mineru_local">本机解析{localEngine ? ` · ${localEngine.available ? "可用" : "未就绪"}` : ""}</option>
+          </select>
+            {parseBackend === "mineru_local" && (localEngine?.available
+              ? <small>将使用 {localEngine.label}；文件不出本机，解析按切片串行执行。</small>
+              : <small>本机解析未就绪：{localEngine?.reason || "请先在设置 → 文档解析里安装或连接。"} <button className="link-button" onClick={() => openEngineSettings?.()}>去设置</button></small>)}
+            {parseBackend === "mineru_remote" && <small>使用 MinerU 精准解析 API；需要 Token。{!backendTouched && localEngine?.available ? "本机解析也可用，可随时切换。" : ""}</small>}
+          </label>
+          <label>解析模型{parseBackend === "mineru_local" ? "（云端专属）" : ""}<select value={modelVersion} onChange={event => setModelVersion(event.target.value)} disabled={parseBackend === "mineru_local"}><option value="vlm">MinerU VLM（推荐）</option><option value="pipeline">MinerU Pipeline</option></select><small>{parseBackend === "mineru_local" ? "本机引擎使用 MinerU 4 标准档，模型选择不适用。" : "HTML 文件会自动切换到 MinerU-HTML。"}</small></label>
+          <label>文档语言包{parseBackend === "mineru_local" ? "（本机专属）" : ""}<select value={language} onChange={event => setLanguage(event.target.value)} disabled={parseBackend === "mineru_local"}><option value="ch">中英文（默认）</option><option value="ch_server">繁体／手写体</option><option value="en">纯英文</option><option value="japan">日文为主</option><option value="korean">韩文</option><option value="chinese_cht">繁体中文为主</option><option value="ta">泰米尔文</option><option value="te">泰卢固文</option><option value="ka">卡纳达文</option><option value="el">希腊文</option><option value="th">泰文</option><option value="latin">拉丁语系</option><option value="arabic">阿拉伯语系</option><option value="cyrillic">西里尔语系</option><option value="east_slavic">东斯拉夫语系</option><option value="devanagari">天城文语系</option></select>{parseBackend === "mineru_local" && <small>本机引擎自动识别语言，语言包不适用。</small>}</label>
           <label className="option-toggle"><span><strong>OCR</strong><small>扫描件文字识别</small></span><input type="checkbox" checked={ocr} onChange={event => setOcr(event.target.checked)}/></label>
-          <label className="option-toggle"><span><strong>表格识别</strong><small>保留行列结构</small></span><input type="checkbox" checked={tables} onChange={event => setTables(event.target.checked)}/></label>
-          <label className="option-toggle"><span><strong>公式识别</strong><small>保留公式结构</small></span><input type="checkbox" checked={formulas} onChange={event => setFormulas(event.target.checked)}/></label>
+          {parseBackend === "mineru_remote" && <label className="option-toggle"><span><strong>表格识别</strong><small>保留行列结构</small></span><input type="checkbox" checked={tables} onChange={event => setTables(event.target.checked)}/></label>}
+          {parseBackend === "mineru_remote" && <label className="option-toggle"><span><strong>公式识别</strong><small>保留公式结构</small></span><input type="checkbox" checked={formulas} onChange={event => setFormulas(event.target.checked)}/></label>}
+          {parseBackend === "mineru_local" && <small className="intake-privacy">本机引擎（标准档）自动保留表格与公式结构，无需单独开关；额外输出格式不适用。</small>}
           <button className="file-settings-trigger" disabled={!pendingFiles.length} onClick={() => setFileSettingsOpen(true)}><span><strong>逐文件 MinerU 设置</strong><small>页码范围与额外输出格式分别保存</small></span><b>{pendingFiles.length || "—"} ›</b></button>
           <button className="primary intake-start" disabled={!pendingFiles.length || busy} onClick={startJobs}>{busy ? busyStage || "正在处理…" : `开始解析${pendingFiles.length ? `（${pendingFiles.length}）` : ""}`}</button>
-          <small className="intake-privacy">{isDesktop ? "确认解析后，原件复制到本地资源库，再由后台发送给 MinerU；密钥保存在本机 Keychain。" : "文件先上传到本机 Literature，再由后台发送给 MinerU；密钥保存在本机 Keychain。"}</small>
+          <small className="intake-privacy">{parseBackend === "mineru_local" ? "本机解析：文件保留在本机，由本地引擎/服务完成解析；结果同样生成规范文档资源。" : isDesktop ? "确认解析后，原件复制到本地资源库，再由后台发送给 MinerU；密钥保存在本机 Keychain。" : "文件先上传到本机 Literature，再由后台发送给 MinerU；密钥保存在本机 Keychain。"}</small>
         </aside>
       </section>
       <section className="intake-progress-card">
@@ -345,16 +427,17 @@ export default function ImportWorkspace({ refreshProjects, openResources, openHi
           : visibleRecent.map(job => <RecentJobRow key={job.job_id} job={job} openResources={openResources}/>)}</div>
       </section>
     </main>
-    {fileSettingsOpen && <FileSettingsDialog files={pendingFiles} close={() => setFileSettingsOpen(false)} updatePageRanges={updatePageRanges} toggleExtraFormat={toggleExtraFormat}/>}
+    {fileSettingsOpen && <FileSettingsDialog files={pendingFiles} close={() => setFileSettingsOpen(false)} updatePageRanges={updatePageRanges} toggleExtraFormat={toggleExtraFormat} localMode={parseBackend === "mineru_local"}/>}
     {tokenDialog && <div className="modal-backdrop u-backdrop" onClick={() => setTokenDialog(false)}><section className="token-dialog" onClick={event => event.stopPropagation()}><div className="panel-title"><h2>MinerU API Token</h2><button onClick={() => setTokenDialog(false)}>关闭</button></div><p>Token 只会保存到 macOS Keychain，不写入项目、日志或其他文件。</p>{tokenConfigured && !tokenEditing ? <div className="token-saved-state"><i>✓</i><div><strong>Token 已安全保存</strong><span>为保护密钥安全，Literature 不回显完整 Token。</span></div><button onClick={() => setTokenEditing(true)}>替换 Token</button></div> : <><label>MinerU Token<input autoFocus type="password" value={token} onChange={event => setToken(event.target.value)} placeholder="请输入 MinerU Token"/></label><button className="primary" disabled={!token.trim() || busy} onClick={saveToken}>{busy ? "正在保存…" : tokenConfigured ? "保存新 Token" : "保存 Token"}</button>{tokenConfigured && <button className="token-cancel-edit" onClick={() => { setToken(""); setTokenEditing(false); }}>取消替换</button>}</>}</section></div>}
     {message && <button className="toast u-toast" onClick={() => setMessage("")}>{message}</button>}
   </>;
 }
 
-function FileSettingsDialog({ files, close, updatePageRanges, toggleExtraFormat }: {
+function FileSettingsDialog({ files, close, updatePageRanges, toggleExtraFormat, localMode }: {
   files: PendingFile[]; close: () => void;
   updatePageRanges: (key: string, value: string) => void;
   toggleExtraFormat: (key: string, format: ExtraFormat) => void;
+  localMode?: boolean;
 }) {
   return <div className="modal-backdrop u-backdrop file-settings-backdrop" onClick={close}><section className="file-settings-dialog" role="dialog" aria-modal="true" aria-label="逐文件 MinerU 设置" onClick={event => event.stopPropagation()}>
     <header><div><h2>设置每个文件的解析范围</h2><p>以下设置会分别写入对应文件资源的 MinerU 任务；PDF 页码范围留空时解析全部页。</p></div><button aria-label="关闭逐文件设置" onClick={close}>×</button></header>
@@ -367,8 +450,9 @@ function FileSettingsDialog({ files, close, updatePageRanges, toggleExtraFormat 
           <div className="file-settings-name"><span className="file-kind">{extension(item.file.name)}</span><span><strong>{item.file.name}</strong><small>{formatSize(item.file.size)}</small></span></div>
           <span className="file-page-count">{pdf ? item.pageCountLoading ? "读取中…" : item.pageCount ? `${item.pageCount} 页` : "—" : "不适用"}</span>
           <label><span className="sr-only">{item.file.name} 的 PDF 解析页码范围</span><input type="text" disabled={!pdf} value={item.pageRanges} onChange={event => updatePageRanges(item.key, event.target.value)} placeholder={pdf ? "留空解析全部，例如 1-100,105" : "仅适用于 PDF"}/></label>
-          <fieldset disabled={html}><legend className="sr-only">{item.file.name} 的额外输出格式</legend>{EXTRA_FORMATS.map(format => <label key={format}><input type="checkbox" checked={item.extraFormats.has(format)} onChange={() => toggleExtraFormat(item.key, format)}/>{format.toUpperCase()}</label>)}</fieldset>
+          <fieldset disabled={html || localMode}><legend className="sr-only">{item.file.name} 的额外输出格式</legend>{EXTRA_FORMATS.map(format => <label key={format}><input type="checkbox" checked={item.extraFormats.has(format)} onChange={() => toggleExtraFormat(item.key, format)}/>{format.toUpperCase()}</label>)}</fieldset>
           {html && <small className="html-format-note">MinerU-HTML 使用默认 Markdown/JSON 输出</small>}
+          {localMode && !html && <small className="html-format-note">本机解析不提供额外输出格式</small>}
         </article>;
       })}
     </div>

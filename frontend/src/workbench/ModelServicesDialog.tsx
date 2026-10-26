@@ -451,18 +451,22 @@ export default function ModelServicesPanel({ api, onMessage }: { api: ModelServi
               const level = levelFromEntry(entry);
               return <div key={entry.model} className={`model-entry${expanded ? " expanded" : ""}`}>
                 <div className="model-entry-row">
-                  <button type="button" className="model-entry-main" onClick={() => setExpandedModel(expanded ? "" : entry.model)}>
+                  <button type="button" className="model-entry-main" onClick={() => setExpandedModel(expanded ? "" : entry.model)}
+                    title={entry.model}>
                     <strong>{entry.name || entry.model}</strong>
+                    <span className="model-entry-id">{entry.model}</span>
                     <span className="model-picker-meta">
                       {entryBadges(entry).map(badge => <em key={badge}>{badge}</em>)}
                     </span>
                   </button>
-                  <label className="model-entry-thinking">思考
-                    <select aria-label={`${entry.model} 思考水平`} value={level} onChange={event => changeModelThinking(entry, event.target.value as ServiceThinkingLevel)}>
-                      {SERVICE_LEVEL_OPTIONS.map(option => <option key={option.value} value={option.value}>{option.label}</option>)}
-                    </select>
-                  </label>
-                  <button type="button" className="danger-text" onClick={() => removeModel(entry.model)} disabled={busy}>删除</button>
+                  <div className="model-entry-side">
+                    <label className="model-entry-thinking">思考
+                      <select aria-label={`${entry.model} 思考水平`} value={level} onChange={event => changeModelThinking(entry, event.target.value as ServiceThinkingLevel)}>
+                        {SERVICE_LEVEL_OPTIONS.map(option => <option key={option.value} value={option.value}>{option.label}</option>)}
+                      </select>
+                    </label>
+                    <button type="button" className="danger-text" onClick={() => removeModel(entry.model)} disabled={busy}>删除</button>
+                  </div>
                 </div>
                 {expanded && <div className="model-entry-editor">
                   <p className="empty-note">思考水平说明：{LEVEL_HINTS[level]}{entry.reasoning_style === "qwen_thinking" ? " 开关型协议下「低/中/高」都表示开启思考。" : ""}</p>

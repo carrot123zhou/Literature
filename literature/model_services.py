@@ -32,7 +32,11 @@ _WRITE_LOCK = threading.RLock()
 
 ROLE_STRUCTURE = "structure"
 ROLE_TRANSLATION = "translation"
-MODEL_ROLES = (ROLE_STRUCTURE, ROLE_TRANSLATION)
+# 阅读模块的两个独立角色：折叠（把章节压成五层）与对话（阅读问答）可以分别绑不同模型，
+# 因为两者对模型的要求不同（折叠要便宜、稳定、JSON 严格；对话要长上下文、语言能力强）。
+ROLE_READER_FOLD = "reader_fold"
+ROLE_READER_CHAT = "reader_chat"
+MODEL_ROLES = (ROLE_STRUCTURE, ROLE_TRANSLATION, ROLE_READER_FOLD, ROLE_READER_CHAT)
 
 
 def runtime_root() -> Path:
@@ -414,6 +418,49 @@ class ModelServiceStore:
     def role_binding(self, role: str) -> dict[str, str]:
         return self._read()["roles"].get(role, _empty_role())
 
+    def role_state(self, role: str) -> dict[str, Any]:
+        """角色的真实状态：`bound` / `unset`（配置里从没有这个键）/ `cleared`（显式清空）/ `invalid`（服务或模型已不存在）。
+
+        为什么需要它：归一化后的 `roles()` 对每个角色都返回 `{service_id, model}`，即使配置里根本没写过
+        这个角色。用 `roles().get(role) or translation` 判断「未设置」会被空 dict 骗过去（空 dict 是 truthy），
+        导致旧配置的兼容回退失效；反过来，**显式清空**或**服务被删**时也不能静默改用别家模型。
+        """
+        raw_roles: Any = {}
+        try:
+            raw = json.loads(self.path.read_text(encoding="utf-8"))
+            if isinstance(raw, dict) and isinstance(raw.get("roles"), dict):
+                raw_roles = raw["roles"]
+        except (OSError, ValueError):
+            raw_roles = {}
+        present = role in raw_roles
+        binding = self._read()["roles"].get(role, _empty_role())
+        if not present:
+            return {"role": role, "origin": "unset", "binding": binding, "problem": ""}
+        if not str(binding.get("service_id") or ""):
+            return {
+                "role": role, "origin": "cleared", "binding": binding,
+                "problem": f"角色 {role} 已被显式清空（没有绑定服务商）。",
+            }
+        try:
+            service = self.get(binding["service_id"])
+        except ProviderError:
+            return {
+                "role": role, "origin": "invalid", "binding": binding,
+                "problem": f"角色 {role} 绑定的服务商已不存在（{binding['service_id']}）。",
+            }
+        models = [str(entry.get("model") or "") for entry in service.get("models") or []]
+        if binding.get("model") and binding["model"] not in models:
+            return {
+                "role": role, "origin": "invalid", "binding": binding,
+                "problem": f"角色 {role} 绑定的模型已不在服务商 {service.get('name') or binding['service_id']} 下（{binding['model']}）。",
+            }
+        if not models and not binding.get("model"):
+            return {
+                "role": role, "origin": "invalid", "binding": binding,
+                "problem": f"角色 {role} 绑定的服务商没有任何可用模型。",
+            }
+        return {"role": role, "origin": "bound", "binding": binding, "problem": ""}
+
     def get(self, service_id: str) -> dict[str, Any]:
         for item in self.list():
             if item.get("service_id") == service_id:
@@ -595,7 +642,10 @@ class ModelServiceStore:
                 models = provider.get("models") or []
                 if model and not any(entry.get("model") == model for entry in models):
                     raise ProviderError(f"模型不存在：{model}")
-                value["roles"][role] = {"service_id": service_id, "model": model or (str(models[0]["model"]) if models else "")}
+                # 冻结契约：**保留用户写入的原值**（允许 model 为空 = “未指定，用该服务第一个”）。
+                # 首模型兜底只体现在 `/model-services.role_states[role].effective`（model_source=first_model），
+                # 不能写回 binding —— 否则「未指定模型」的意图会被永久固化成某个具体模型。
+                value["roles"][role] = {"service_id": service_id, "model": model}
             self._write(value)
             return value["roles"]
 

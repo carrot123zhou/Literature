@@ -9,7 +9,7 @@
  *   2 mineru        旧 MinerU/首页/设置 大表（历史遗留，逐步被下列文件覆盖）
  *   3 resource      文件资源库
  *   4 review        结构校对
- *   5 reading       对照翻译
+ *   5 reading       对照翻译（+ 5b reader 阅读模块，同层）
  *   6 export        导出
  *   7 theme         ★ 唯一令牌层（必须在 mineru 之后，才能覆盖其 :root 令牌）
  *   8 base          ★ 全局重置 + 组件基元
@@ -24,12 +24,14 @@ import "./mineru.css";
 import "./resource.css";
 import "./review/review.css";
 import "./workbench/reading.css";
+import "./reader/reader.css";
 import "./workbench/export.css";
 import "./theme.css";
 import "./base.css";
 import "./shell.css";
 import "./intake.css";
 import "./app-settings.css";
+import "./workbench/parse-engine.css";
 
 import React from "react";
 import ReactDOM from "react-dom/client";

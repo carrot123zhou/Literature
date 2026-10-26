@@ -1,7 +1,6 @@
 # UI v3 legacy 瘦身候选清单（只出清单，未改动任何外观）
 
-> 状态：**候选清单 / 未执行**。2026-10-15 由 Lead 依据 `scripts/ui_audit.py` 与
-> `docs/ui/audit-stage1.5.md` 整理。本文件只做分类与判定，**不含任何代码改动**。
+> 状态：**批次 1–2 + E.4 已于 2026-10-25 执行并经像素级验证**（见 `docs/DEVELOPMENT_LOG.md` 同日条目）；本文件保留分类与判定口径。剩余：批次 3（C 类归位 + D 类 <11px + E.1/E.2，会改外观，需用户确认）与批次 4（E.3 minWidth 决策）。
 > 复现命令：`python3 scripts/ui_audit.py --json /tmp/ui-audit.json`（详情见 `details.legacy_worklist`）
 
 ## 0. 当前基线（2026-10-15，含五屏改造完成后）

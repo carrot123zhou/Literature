@@ -33,8 +33,8 @@ from .mineru_capabilities import (
     SUPPORTED_MODELS, validate_source,
 )
 from .parse_backends import (
-    REMOTE_BACKEND_ID, ParseBackendCapabilities, ParseBackendUnavailable, ParseResult,
-    ensure_available, resolve_job_backend,
+    LOCAL_BACKEND_ID, REMOTE_BACKEND_ID, ParseBackendCapabilities, ParseBackendUnavailable,
+    ParseResult, ensure_available, resolve_job_backend,
 )
 
 
@@ -685,22 +685,34 @@ class MinerUClient:
                     "缺少 httpx；请从 Litera 启动器重新安装 MinerU 工具。",
                     code="missing_dependency",
                 ) from error
-            http_client = httpx.Client(
-                timeout=httpx.Timeout(90.0, connect=20.0),
-                follow_redirects=True,
-                headers={"User-Agent": "Litera-MinerU/1.2"},
-            )
+            try:
+                http_client = httpx.Client(
+                    timeout=httpx.Timeout(90.0, connect=20.0),
+                    follow_redirects=True,
+                    headers={"User-Agent": "Litera-MinerU/1.2"},
+                )
+            except (FileNotFoundError, OSError, ValueError) as error:
+                # TLS 信任库异常（如 SSL_CERT_FILE 指向不存在文件、冻结包 CA 缺失）：
+                # 在发请求前就会失败。给出可操作说明，绝不降级为不校验证书。
+                from .providers import tls_context_error
+
+                raise MinerUAPIError(tls_context_error(error), code="tls_context") from error
             # API requests may legitimately need the user's configured proxy,
             # while MinerU result URLs point at a separate object-storage CDN.
             # Some macOS proxy/VPN combinations terminate the CDN TLS tunnel
             # during CONNECT. Prefer an isolated direct client for downloads,
             # then alternate with the normal client as a compatibility fallback.
-            direct_download_client = httpx.Client(
-                timeout=httpx.Timeout(90.0, connect=20.0),
-                follow_redirects=True,
-                trust_env=False,
-                headers={"User-Agent": "Litera-MinerU/1.2"},
-            )
+            try:
+                direct_download_client = httpx.Client(
+                    timeout=httpx.Timeout(90.0, connect=20.0),
+                    follow_redirects=True,
+                    trust_env=False,
+                    headers={"User-Agent": "Litera-MinerU/1.2"},
+                )
+            except (FileNotFoundError, OSError, ValueError) as error:
+                from .providers import tls_context_error
+
+                raise MinerUAPIError(tls_context_error(error), code="tls_context") from error
         self.http = http_client
         self.download_http_clients = tuple(
             client for client in (direct_download_client, http_client) if client is not None
@@ -1198,12 +1210,16 @@ class MinerUWorkflow:
         self.poll_interval = poll_interval
         self._stop_event = threading.Event()
 
-    def _backend_for(self, job: WorkflowJob) -> "RemoteMinerUBackend":
+    def _backend_for(self, job: WorkflowJob) -> Any:
         """按任务持久化的 backend_id 选择适配器；不可用/未知后端在这里就被拒绝。"""
         try:
             capabilities = resolve_job_backend(job.backend_id)
         except ParseBackendUnavailable as error:
             raise WorkflowError(str(error)) from error
+        if capabilities.backend_id == LOCAL_BACKEND_ID:
+            # 本地引擎适配器懒加载，避免模块导入环；ready 与否由适配器/能力层判定。
+            from .mineru_local import LocalMinerUBackend
+            return LocalMinerUBackend(self)
         if capabilities.backend_id != REMOTE_BACKEND_ID:
             raise WorkflowError(capabilities.unavailable_reason or f"解析后端不可用：{capabilities.backend_id}")
         return RemoteMinerUBackend(self, client_factory=self.client_factory)

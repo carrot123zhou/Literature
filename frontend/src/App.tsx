@@ -8,6 +8,7 @@ import ReviewWorkspace from "./review/ReviewWorkspace";
 import { flattenToc } from "./review/projection";
 import { useModelServices } from "./modelServices";
 import { InstantPanel, ReadingWorkspace, Settings, TaskPicker, type SettingsSection } from "./workbench";
+import ReaderWorkspace from "./reader/ReaderWorkspace";
 import type { ScopeConfirm } from "./workbench/ReadingPanels";
 import type { ReasoningMode } from "./workbench/ThinkingLevelField";
 import { isWorkView, readLastProject, useHashRoute, writeLastProject } from "./viewState";
@@ -225,14 +226,29 @@ export default function App() {
   const openHome = () => navigate("home", "");
   const openResources = () => navigate("resources", "");
   // 工作区可以不带项目进入：没有项目时显示该模块的空白页与任务选择列表。
-  const openWork = (target: WorkView) => navigate(target, activeProjectId || "");
+  // 点工作区标签也是一次「重新打开」：解析刚完成/上次读取失败时，这里必须重新拉取，
+  // 否则同一 projectId 的加载 effect 不会重跑，界面会一直停在占位/错误页。
+  const openWork = (target: WorkView) => {
+    navigate(target, activeProjectId || "");
+    reloadOpenedProject(activeProjectId);
+  };
+  // 打开项目时显式重载一次：同一 projectId 从「解析中」变成「已就绪」时，
+  // 项目加载 effect 的依赖没变、不会重跑，旧实现会一直停在空白/占位页。
+  const reloadOpenedProject = useCallback((projectId: string) => {
+    if (!projectId) return;
+    void refreshProject(projectId).catch(error => {
+      setProjectLoadError(String(error instanceof Error ? error.message : error));
+    });
+  }, [refreshProject]);
   const openProjectFor = (projectId: string) => {
     setLastProject(projectId); writeLastProject(projectId);
     navigate(isWorkView(view) ? view : "review", projectId);
+    reloadOpenedProject(projectId);
   };
   const openProjectView = (target: WorkView, projectId: string) => {
     setLastProject(projectId); writeLastProject(projectId);
     navigate(target, projectId);
+    reloadOpenedProject(projectId);
   };
   // 文件资源卡片可以就地启动翻译：范围与目标语言来自弹窗，不依赖当前已打开的任务。
   const translateProject = async (projectId: string, options: { scope: string; locale: string }) => {
@@ -431,7 +447,7 @@ export default function App() {
       project={activeProject ? { title: document?.title || activeProject.title, subtitle: document ? `${document.source_language} → ${document.target_language}` : activeProject.state, usage: usageBadge } : undefined}
     />
 
-    {view === "home" && <div className="page-scroll"><ImportWorkspace refreshProjects={refreshProjects} openResources={openResources} openHistory={() => navigate("history", "")}/></div>}
+    {view === "home" && <div className="page-scroll"><ImportWorkspace refreshProjects={refreshProjects} openResources={openResources} openHistory={() => navigate("history", "")} openEngineSettings={() => openSettings("parsing")}/></div>}
     {view === "resources" && <div className="page-scroll"><ProjectLibrary
       projects={projects}
       currentProjectId={lastProject}
@@ -467,6 +483,19 @@ export default function App() {
           onConfigureModel={() => openSettings("models")}
         />
       : projectPlaceholder("选择一个已完成处理的文档，进入结构校对；或去首页上传新文件。"))}
+    {view === "reader" && (document
+      ? <ReaderWorkspace
+          key={activeProjectId}
+          projectId={activeProjectId}
+          document={document}
+          translation={translation}
+          targetLocale={translation?.locale || locale}
+          providers={models.services}
+          defaultFold={models.roles.reader_fold}
+          defaultChat={models.roles.reader_chat}
+          onOpenSettings={() => openSettings("reader")}
+        />
+      : projectPlaceholder("选择一个已完成处理的文档，进入三栏对照阅读；或去首页上传新文件。"))}
     {view === "read" && (document
       ? <ReadingWorkspace
           projectId={activeProjectId}

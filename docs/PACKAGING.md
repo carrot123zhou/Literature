@@ -6,6 +6,13 @@
 
 要求 macOS、Xcode Command Line Tools、Rust/Cargo、Node/pnpm 和 Python 3.12。当前构建机生成 `aarch64-apple-darwin`，未生成 Intel 或通用包。
 
+打包解释器必须是独立标准 CPython。若开发 `.venv` 共用带额外证书文件依赖的工具运行时，不可直接用于发布。
+可用 `LITERATURE_BUILD_PYTHON=/绝对路径/打包环境/bin/python` 指定构建解释器（适用于
+`build_desktop.sh` 与 `build_review_bundle.sh`）。该环境须安装当前项目及打包依赖，尤其是
+`beautifulsoup4` / `soupsieve`；PyInstaller 的 collect-all 对缺包只告警，构建脚本现改为预检失败。
+`build_sidecar.py` 同时拦截已知不可移植的 SSL 构造器，并在产出后直接执行冻结二进制
+`--check-tls`，验证包内真实 TLS/CA 路径和证书校验；不能以构建环境能联网替代包内验证。
+
 ```bash
 python3.12 -m venv .venv
 .venv/bin/pip install -e '.[dev,packaging]'
@@ -47,7 +54,7 @@ NODE_BIN=<任意可用的 node bin 目录>
 export NAPI_RS_NATIVE_LIBRARY_PATH="$PWD/frontend/node_modules/.pnpm/@tauri-apps+cli-darwin-arm64@2.12.1/node_modules/@tauri-apps/cli-darwin-arm64/cli.darwin-arm64.node"
 "$NODE_BIN/node" frontend/node_modules/typescript/bin/tsc --noEmit            # 类型检查
 (cd frontend && "$NODE_BIN/node" node_modules/vite/bin/vite.js build)         # 前端产物
-.venv/bin/python scripts/build_sidecar.py                                   # PyInstaller sidecar
+"${LITERATURE_BUILD_PYTHON:-.venv/bin/python}" scripts/build_sidecar.py       # PyInstaller sidecar（标准 CPython）
 "$NODE_BIN/node" scripts/tauri-run.cjs build \
   --config src-tauri/tauri.bundle.conf.json \
   --config '{"build":{"beforeBuildCommand":""}}'                          # 打包 .app

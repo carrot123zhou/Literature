@@ -17,6 +17,9 @@ dependencies = [
   "PyMuPDF>=1.24,<2",
   "python-docx>=1.1,<2",
   "python-multipart>=0.0.20,<1",
+  # 阅读模块的折叠提示词会把章节内的表格文本当作上下文（TextFold 上游 ladder.tables_of 的行为），
+  # 这里只装纯 Python 的解析器；vendored 代码已改为 "html.parser"，不需要 lxml 这类本地扩展。
+  "beautifulsoup4>=4.12,<5",
 ]
 
 [project.optional-dependencies]
@@ -28,7 +31,13 @@ literature = "literature.cli:main"
 literature-api = "literature.api:main"
 
 [tool.setuptools.packages.find]
-include = ["literature*"]
+# third_party 是随产品分发的上游快照（Apache-2.0，见 third_party/textfold/VENDOR.md）：
+# 不纳入打包的话，隔离安装 wheel 后 import 会直接失败（源码目录能跑只是 cwd 的假象）。
+include = ["literature*", "third_party*"]
+
+[tool.setuptools.package-data]
+# 许可证与来源清单必须随包分发（Apache-2.0 §4(a)(d)）。
+"third_party.textfold" = ["LICENSE", "NOTICE", "VENDOR.md", "format.md"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -19,6 +19,10 @@ export function usePdfDocument(projectId: string, enabled: boolean): PdfState {
       return;
     }
     let cancelled = false;
+    // The previous loading task is destroyed on project changes. Do not keep its
+    // document in state while fetching the new one: pages would render against
+    // a dead worker (or briefly show a different book).
+    setState({ document: null, pageCount: 0, error: "" });
     const task = pdfjs.getDocument({ url: apiUrl(`/projects/${projectId}/source.pdf`), httpHeaders: apiHeaders(), ...pdfAssetOptions });
     taskRef.current = task;
     task.promise.then(

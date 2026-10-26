@@ -32,7 +32,9 @@ html {
 
 body {
   margin: 0;
-  min-width: var(--min-app-width);
+  /* 桌面壳（Tauri）窗口已限制最小宽度；这里再写死 860px 会让 320/390/768 的浏览器/窄窗口
+     整页横向溢出（且所有页面共用 body，一处写死全部受影响）。保留一个手机下限即可。 */
+  min-width: 320px;
   min-height: 100%;
   background: var(--bg);
   color: var(--label);

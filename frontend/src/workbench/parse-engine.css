@@ -1,0 +1,11 @@
+/* 解析引擎管理卡（设置 → 解析引擎；导入页内嵌精简版）。 */
+.engine-card { display: flex; flex-direction: column; gap: 6px; }
+.engine-card .engine-actions { display: flex; gap: 8px; margin: 8px 0; flex-wrap: wrap; }
+.engine-card .engine-discovered { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 4px 0; }
+.engine-card progress { width: 100%; }
+.engine-card details { margin-top: 4px; }
+.engine-card details summary { cursor: pointer; color: var(--text-secondary); }
+.link-button { background: none; border: none; color: var(--accent); cursor: pointer; padding: 0; text-decoration: underline; font: inherit; }
+
+/* 导入页顶部：本机/云端来源状态并排展示。 */
+.intake-source-state { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; }

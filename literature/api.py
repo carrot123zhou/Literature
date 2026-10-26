@@ -15,18 +15,27 @@ from pathlib import Path
 from typing import Any, Callable, Literal
 
 from fastapi import File, UploadFile
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from .exporters import create_export, delete_export, export_options, list_exports, rename_export, resolve_export_file
 from .flow import detect_cross_page_flow
 from .mineru import detect_language, import_mineru
 from .mineru_capabilities import MAX_BATCH_FILES, validate_source
-from .mineru_workflow import MinerUClient, WorkflowError
-from .model_services import MODEL_ROLES, ROLE_STRUCTURE, ROLE_TRANSLATION, ModelServiceStore, save_service_key
+from .mineru_workflow import MinerUAPIError, MinerUClient, WorkflowError
+from .mineru_local import EngineBusyError, local_engine_ready, shared_engine
+from .model_services import (
+    MODEL_ROLES, ROLE_READER_CHAT, ROLE_READER_FOLD, ROLE_STRUCTURE, ROLE_TRANSLATION,
+    ModelServiceStore, save_service_key,
+)
 from .models import UsageRecord
+from .reader import (
+    ReaderChatRunner, ReaderConflict, ReaderJobRunner, ReaderLayerService, ReaderStore,
+    answer_question, build_sections, clear_layers, layer_state, layers_markdown,
+    local_fold_section, summarize_reader, usage_recorder,
+)
 from .ocr import MinerUService, delete_mineru_token, get_mineru_token, save_mineru_token
-from .parse_backends import describe_backends
-from .providers import PROVIDER_PRESETS, NO_REASONING_STYLE, PROBE_MAX_TOKENS, OpenAICompatibleProvider, ProviderConfig, ProviderError, apply_reasoning_mode, delete_api_key, disabled_reasoning_effort, get_api_key, normalize_proxy_environment, probe_thinking_off, resolve_reasoning_style, save_api_key
+from .parse_backends import LOCAL_BACKEND_ID, describe_backends, resolve_job_backend
+from .providers import PROVIDER_PRESETS, NO_REASONING_STYLE, PROBE_MAX_TOKENS, OpenAICompatibleProvider, ProviderConfig, ProviderError, apply_reasoning_mode, delete_api_key, disabled_reasoning_effort, get_api_key, normalize_proxy_environment, normalize_tls_environment, probe_thinking_off, resolve_reasoning_style, save_api_key
 from .request_coordinator import BudgetExhausted, RequestCoordinator, ServiceBusyError, prompt_cost_estimator
 from .runtime_revision import RUNTIME_REVISION
 from .storage import ProjectStore, StorageError
@@ -149,6 +158,8 @@ class MinerUJobCreate(BaseModel):
     page_ranges: str = Field(default="", max_length=2000)
     extra_formats: list[Literal["docx", "html", "latex"]] = Field(default_factory=list)
     page_limit: int = Field(default=200, ge=1, le=200)
+    # 解析后端：mineru_remote（默认，云端）或 mineru_local（本地引擎，需已安装）。
+    backend_id: Literal["mineru_remote", "mineru_local"] = "mineru_remote"
 
 
 class ParseQueueMove(BaseModel):
@@ -165,6 +176,7 @@ class ParseContinue(BaseModel):
     model_version: str = ""
     page_limit: int = Field(default=200, ge=1, le=200)
     extra_formats: list[Literal["docx", "html", "latex"]] = Field(default_factory=list)
+    backend_id: Literal["mineru_remote", "mineru_local", ""] = ""
 
 
 class ParseStart(BaseModel):
@@ -179,6 +191,7 @@ class ParseStart(BaseModel):
     enable_formula: bool = True
     page_limit: int = Field(default=200, ge=1, le=200)
     extra_formats: list[Literal["docx", "html", "latex"]] = Field(default_factory=list)
+    backend_id: Literal["mineru_remote", "mineru_local"] = "mineru_remote"
 
 
 class ArchiveSettingsInput(BaseModel):
@@ -202,6 +215,39 @@ class IntakeJobCreate(MinerUJobCreate):
     items: list[IntakeItemOptions] = Field(default_factory=list, max_length=MAX_BATCH_FILES)
     upload_ids: list[str] = Field(default_factory=list, max_length=MAX_BATCH_FILES)
     paths: list[str] = Field(default_factory=list, max_length=MAX_BATCH_FILES)
+
+
+class EngineInstallRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    action: Literal["install"] = "install"
+    # force=True 为「修复/重装」：已就绪时也重跑幂等安装步骤；与解析任务互斥。
+    force: bool = False
+
+
+class EngineActionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    action: Literal["cancel", "uninstall"]
+
+
+class EngineHttpKeyInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    http_url: str = Field(min_length=1, max_length=2000)
+    value: str
+
+
+class EngineSelectRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["managed", "external_cli", "http_service"]
+    external_dir: str = Field(default="", max_length=2000)
+    http_url: str = Field(default="", max_length=2000)
+    allow_plaintext_http: bool = False
+    # 本次显式输入的服务密钥：连接验证成功后才按规范化地址绑定保存；
+    # 验证失败不落 selection、不动已有密钥。
+    http_key: str = Field(default="", max_length=2000)
 
 
 class SecretInput(BaseModel):
@@ -372,8 +418,24 @@ class ModelRoleBinding(BaseModel):
 
 class ModelRolesInput(BaseModel):
     # 新形态是 {service_id, model}；也接受纯字符串（v1 只绑服务），由存储层归一。
+    # `extra="forbid"`：把 `{roles: {...}}` 这类错误包裹显式拒绝，而不是静默忽略后“保存成功”。
+    model_config = ConfigDict(extra="forbid")
+
     structure: ModelRoleBinding | str | None = None
     translation: ModelRoleBinding | str | None = None
+    # 阅读折叠 / 阅读对话（各自独立；缺省表示不改这一项）
+    reader_fold: ModelRoleBinding | str | None = None
+    reader_chat: ModelRoleBinding | str | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _reject_roles_wrapper(cls, value: Any) -> Any:
+        if isinstance(value, dict) and "roles" in value and not (set(value) & set(MODEL_ROLES)):
+            raise ValueError(
+                "请求体不要包一层 roles：直接传 {\"structure\": {…}, \"translation\": {…}, "
+                "\"reader_fold\": {…}, \"reader_chat\": {…}}（只传要改的角色即可）。"
+            )
+        return value
 
 
 class ModelCheckInput(BaseModel):
@@ -422,6 +484,70 @@ class InstantInput(BaseModel):
     locale: str = "zh-CN"
     block_id: str | None = None
     save: bool = False
+
+
+class ReaderQuoteInput(BaseModel):
+    block_id: str = ""
+    pane: str = "source"
+    text: str = ""
+
+
+class ReaderLayersInput(BaseModel):
+    locale: str = "source"
+    service_id: str = ""
+    model: str = ""
+    # auto：有模型就用模型折叠；local：只用本地摘句（不产生任何模型调用）。
+    mode: Literal["auto", "local"] = "auto"
+    force: bool = False
+    section_ids: list[str] | None = None
+
+
+class FoldRunInput(BaseModel):
+    """整篇折叠 run 的启动参数（AIFold：默认关闭→点击后整篇处理→全部完成才 ready）。
+
+    - locale 缺省由服务端解析：有译文=译文 locale（单一目标 controller），否则 source。
+    - force=True 忽略缓存重新采样（仍走 single-flight，不双倍计费）。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    locale: str = ""
+    force: bool = False
+
+
+class ReaderOverlayInput(BaseModel):
+    overlay: dict[str, Any]
+    # 乐观并发：提交时若服务端 revision 已变，拒绝覆盖（前端刷新后重试）。
+    base_revision: int | None = None
+
+
+class ReaderChatInput(BaseModel):
+    # `extra="forbid"`：客户端/后端字段漂移必须立刻报错，而不是被静默忽略后回落到默认角色
+    # （真实缺陷 D1：前端发 `binding:{...}`，pydantic 丢掉未知字段，请求实际走了默认模型）。
+    model_config = ConfigDict(extra="forbid")
+
+    question: str = Field(default="", max_length=4000)
+    locale: str = "source"
+    # 本次提问使用的服务商 + 模型；留空走「阅读对话」角色绑定。
+    # 同一个 model id 可能出现在不同服务商下，所以两者必须一起传、一起记录。
+    service_id: str = ""
+    model: str = ""
+    quote: ReaderQuoteInput | None = None
+
+
+class ReaderChatRetryInput(BaseModel):
+    locale: str = "source"
+    service_id: str = ""
+    model: str = ""
+
+
+class ReaderAskInput(BaseModel):
+    question: str = Field(default="", max_length=4000)
+    locale: str = "source"
+    service_id: str = ""
+    model: str = ""
+    quote: ReaderQuoteInput | None = None
+    block_ids: list[str] | None = None
 
 
 class ReviewInput(BaseModel):
@@ -586,6 +712,8 @@ class JobManager:
         self.pause_events: dict[str, threading.Event] = {}
         self.ocr_running: set[str] = set()
         self.ocr_lock = threading.Lock()
+        # 阅读模块的五层折叠后台作业（与解析/翻译作业并列，不共用线程池）。
+        self.reader_jobs = ReaderJobRunner(store)
         self._start_locks: dict[str, threading.Lock] = {}
         self._start_locks_guard = threading.Lock()
 
@@ -1102,6 +1230,57 @@ class JobManager:
         self.executor.shutdown(wait=False, cancel_futures=False)
 
 
+# ---- 章节索引（无模型、无 AI 依赖） -----------------------------------------
+# 「当前章 / 目录 / 折叠范围」必须在**没有任何分层**时也可用，否则首次折叠只能整书。
+# 这里直接复用 core 的 `build_sections`（与折叠作业同一个 section/unit id 生成器），
+# 只投影成轻量索引，不重建一套前端 id。
+_SECTION_INDEX_CACHE: dict[tuple[str, float, float, str], list[dict]] = {}
+
+
+def _section_index_for(store, project_id: str, locale: str = "source") -> list[dict]:
+    """按文档标题结构给出章节索引（id 与折叠层完全一致）。按 mtime 缓存，避免轮询重算。"""
+    project_dir = store.project_path(project_id)
+    document_path = project_dir / "document" / "document.json"
+    try:
+        document_mtime = document_path.stat().st_mtime
+    except OSError:
+        document_mtime = 0.0
+    translation = None
+    translation_mtime = 0.0
+    if locale and locale != "source":
+        try:
+            translation_mtime = (project_dir / "translations" / locale / "translation.json").stat().st_mtime
+        except OSError:
+            translation_mtime = 0.0
+        try:
+            translation = store.load_translation(project_id, locale)
+        except Exception:  # noqa: BLE001 - 译文缺失不影响章节索引
+            translation = None
+    key = (project_id, document_mtime, translation_mtime, locale or "source")
+    cached = _SECTION_INDEX_CACHE.get(key)
+    if cached is not None:
+        return cached
+    document = store.load_document(project_id)
+    sections = build_sections(document, locale=locale or "source", translation=translation)
+    index = [
+        {
+            "id": str(section.get("id") or ""),
+            "num": str(section.get("num") or ""),
+            "title": str(section.get("title") or ""),
+            "level": int(section.get("level") or 1),
+            "block_id": str(section.get("block_id") or ""),
+            "page_index": int(section.get("page_index") or 0),
+            "unit_ids": [str(unit.get("block_id") or unit.get("id") or "") for unit in section.get("units") or []],
+            "foldable": len([unit for unit in section.get("units") or [] if not unit.get("fallback")]),
+        }
+        for section in sections
+    ]
+    if len(_SECTION_INDEX_CACHE) > 32:
+        _SECTION_INDEX_CACHE.clear()
+    _SECTION_INDEX_CACHE[key] = index
+    return index
+
+
 def create_app(store: ProjectStore | None = None):
     try:
         from fastapi import FastAPI, HTTPException, Request
@@ -1117,6 +1296,15 @@ def create_app(store: ProjectStore | None = None):
         # This happens before FastAPI can serve a useful error response.  Make
         # startup fail instead of running against a partially visible library.
         raise RuntimeError(str(error)) from error
+    # 修正 NO_PROXY 里 httpx 无法解析的 [::1] 条目（此前只在 serve() 入口做，
+    # 浏览器开发/测试直接 create_app 时首页 token 检查会 InvalidURL 500）。
+    normalize_proxy_environment()
+    # 清理指向不存在路径的 TLS 信任库环境变量（SSL_CERT_FILE/DIR 等）：
+    # 否则 ssl.create_default_context 在冻结包里会 FileNotFoundError，所有 HTTPS 请求失败。
+    # 只剔除不可用路径，保留存在的自定义 CA；证书校验始终开启。
+    removed_tls_env = normalize_tls_environment()
+    if removed_tls_env:
+        logger.warning("Ignored unusable TLS trust-store env vars: %s", ", ".join(removed_tls_env))
     ocr = MinerUService(store)
     models = ModelServiceStore(application_support())
     manager = JobManager(store, ocr, models)
@@ -1163,6 +1351,12 @@ def create_app(store: ProjectStore | None = None):
         from fastapi.responses import JSONResponse
         return JSONResponse({"detail": str(error)}, status_code=400)
 
+    @app.exception_handler(ReaderConflict)
+    async def reader_conflict(_request: Request, error: ReaderConflict):
+        # 乐观并发冲突：可重试（刷新 revision 后再提交），与「数据非法」区分开。
+        from fastapi.responses import JSONResponse
+        return JSONResponse({"detail": str(error), "code": "reader_revision_conflict"}, status_code=409)
+
     @app.exception_handler(WorkflowError)
     async def workflow_error(_request: Request, error: WorkflowError):
         from fastapi.responses import JSONResponse
@@ -1179,13 +1373,92 @@ def create_app(store: ProjectStore | None = None):
             "status": "ok",
             "version": "0.1.0",
             "runtime_revision": RUNTIME_REVISION,
-            "capabilities": ["intake_items_v1", "structure_review_v2", "model_services_v1", "model_services_v2", "model_services_v3", "model_services_v4", "structure_job_v1", "structure_modes_v1", "structure_pause_v1", "structure_vision_v1", "structure_flow_v1", "desktop_resources_v1", "translation_module_v1", "translation_engine_v2", "resource_pipeline_v1", "translation_safety_v1", "parse_lifecycle_v1", "task_history_v1", "parse_backends_v1", "export_v1", "export_manage_v1"],
+            "capabilities": ["intake_items_v1", "structure_review_v2", "model_services_v1", "model_services_v2", "model_services_v3", "model_services_v4", "structure_job_v1", "structure_modes_v1", "structure_pause_v1", "structure_vision_v1", "structure_flow_v1", "desktop_resources_v1", "translation_module_v1", "translation_engine_v2", "resource_pipeline_v1", "translation_safety_v1", "parse_lifecycle_v1", "task_history_v1", "parse_backends_v1", "parse_engine_v1", "export_v1", "export_manage_v1",
+                    "reader_v1", "reader_v2", "reader_chat_v1", "reader_roles_v1",
+                    "reader_fold_run_v1", "reader_native_v1"],
         }
 
     @app.get("/parse/backends")
     def parse_backends():
-        # 只读能力清单：remote 已实现可用；local 仅预留且明确 unavailable，不提供伪入口。
+        # 只读能力清单：remote 已实现可用；local 按本地引擎真实安装状态动态返回。
         return {"backends": describe_backends()}
+
+    @app.get("/parse/engine")
+    def parse_engine_status():
+        # 本地引擎状态：安装状态/版本/占用/进度/错误，供设置卡与导入页共用。
+        return shared_engine().status()
+
+    @app.post("/parse/engine/install")
+    def parse_engine_install(request: EngineInstallRequest):
+        # 幂等：已就绪直接返回状态；中断后再次调用会从断点继续；
+        # force=True 为「修复/重装」（已就绪时重跑幂等步骤，与解析任务互斥）。
+        try:
+            return shared_engine().install(force=request.force)
+        except EngineBusyError as error:
+            raise HTTPException(status_code=409, detail=str(error))
+
+    @app.post("/parse/engine/cancel")
+    def parse_engine_cancel(_request: EngineActionRequest):
+        return shared_engine().cancel()
+
+    @app.post("/parse/engine/uninstall")
+    def parse_engine_uninstall(_request: EngineActionRequest):
+        # 卸载只删除独立引擎目录；与安装/本地解析任务互斥。
+        try:
+            return shared_engine().uninstall()
+        except EngineBusyError as error:
+            raise HTTPException(status_code=409, detail=str(error))
+
+    @app.get("/parse/engine/sources")
+    def parse_engine_sources():
+        # 引擎来源：当前选择 + 可用的外部 CLI 发现结果（TextFold/PaperFold 仅为候选）。
+        from .mineru_local import discover_external_engines, get_engine_selection, get_http_service_key
+        selection = get_engine_selection()
+        http_url = str(selection.get("http_url") or "")
+        return {
+            "selection": selection,
+            "discovered": discover_external_engines(),
+            "http_key_configured": bool(http_url and get_http_service_key(http_url)),
+            "http_key_url": http_url,
+        }
+
+    @app.post("/parse/engine/select")
+    def parse_engine_select(request: EngineSelectRequest):
+        # 外部 CLI / HTTP 服务必须先通过探测验证才允许选用；
+        # HTTP 支持在连接时一并校验新密钥（验证成功才保存并绑定到该地址）。
+        from .mineru_local import set_engine_selection
+        try:
+            value = set_engine_selection(
+                request.kind, external_dir=request.external_dir,
+                http_url=request.http_url, allow_plaintext_http=request.allow_plaintext_http,
+                http_key=request.http_key,
+            )
+        except WorkflowError as error:
+            raise HTTPException(status_code=400, detail=str(error))
+        return {"selection": value, "status": shared_engine().status(), "capabilities": describe_backends()}
+
+    @app.get("/parse/engine/probe-external")
+    def parse_engine_probe(external_dir: str):
+        from .mineru_local import probe_external_engine
+        return probe_external_engine(external_dir)
+
+    @app.put("/parse/engine/http/key")
+    def parse_engine_http_key_save(request: EngineHttpKeyInput):
+        # 密钥按规范化服务地址绑定；换地址不继承旧密钥。
+        from .mineru_local import save_http_service_key
+        try:
+            save_http_service_key(request.http_url, request.value)
+        except WorkflowError as error:
+            raise HTTPException(status_code=400, detail=str(error))
+        return {"configured": True, "http_url": request.http_url}
+
+    @app.delete("/parse/engine/http/key")
+    def parse_engine_http_key_delete(http_url: str = ""):
+        from .mineru_local import delete_http_service_key
+        if not http_url:
+            raise HTTPException(status_code=400, detail="请提供服务地址。")
+        delete_http_service_key(http_url)
+        return {"configured": False, "http_url": http_url}
 
     @app.get("/desktop/resources")
     def desktop_resources():
@@ -1380,9 +1653,19 @@ def create_app(store: ProjectStore | None = None):
 
     @app.post("/mineru/token/check")
     def mineru_token_check():
-        client = MinerUClient(get_mineru_token(), max_attempts=2)
+        # 连接检查失败必须返回可理解、可操作的信息（4xx/502），不能 500 把原因埋在日志。
+        from .providers import tls_context_error
+
+        try:
+            client = MinerUClient(get_mineru_token(), max_attempts=2)
+        except (FileNotFoundError, OSError, ValueError) as error:
+            raise StorageError(tls_context_error(error)) from error
+        except WorkflowError as error:
+            raise StorageError(str(error)) from error
         try:
             client.check_token()
+        except MinerUAPIError as error:
+            raise HTTPException(status_code=502, detail=f"MinerU 连接检查失败：{error}") from error
         finally:
             client.close()
         return {"configured": True, "connected": True}
@@ -1399,13 +1682,15 @@ def create_app(store: ProjectStore | None = None):
 
     @app.post("/projects/{project_id}/ocr/jobs")
     def create_ocr_job(project_id: str, request: MinerUJobCreate):
-        return ocr.create(project_id, enforce_single=True, **request.model_dump())
+        payload = request.model_dump()
+        backend_id = payload.pop("backend_id", "mineru_remote")
+        return ocr.create(project_id, enforce_single=True, backend_id=backend_id, **payload)
 
     @app.post("/projects/{project_id}/ocr/start")
     def start_project_parse(project_id: str, request: ParseStart):
-        # Token 校验、活动作业/文档/源文件校验、创建与调度都在服务层的锁内完成；
-        # 无 Token 时不创建任何任务，创建成功但调度失败会报出具体错误与可恢复状态。
-        return ocr.start_parse(project_id, **request.model_dump())
+        # Token/引擎校验、活动作业/文档/源文件校验、创建与调度都在服务层的锁内完成；
+        # 本地后端要求引擎就绪，远端后端要求 Token；创建成功但调度失败会报出具体错误与可恢复状态。
+        return ocr.start_parse(project_id, backend_id=request.backend_id, **request.model_dump(exclude={"backend_id"}))
 
     @app.post("/intake/uploads")
     def create_intake_uploads(files: list[UploadFile] = File(...)):
@@ -1474,6 +1759,8 @@ def create_app(store: ProjectStore | None = None):
                 raise StorageError("请选择至少一个 MinerU 支持的文件。")
 
             options = request.model_dump(exclude={"items", "paths", "upload_ids"})
+            backend_id = options.pop("backend_id", "mineru_remote")
+            local_backend = resolve_job_backend(backend_id).backend_id == LOCAL_BACKEND_ID
             token_configured = bool(get_mineru_token())
             jobs = []
             # Build the whole local batch before starting any background work.
@@ -1486,7 +1773,7 @@ def create_app(store: ProjectStore | None = None):
                 file_options = dict(options)
                 if item is not None:
                     file_options.update(page_ranges=item.page_ranges, extra_formats=item.extra_formats)
-                job = ocr.create(project_id, **file_options)
+                job = ocr.create(project_id, backend_id=backend_id, **file_options)
                 jobs.append(ocr.get(job["job_id"]))
         except Exception:
             for project_id in reversed(created_project_ids):
@@ -1501,7 +1788,9 @@ def create_app(store: ProjectStore | None = None):
 
         for upload_id in request_upload_ids:
             uploads.discard(upload_id)
-        if token_configured:
+        # 远端后端需要 Token 才启动；本地后端只需引擎就绪（执行入口会再校验）。
+        can_start = token_configured or (local_backend and local_engine_ready())
+        if can_start:
             for job in jobs:
                 try:
                     manager.start_ocr(job["job_id"])
@@ -1509,7 +1798,7 @@ def create_app(store: ProjectStore | None = None):
                     # The persisted queued job remains resumable on the next
                     # startup; do not turn an accepted batch into a false 400.
                     logger.exception("Could not start queued MinerU job %s", job["job_id"])
-        return {"jobs": jobs, "token_configured": token_configured}
+        return {"jobs": jobs, "token_configured": token_configured, "engine_ready": local_engine_ready()}
 
     @app.get("/ocr/jobs")
     def list_all_ocr_jobs():
@@ -1564,8 +1853,12 @@ def create_app(store: ProjectStore | None = None):
         # 先检查存在性：不存在的任务统一返回 404，与是否配置 Token 无关。
         if not ocr.job_exists(job_id):
             raise HTTPException(status_code=404, detail="解析任务不存在。")
-        if not get_mineru_token():
-            raise StorageError("请先配置 MinerU Token。")
+        # Token 只约束远端后端；本地后端改为要求引擎就绪（执行入口会再校验）。
+        if ocr._job_needs_token(job_id):
+            if not get_mineru_token():
+                raise StorageError("请先配置 MinerU Token。")
+        elif not local_engine_ready():
+            raise StorageError("本地解析来源尚未就绪；请在设置 → 文档解析里安装引擎或检查已有安装/服务连接。")
         try:
             result = ocr.start_job(job_id)
         except (StorageError, WorkflowError) as error:
@@ -1588,8 +1881,12 @@ def create_app(store: ProjectStore | None = None):
     def retry_ocr_job(job_id: str):
         if not ocr.job_exists(job_id):
             raise HTTPException(status_code=404, detail="解析任务不存在。")
-        if not get_mineru_token():
-            raise StorageError("请先配置 MinerU Token。")
+        # Token 只约束远端后端；本地后端要求引擎就绪。
+        if ocr._job_needs_token(job_id):
+            if not get_mineru_token():
+                raise StorageError("请先配置 MinerU Token。")
+        elif not local_engine_ready():
+            raise StorageError("本地解析来源尚未就绪；请在设置 → 文档解析里安装引擎或检查已有安装/服务连接。")
         try:
             return ocr.retry_job(job_id)
         except (StorageError, WorkflowError) as error:
@@ -1601,12 +1898,23 @@ def create_app(store: ProjectStore | None = None):
 
     @app.post("/projects/{project_id}/ocr/continue")
     def continue_ocr_job(project_id: str, request: ParseContinue):
-        if not get_mineru_token():
+        payload = request.model_dump()
+        backend_id = payload.pop("backend_id") or ""
+        if not backend_id:
+            # 未显式指定时延续原任务后端：从既有任务里取 append 模板的后端。
+            template = next((job for job in ocr.list(project_id) if job.get("append")), None)
+            backend_id = str((template or {}).get("backend_id") or "")
+        # Token 只约束远端后端；本地后端要求引擎就绪。
+        if backend_id == LOCAL_BACKEND_ID:
+            if not local_engine_ready():
+                raise StorageError("本地解析来源尚未就绪；请在设置 → 文档解析里安装引擎或检查已有安装/服务连接。")
+        elif not get_mineru_token():
             raise StorageError("请先配置 MinerU Token。")
         job, skipped = ocr.continue_parse(
             project_id, page_ranges=request.page_ranges, language=request.language,
             model_version=request.model_version, page_limit=request.page_limit,
             extra_formats=request.extra_formats or None,
+            backend_id=backend_id if backend_id == LOCAL_BACKEND_ID else "",
         )
         ocr.start_job(job["job_id"])
         return {"job": ocr.get(job["job_id"]), "skipped_pages": skipped}
@@ -1856,9 +2164,62 @@ def create_app(store: ProjectStore | None = None):
             "roles": models.roles(),
         }
 
+    def _role_states() -> dict[str, Any]:
+        """四个角色的**全局**真状态（不依赖项目；不含任何密钥）。
+
+        供设置页/聊天面板显示「实际在用哪家模型」：
+        - `origin`：`bound` 自有绑定 / `unset` 配置里从没有这个键 / `cleared` 显式清空 / `invalid` 服务或模型已失效；
+        - `source`：`role`（自己的绑定）/ `inherited_translation`（**仅阅读角色且 origin=unset** 时回退翻译默认）/
+          `unset` / `cleared` / `invalid`；
+        - `binding`：配置里真实存的 `{service_id, model}`（不做首模型替换）；
+        - `effective`：实际会用的 `{service_id, model}`（模型留空时按服务第一个模型兜底，并标 `model_source=first_model`）；
+        - `problem`：不可用时的可读原因。
+        `cleared` / `invalid` **不会**回退到 translation（避免“看起来继承、其实用了别家”）。
+        """
+        states: dict[str, Any] = {}
+        for role in MODEL_ROLES:
+            state = _role_state(role)
+            origin = str(state.get("origin") or "unset")
+            binding = dict(state.get("binding") or _empty_model_binding())
+            effective = dict(binding)
+            source = "role" if origin == "bound" else origin
+            problem = str(state.get("problem") or "")
+            if origin == "unset" and role in (ROLE_READER_FOLD, ROLE_READER_CHAT):
+                inherited = _role_state(ROLE_TRANSLATION)
+                if inherited.get("origin") == "bound":
+                    effective = dict(inherited.get("binding") or _empty_model_binding())
+                    source = "inherited_translation"
+            if source in ("cleared", "invalid", "unset"):
+                effective = _empty_model_binding() if source != "inherited_translation" else effective
+            model_source = ""
+            service_id = str(effective.get("service_id") or "")
+            if service_id:
+                try:
+                    service = manager.models.get(service_id) if manager.models else {}
+                    available = [str(entry.get("model") or "") for entry in (service or {}).get("models") or []]
+                    if not effective.get("model") and available:
+                        effective["model"] = available[0]
+                        model_source = "first_model"
+                    elif effective.get("model"):
+                        model_source = "binding"
+                except Exception:  # noqa: BLE001 - 展示层读不到服务不影响返回
+                    pass
+            states[role] = {
+                "role": role, "origin": origin, "source": source,
+                "binding": binding, "effective": effective,
+                "model_source": model_source, "problem": problem,
+            }
+        return states
+
     @app.get("/model-services")
     def model_service_list():
-        return _service_view()
+        # 向后兼容：老前端只读 services/roles；新增 role_states 供设置页与聊天面板显示真实来源。
+        return {**_service_view(), "role_states": _role_states()}
+
+    @app.get("/model-services/roles/state")
+    def model_service_role_state():
+        """独立只读端点：全局四角色状态（无项目也能用，不含密钥）。"""
+        return {"roles": _role_states()}
 
     @app.post("/model-services")
     def model_service_create(request: ModelServiceInput):
@@ -2073,6 +2434,546 @@ def create_app(store: ProjectStore | None = None):
     @app.get("/projects/{project_id}/usage")
     def usage(project_id: str):
         return store.usage_summary(project_id)
+
+    # ---- 阅读模块（三栏对照 + TextFold 五层 + 阅读层交互） -------------------
+    # 阅读层的写入全部落在项目目录 reader/ 下，绝不写回 document.json /
+    # translation.json / ocr/raw：批注、笔记、折叠内容都是可丢弃、可重建的交互数据。
+
+    def _thinking_policy_for(binding: dict[str, str]) -> dict[str, Any] | None:
+        """该服务+模型已探测到的「关思考」字段写法；None 表示尚未探测（未知，不是“已关闭”）。"""
+        service_id = str(binding.get("service_id") or "")
+        model = str(binding.get("model") or "")
+        if not service_id or manager.models is None:
+            return None
+        try:
+            return manager.models.thinking_policy(service_id, model)
+        except Exception:  # noqa: BLE001 - 探测缓存读不到不影响阅读功能
+            return None
+
+    def _role_state(role: str) -> dict[str, Any]:
+        """角色状态；真实 store 用 `role_state()`，只提供 `roles()` 的调用方按「空绑定=未设置」降级。
+
+        真实 `ModelServiceStore` 一定能给准确答案（uq 分 unset/cleared/invalid）；这里保留降级分支，
+        是为了让只 mock `roles()` 的旧测试替身不至于 500，而不是为了在真实路径上猜。
+        """
+        resolver = getattr(manager.models, "role_state", None)
+        if callable(resolver):
+            return resolver(role)
+        binding = dict((manager.models.roles() or {}).get(role) or {"service_id": "", "model": ""})
+        return {
+            "role": role, "origin": "bound" if binding.get("service_id") else "unset",
+            "binding": binding, "problem": "",
+        }
+
+    def _reader_role_resolution(role: str) -> dict[str, Any]:
+        """阅读角色的有效绑定与来源（`reader_role` / `inherited_translation` / `unset`）。
+
+        兼容规则只有一条：**旧配置里从没写过这个角色**（`origin == "unset"`）才回退翻译默认。
+        显式清空（`cleared`）或绑定的服务/模型已被删除（`invalid`）都**不**偷偷换别家，
+        而是返回可操作的错误，并让界面显示真实来源。
+        """
+        if manager.models is None:
+            return {"role": role, "source": "unset", "binding": _empty_model_binding(), "problem": "尚未配置模型服务。"}
+        state = _role_state(role)
+        if state["origin"] == "bound":
+            return {"role": role, "origin": state["origin"], "source": "reader_role", "binding": state["binding"], "problem": ""}
+        if state["origin"] == "unset":
+            inherited = _role_state(ROLE_TRANSLATION)
+            if inherited["origin"] == "bound":
+                return {
+                    "role": role, "origin": state["origin"], "source": "inherited_translation",
+                    "binding": inherited["binding"], "problem": "",
+                }
+            return {
+                "role": role, "origin": state["origin"], "source": "unset", "binding": _empty_model_binding(),
+                "problem": "尚未绑定阅读模型，翻译默认模型也不可用。",
+            }
+        return {
+            "role": role, "origin": state["origin"], "source": state["origin"],
+            "binding": _empty_model_binding(), "problem": state["problem"],
+        }
+
+    def _empty_model_binding() -> dict[str, str]:
+        return {"service_id": "", "model": ""}
+
+    def _effective_of(binding: dict[str, str]) -> tuple[dict[str, str], str]:
+        """`binding`（原值）→ `(effective, model_source)`：模型留空时按该服务第一个模型兜底。
+
+        契约：**binding 永远保留用户写入的原值**（含空 model）；首模型兜底只出现在 effective 里，
+        并用 `model_source="first_model"` 标出来，避免 UI 把“未指定”说成“你选了这个模型”。
+        """
+        effective = dict(binding)
+        source = ""
+        service_id = str(effective.get("service_id") or "")
+        if not service_id:
+            return effective, source
+        try:
+            service = manager.models.get(service_id) if manager.models else {}
+        except ProviderError:
+            return effective, source
+        models = [str(entry.get("model") or "") for entry in (service or {}).get("models") or []]
+        if effective.get("model"):
+            source = "binding"
+        elif models:
+            effective["model"] = models[0]
+            source = "first_model"
+        return effective, source
+
+    def _reader_require(role: str, label: str, explicit_service: str = "", explicit_model: str = "") -> dict[str, Any]:
+        """解析一次阅读请求实际使用的绑定；不可用时抛 400（可操作文案），绝不静默改用别家模型。
+
+        返回 `{role, origin, source, binding, effective, model_source, problem}`：
+        - `binding`：存储/请求里的**原值**（可能 model 为空）；
+        - `effective`：真正要发给服务的 `{service_id, model}`（空 model 已按首模型兜底）；
+        - `source`：`role` / `inherited_translation` / `explicit` / `unset` / `cleared` / `invalid`（后三者直接 400）。
+        """
+        if explicit_service:
+            try:
+                service = manager.models.get(explicit_service) if manager.models else {}
+            except ProviderError:
+                raise HTTPException(status_code=400, detail=f"指定的服务商不存在：{explicit_service}。")
+            models = [str(entry.get("model") or "") for entry in (service or {}).get("models") or []]
+            chosen = explicit_model or ""
+            if not services_has(service) or (chosen and chosen not in models):
+                raise HTTPException(status_code=400, detail=f"指定的模型不可用：{explicit_service} / {chosen or '(未指定)'}。")
+            binding = {"service_id": explicit_service, "model": chosen}
+            effective, model_source = _effective_of(binding)
+            return {
+                "role": role, "origin": "bound", "source": "explicit",
+                "binding": binding, "effective": effective, "model_source": model_source, "problem": "",
+            }
+        resolution = _reader_role_resolution(role)
+        if not resolution["binding"].get("service_id"):
+            raise HTTPException(
+                status_code=400,
+                detail=f"{label}不可用：{resolution['problem']} 请到「设置 → 阅读」选择模型服务。",
+            )
+        binding = dict(resolution["binding"])
+        if explicit_model:
+            binding["model"] = explicit_model
+        effective, model_source = _effective_of(binding)
+        return {**resolution, "binding": binding, "effective": effective, "model_source": model_source}
+
+    def services_has(service: Any) -> bool:
+        return bool(service) and bool(service.get("models"))
+
+    def _provider_factory_for(project_id: str, binding: dict[str, str]) -> Callable[[], Any]:
+        """按已解析的绑定给出「按需新建 provider」的工厂（预算/服务并发钩子照旧挂上）。"""
+        resolved = str(binding.get("service_id") or "")
+        resolved_model = str(binding.get("model") or "")
+
+        def factory() -> Any:
+            provider = manager.provider_from(resolved, None, model=resolved_model)
+            # 折叠/阅读问答都是「按已给文本作答」的任务：与翻译、结构校对走**同一套**关思考策略，
+            # 包括「首次按 服务+模型 探测真正生效的字段写法」——本机实测该网关只认
+            # chat_template_kwargs 变体，只发默认 enable_thinking 时 reasoning 仍占 73–90%。
+            # 探测必须发生在挂请求协调钩子之前（probe 拒绝在钩子已挂时发请求）；结果按服务+模型缓存。
+            budget = 0.0
+            if resolved:
+                try:
+                    budget = float(store.load_manifest(project_id).get("budget_usd") or 0)
+                except Exception:  # noqa: BLE001 - 预算读不到就不做预算门控探测
+                    budget = 0.0
+            provider = manager.apply_thinking_policy(
+                provider, resolved, allow_probe=True,
+                on_probe_usage=lambda response, error: manager.record_probe_outcome(
+                    project_id, "", response, error,
+                    provider_name=str(getattr(provider.config, "provider", "") or ""),
+                    model_name=str(getattr(provider.config, "model", "") or ""),
+                ),
+                project_id=project_id, budget=budget,
+            )
+            if resolved:
+                manager.coordinator.attempt_hooks_for(
+                    resolved, provider, project_id=project_id, budget=budget,
+                    cost_of=prompt_cost_estimator(provider.config),
+                )
+            return provider
+
+        return factory
+
+    @app.get("/projects/{project_id}/reader/state")
+    def reader_state(project_id: str, locale: str = "source"):
+        reader = ReaderStore(store)
+        document = store.load_document(project_id)
+        return {
+            "project_id": project_id,
+            "title": document.title,
+            "source_language": document.source_language,
+            "target_language": document.target_language,
+            "bbox_space": document.bbox_space,
+            "page_count": document.page_count,
+            "overlay": reader.load_overlay(project_id),
+            "layers": layer_state(project_id, reader),
+            "layers_locale": locale,
+            "layer_job": manager.reader_jobs.latest_job(project_id),
+            # 整篇 fold-run（AIFold 生命周期）：idle/running/pausing/paused/ready/failed，
+            # 前端据此决定「AIFold 默认关闭→点击整篇处理→ready 才显示「启动」」。
+            "fold_run": manager.reader_jobs.current_run(project_id),
+            "summary": summarize_reader(project_id, reader),
+            # 章节索引：不依赖模型/分层，供「当前章范围」、目录与本机折叠入口使用，
+            # id/unit_ids 与折叠作业同源（core build_sections）。
+            "section_index": _section_index_for(store, project_id, locale),
+            # 阅读两个角色的**真状态**：与全局 `/model-services.role_states` 同一份 DTO
+            # （origin/source/binding/effective/model_source/problem），界面据此显示实际服务商/模型
+            # 与「继承翻译默认」，不再靠空 dict 或 translationBinding 推断。
+            # `thinking` 是该 服务+模型 的关思考探测缓存（null = 未探测/未知），界面据此如实标注。
+            "roles": {
+                "fold": _role_states()[ROLE_READER_FOLD],
+                "chat": _role_states()[ROLE_READER_CHAT],
+            },
+            "thinking": {
+                "fold": _thinking_policy_for(_reader_role_resolution(ROLE_READER_FOLD)["binding"]),
+                "chat": _thinking_policy_for(_reader_role_resolution(ROLE_READER_CHAT)["binding"]),
+            },
+        }
+
+    @app.get("/projects/{project_id}/reader/layers")
+    def reader_layers(project_id: str, locale: str = "source"):
+        # 只读：缺分层时返回空 sections + stale，由前端决定是否触发折叠（不隐式调模型）。
+        return ReaderLayerService(store).document(project_id, locale=locale)
+
+    @app.post("/projects/{project_id}/reader/layers")
+    def reader_layers_generate(project_id: str, request: ReaderLayersInput):
+        locale = request.locale or "source"
+        store.load_document(project_id)
+        if request.mode == "local":
+            resolution = {"role": ROLE_READER_FOLD, "source": "local", "binding": _empty_model_binding(), "problem": ""}
+        else:
+            # 门控按**折叠角色**判断（reader_fold，未设置时回退翻译默认）：只配折叠、没配翻译也能折叠。
+            resolution = _reader_require(ROLE_READER_FOLD, "折叠模型", request.service_id, request.model)
+        binding = resolution["binding"]
+        effective = resolution.get("effective") or binding
+        job_id, created = manager.reader_jobs.start(
+            project_id, locale=locale, provider_factory=_provider_factory_for(project_id, effective),
+            model_label=str(effective.get("model") or ""), service_id=str(effective.get("service_id") or ""),
+            section_ids=request.section_ids, force=request.force, mode=request.mode,
+            binding_source=resolution["source"],
+            on_response=usage_recorder(store, project_id, "", "reader_layers"),
+        )
+        # created=False 表示同一项目已有折叠作业在跑：返回既有作业，不重复提交、不重复计费。
+        return {"job_id": job_id, "status": "running", "created": created, "locale": locale}
+
+    @app.post("/projects/{project_id}/reader/layers/stop")
+    def reader_layers_stop(project_id: str, locale: str = ""):
+        # 在章节边界生效：当前在途请求跑完即停，已完成章节保留（远端模型请求不可中断，如实声明）。
+        job_ids = manager.reader_jobs.stop(project_id, locale or None)
+        if not job_ids:
+            raise HTTPException(status_code=409, detail="当前没有正在运行的折叠作业。")
+        return {"job_ids": job_ids, "status": "stopping"}
+
+    # ---- 整篇 fold-run：AIFold 默认关闭→点击后整篇处理→全部完成才 ready ----
+
+    def _run_locale(project_id: str, requested: str) -> str:
+        """run 的目标 locale：显式指定必须存在译文；缺省=有译文则译文 locale，否则 source。
+        整篇 run 同一时刻只驱动一个目标 controller（原文层作为 prerequisite 在其内部补齐）。"""
+        if requested:
+            if requested != "source" and store.load_translation(project_id, requested) is None:
+                raise HTTPException(status_code=400, detail=f"该项目还没有 {requested} 译文层，无法作为折叠目标。")
+            return requested
+        document = store.load_document(project_id)
+        target = str(document.target_language or "")
+        if target and target != "source" and store.load_translation(project_id, target) is not None:
+            return target
+        return "source"
+
+    def _require_reader_project(project_id: str) -> None:
+        """fold-run 路由的缺项目映射：404（而不是 StorageError→400/500），前端轮询可干净处理。"""
+        try:
+            project_dir = store.project_path(project_id)
+        except StorageError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        if not (project_dir / "project.json").is_file():
+            raise HTTPException(status_code=404, detail=f"项目不存在：{project_id}")
+
+    @app.post("/projects/{project_id}/reader/fold-runs")
+    def reader_fold_run_start(project_id: str, request: FoldRunInput):
+        _require_reader_project(project_id)
+        store.load_document(project_id)
+        locale = _run_locale(project_id, request.locale.strip())
+        resolution = _reader_require(ROLE_READER_FOLD, "折叠模型", "", "")
+        binding = resolution["binding"]
+        effective = resolution.get("effective") or binding
+        try:
+            run, created = manager.reader_jobs.start_run(
+                project_id, locale=locale,
+                provider_factory=_provider_factory_for(project_id, effective),
+                model_label=str(effective.get("model") or ""),
+                service_id=str(effective.get("service_id") or ""),
+                force=request.force, binding_source=resolution["source"],
+                on_response=usage_recorder(store, project_id, "", "reader_fold_run"),
+            )
+        except StorageError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        return {"run_id": run.get("run_id", ""), "created": created, "run": run, "locale": locale}
+
+    @app.get("/projects/{project_id}/reader/fold-run")
+    def reader_fold_run_get(project_id: str):
+        _require_reader_project(project_id)
+        return manager.reader_jobs.current_run(project_id)
+
+    @app.post("/projects/{project_id}/reader/fold-runs/{run_id}/pause")
+    def reader_fold_run_pause(project_id: str, run_id: str):
+        _require_reader_project(project_id)
+        run = manager.reader_jobs.pause_run(project_id, run_id)
+        if run is None:
+            raise HTTPException(status_code=404, detail="折叠 run 不存在。")
+        if run.get("status") in ("ready", "failed", "paused", "idle"):
+            return {"run": run, "accepted": False,
+                    "detail": "run 已结束或已暂停，无需暂停。"}
+        return {"run": run, "accepted": run.get("status") == "pausing"}
+
+    @app.post("/projects/{project_id}/reader/fold-runs/{run_id}/resume")
+    def reader_fold_run_resume(project_id: str, run_id: str, request: FoldRunInput | None = None):
+        # body 可省（UI「继续」发无 body POST）：resume 沿冻结 run 继续，locale 冻结在
+        # run 记录里、绑定冻结、force 缺省 False——空 body 等价默认输入。
+        # 传了 body 时仍走 FoldRunInput 校验（extra=forbid：不支持字段 422）。
+        request = request or FoldRunInput()
+        _require_reader_project(project_id)
+        store.load_document(project_id)
+        current = manager.reader_jobs.current_run(project_id)
+        if current.get("status") == "idle" or current.get("run_id") != run_id:
+            raise HTTPException(status_code=404, detail="折叠 run 不存在。")
+        if current.get("status") not in ("paused", "failed"):
+            raise HTTPException(status_code=409,
+                                detail=f"当前 run 状态为 {current.get('status')}，只有 paused/failed 可以继续。")
+        locale = _run_locale(project_id, (request.locale or str(current.get("locale") or "")).strip())
+        if locale != current.get("locale"):
+            raise HTTPException(status_code=400,
+                                detail=f"run 的目标语言是 {current.get('locale')}，不能改成 {locale}；请重新启动一个 run。")
+        # 绑定冻结：resume 沿用 run 记录里的 service/model（缓存键与已完成节一致，不重复计费）。
+        # 不重新解析角色——换模型必须显式重启新 run。
+        frozen = dict(current.get("binding") or {})
+        effective = {"service_id": str(frozen.get("service_id") or ""), "model": str(frozen.get("model") or "")}
+        if not effective["service_id"]:
+            raise HTTPException(status_code=400, detail="run 记录缺少折叠模型绑定，无法继续；请重新启动一个 run。")
+        try:
+            run, created = manager.reader_jobs.resume_run(
+                project_id, run_id,
+                provider_factory=_provider_factory_for(project_id, effective),
+                force=request.force,
+                on_response=usage_recorder(store, project_id, "", "reader_fold_run"),
+            )
+        except StorageError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        if run is None:
+            raise HTTPException(status_code=404, detail="折叠 run 不存在。")
+        return {"run_id": run.get("run_id", ""), "created": created, "run": run, "locale": locale}
+
+    @app.get("/projects/{project_id}/reader/layers/native")
+    def reader_layers_native(project_id: str, locale: str = "source", section: str = ""):
+        """词级原生结构（toks/sents/lad/atoms，brief 词 m、topic 词 k）：前端词级 stage/morph 数据源。
+
+        只读已落盘的派生层（不发模型）；`section=S3` 可按节过滤 chunks（units 仍全量返回，
+        词级定位与跨节词身份需要）。"""
+        payload = ReaderStore(store).load_native(project_id, locale)
+        if payload is None:
+            raise HTTPException(status_code=404,
+                                detail=f"还没有 {locale} 的词级折叠结构；请先运行 AIFold 或生成分层。")
+        if section:
+            chunks = [chunk for chunk in payload.get("chunks") or [] if chunk.get("id") == section]
+            if not chunks:
+                raise HTTPException(status_code=404, detail=f"词级结构里没有章节 {section}。")
+            payload = {**payload, "chunks": chunks}
+        return payload
+
+    @app.delete("/projects/{project_id}/reader/layers")
+    def reader_layers_clear(project_id: str, locale: str = ""):
+        clear_layers(ReaderStore(store), project_id, locale or None)
+        return {"cleared": locale or "all"}
+
+    @app.put("/projects/{project_id}/reader/overlay")
+    def reader_overlay_save(project_id: str, request: ReaderOverlayInput):
+        return ReaderStore(store).save_overlay(project_id, request.overlay, base_revision=request.base_revision)
+
+    # ---- 阅读对话：统一侧栏 + 一次性引用 + 按条冻结模型 -------------------
+    # 会话历史落在项目目录 reader/chat.json；一条消息的模型选择在创建时冻结，
+    # 之后改设置不影响在途/历史；回答落地时再记录实际响应的模型。
+
+    def _chat_binding(service_id: str, model: str) -> dict[str, str]:
+        """对话本次使用的绑定：显式选择优先，否则 reader_chat → 未设置时继承翻译默认。
+
+        `source` 会随消息落库并在 wire DTO 里返回，界面据此显示「继承翻译默认」，
+        不让用户以为专用阅读对话模型在生效。
+        """
+        resolution = _reader_require(ROLE_READER_CHAT, "阅读对话模型", service_id, model)
+        binding = dict(resolution["binding"])
+        binding["source"] = resolution["source"]
+        resolved = binding["service_id"]
+        try:
+            service = manager.models.get(resolved) if resolved else {}
+            binding["name"] = str(service.get("name") or "")
+            entry = next((item for item in service.get("models") or [] if item.get("model") == binding["model"]), None)
+            binding["label"] = str((entry or {}).get("name") or binding["model"])
+        except Exception:  # noqa: BLE001 - 展示名缺失不影响调用
+            pass
+        return binding
+
+    def _chat_wire(project_id: str, chat: dict[str, Any]) -> dict[str, Any]:
+        """把落盘的消息投影成前端 DTO（`frontend/src/reader/types.ts` 的 ReaderChatMessage）。
+
+        - `question`/`answer` 按角色拆分；`state` 把 running→sending 对齐前端枚举。
+        - `quote.snippet` 是读者选中的文字；`srcText` **永远取原文 block**，译文引用也只给原文证据。
+        - `model` 是给人看的展示名，`binding` 是重试/复用所需的真实 {service_id, model}。
+        """
+        try:
+            document = store.load_document(project_id)
+            blocks = {block.block_id: block for block in document.blocks}
+        except Exception:  # noqa: BLE001 - 文档缺失时仍可读历史
+            blocks = {}
+        out = []
+        for item in chat.get("messages") or []:
+            quote = item.get("quote")
+            wire_quote = None
+            if quote:
+                block = blocks.get(quote.get("block_id"))
+                src = (getattr(block, "source_text", "") or "") if block is not None else ""
+                wire_quote = {
+                    "block_id": quote.get("block_id", ""),
+                    "pane": quote.get("pane", "source"),
+                    "snippet": quote.get("text", ""),
+                    "srcText": src or quote.get("text", ""),
+                    "sec": quote.get("section", ""),
+                }
+            binding = item.get("model") or {}
+            # 展示名优先用服务端实际回报的模型名；路由身份仍是 binding.service_id + binding.model。
+            shown_model = binding.get("actual") or binding.get("label") or binding.get("model") or ""
+            label = " · ".join(part for part in (binding.get("name"), shown_model) if part)
+            source = binding.get("source") or ""
+            if source == "inherited_translation":
+                label = f"{label}（继承翻译默认）" if label else "继承翻译默认"
+            state = {"running": "sending", "ok": "done", "error": "error", "stopped": "stopped"}.get(
+                item.get("status", "ok"), "done",
+            )
+            wire = {
+                "id": item["id"],
+                "role": item["role"],
+                "citations": item.get("citations") or [],
+                "model": label,
+                "binding": {
+                    "service_id": binding.get("service_id", ""), "model": binding.get("model", ""),
+                    "source": source, "actual": binding.get("actual", ""),
+                },
+                "state": state,
+                "error": item.get("error", ""),
+                "created_at": item.get("created_at", ""),
+            }
+            if item["role"] == "user":
+                wire["question"] = item.get("text", "")
+            else:
+                wire["answer"] = item.get("text", "")
+                wire["question"] = next(
+                    (prev.get("text", "") for prev in reversed(out) if prev["role"] == "user"), "",
+                )
+            if wire_quote:
+                wire["quote"] = wire_quote
+            out.append(wire)
+        return {"conversation_id": chat.get("conversation_id", ""), "messages": out, "updated_at": chat.get("updated_at", "")}
+
+    @app.get("/projects/{project_id}/reader/chat")
+    def reader_chat(project_id: str):
+        chat = ReaderChatRunner(store).conversation(project_id)
+        return _chat_wire(project_id, chat)
+
+    @app.post("/projects/{project_id}/reader/chat/messages")
+    def reader_chat_send(project_id: str, request: ReaderChatInput):
+        store.load_document(project_id)
+        binding = _chat_binding(request.service_id, request.model)
+        provider_factory = _provider_factory_for(project_id, binding)
+        runner = ReaderChatRunner(store)
+        started = runner.start(
+            project_id, question=request.question, quote=request.quote.model_dump() if request.quote else None,
+            locale=request.locale or "source", binding=binding, provider_factory=provider_factory,
+            usage_hook=usage_recorder(store, project_id, "", "reader_chat"),
+        )
+        return {
+            **started, "binding": binding, "status": "running",
+            "chat": _chat_wire(project_id, runner.conversation(project_id)),
+        }
+
+    @app.post("/projects/{project_id}/reader/chat/messages/{message_id}/stop")
+    def reader_chat_stop(project_id: str, message_id: str):
+        chat = ReaderChatRunner(store).stop(project_id, message_id)
+        return _chat_wire(project_id, chat)
+
+    @app.post("/projects/{project_id}/reader/chat/messages/{message_id}/retry")
+    def reader_chat_retry(project_id: str, message_id: str, request: ReaderChatRetryInput):
+        # 重试默认**沿用该条消息自己的模型**（用户当时选的那家/那个），而不是重新解析默认角色：
+        # 否则「当次换成 svc-other 提问 → 失败 → 重试」会悄悄换回默认模型，路由与用户在界面上看到的不一致。
+        stored_service, stored_model = "", ""
+        if not request.service_id:
+            chat = ReaderChatRunner(store).conversation(project_id)
+            target = next((item for item in chat.get("messages") or [] if item["id"] == message_id), None)
+            if target is not None:
+                stored = target.get("model") or {}
+                stored_service = str(stored.get("service_id") or "")
+                stored_model = str(stored.get("model") or "")
+        binding = _chat_binding(request.service_id or stored_service, request.model or stored_model)
+        provider_factory = _provider_factory_for(project_id, binding)
+        runner = ReaderChatRunner(store)
+        started = runner.retry(
+            project_id, message_id, locale=request.locale or "source", binding=binding,
+            provider_factory=provider_factory,
+            usage_hook=usage_recorder(store, project_id, "", "reader_chat"),
+        )
+        return {
+            **started, "binding": binding, "status": "running",
+            "chat": _chat_wire(project_id, runner.conversation(project_id)),
+        }
+
+    @app.delete("/projects/{project_id}/reader/chat")
+    def reader_chat_clear(project_id: str):
+        return _chat_wire(project_id, ReaderChatRunner(store).clear(project_id))
+
+    @app.get("/projects/{project_id}/reader/layers/markdown")
+    def reader_layers_markdown(project_id: str, locale: str = "source", level: str = "full", section: str = ""):
+        # 复用上游 `fold.markdown()`：把某一层导出为 Markdown（只读投影，不写文件）。
+        from fastapi.responses import PlainTextResponse
+
+        text = layers_markdown(ReaderStore(store), project_id, locale=locale, level=level, section=section or None)
+        return PlainTextResponse(text)
+
+    @app.post("/projects/{project_id}/reader/ask")
+    def reader_ask(project_id: str, request: ReaderAskInput):
+        question = (request.question or "").strip()
+        if not question:
+            raise HTTPException(status_code=400, detail="问题不能为空。")
+        document = store.load_document(project_id)
+        locale = request.locale or "source"
+        # 显示语言章节（写「每节一句话主线」）+ 原文章节（检索与引用证据），见 reader._sections_for_ask。
+        from .reader import _sections_for_ask
+
+        sections, source_sections = _sections_for_ask(store, project_id, locale)
+        resolution = _reader_require(ROLE_READER_CHAT, "阅读对话模型", request.service_id, request.model)
+        binding = resolution["binding"]
+        resolved, model = binding["service_id"], binding.get("model", "")
+        provider_factory = _provider_factory_for(project_id, binding)
+        job_id = store.create_job(
+            project_id, "reader_ask",
+            {"quoted": bool(request.quote), "block_ids": len(request.block_ids or [])},
+            {"service_id": resolved, "model": model, "binding_source": resolution["source"]},
+        )
+        store.update_job(project_id, job_id, status="running")
+        provider = provider_factory()
+        try:
+            result = answer_question(
+                document, sections, provider, question=question,
+                quote=request.quote.model_dump() if request.quote else None,
+                block_ids=request.block_ids or None,
+                locale=locale, source_sections=source_sections,
+                usage_hook=usage_recorder(store, project_id, job_id, "reader_ask"),
+            )
+            store.update_job(project_id, job_id, status="completed", progress=1,
+                             result={"model": result.get("model", ""), "citations": len(result.get("citations") or [])})
+            return {**result, "job_id": job_id, "binding": binding, "binding_source": resolution["source"]}
+        except Exception as error:
+            store.update_job(project_id, job_id, status="failed", error=str(error))
+            raise
+        finally:
+            try:
+                provider.close()
+            except Exception:  # noqa: BLE001 - 关闭失败不影响已拿到的回答
+                pass
 
     @app.get("/projects/{project_id}/usage/records")
     def usage_records(project_id: str):

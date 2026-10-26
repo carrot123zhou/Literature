@@ -293,10 +293,12 @@ async function main() {
   await page.goto(`${web}/#/p/${locate.project_id}/export`, { waitUntil: "networkidle" });
   await page.waitForTimeout(2500);
   const exportRouteText = await page.innerText("body");
-  checks.push(["旧 #/p/<id>/export 回退到阅读与翻译（不白屏）",
-    exportRouteText.includes("阅读") && !exportRouteText.includes("EXPORT CENTER") && !exportRouteText.includes("生成所选格式")]);
+  // 主导航标签在 13f3bfd 由「阅读与翻译」改为「对照翻译」（对照视图才是这个工作区）。
+  checks.push(["旧 #/p/<id>/export 回退到对照翻译（不白屏）",
+    exportRouteText.includes("对照翻译") && exportRouteText.includes("目录")
+    && !exportRouteText.includes("EXPORT CENTER") && !exportRouteText.includes("生成所选格式")]);
   const navText = await page.locator("nav[aria-label='主导航']").innerText();
-  checks.push(["主导航不暴露导出标签（入口在文件资源页）", !navText.includes("导出") && navText.includes("阅读与翻译")]);
+  checks.push(["主导航不暴露导出标签（入口在文件资源页）", !navText.includes("导出") && navText.includes("对照翻译")]);
   await page.goto(`${web}/#/export`, { waitUntil: "networkidle" });
   await page.waitForTimeout(1500);
   checks.push(["旧 #/export 不显示导出中心（导出以弹窗提供）", !(await page.innerText("body")).includes("EXPORT CENTER")]);

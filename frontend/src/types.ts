@@ -90,8 +90,28 @@ export type ModelService = {
 };
 /** 任务角色绑定：服务商 + 该服务商内的模型 ID。 */
 export type ModelRoleBinding = { service_id: string; model: string };
-export type ModelRole = "structure" | "translation";
-export type ModelRoles = { structure: ModelRoleBinding; translation: ModelRoleBinding };
+/**
+ * 任务角色：结构校对 / 翻译 / 阅读折叠 / 阅读对话。
+ * 折叠与对话分开绑定是刻意的：折叠要便宜、JSON 严格；对话要长上下文与语言能力。
+ */
+export type ModelRole = "structure" | "translation" | "reader_fold" | "reader_chat";
+/** 单个角色的全局真状态（GET /model-services/roles/state 或 /model-services 的 role_states）。 */
+export type RoleState = {
+  role: string;
+  origin: "bound" | "unset" | "cleared" | "invalid";
+  source: string;
+  binding: { service_id: string; model: string };
+  effective: { service_id: string; model: string };
+  model_source: "" | "binding" | "first_model";
+  problem: string;
+};
+export type RoleStateMap = { [role in ModelRole]: RoleState };
+export type ModelRoles = {
+  structure: ModelRoleBinding;
+  translation: ModelRoleBinding;
+  reader_fold: ModelRoleBinding;
+  reader_chat: ModelRoleBinding;
+};
 /** `/v1/models` 返回的一条记录：ID + 可选的上下文窗口 / 输出上限 / 单价。 */
 export type RemoteModel = {
   id: string; context_window: number; max_output_tokens: number;
@@ -124,6 +144,8 @@ export type OcrJob = {
   /** 首次进入 completed 的时间；旧任务由 updated_at 回退。 */
   finished_at?: string; finished_at_estimated?: boolean;
   archived?: boolean; archived_at?: string; archive_reason?: string;
+  /** 解析后端：mineru_remote（云端）或 mineru_local（本机引擎/服务）。 */
+  backend_id?: "mineru_remote" | "mineru_local";
 };
 
 export type TaskCounts = { running: number; queued: number; resumable: number; failed: number; total: number; completed?: number };

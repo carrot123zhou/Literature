@@ -4,15 +4,15 @@ import { useCallback, useEffect, useState } from "react";
  * 轻量 hash 路由：把「当前视图 + 当前项目」变成可刷新、可后退、可分享的地址。
  *
  * - `#/home`、`#/resources`：首页与文件资源库。
- * - `#/p/<projectId>/review|read`：某个项目的两个工作区。
+ * - `#/p/<projectId>/review|read|reader`：某个项目的三个工作区（结构校对 / 对照翻译 / 阅读）。
  *
  * 旧的 `#/p/<id>/export` 与 `#/export` 已移除导出模块，统一回退到「对照翻译」，
  * 避免旧书签/历史地址打开白屏。
  */
-export type View = "home" | "resources" | "history" | "review" | "read";
+export type View = "home" | "resources" | "history" | "review" | "read" | "reader";
 export type Route = { view: View; projectId: string };
 
-export const WORK_VIEWS: View[] = ["review", "read"];
+export const WORK_VIEWS: View[] = ["review", "read", "reader"];
 
 // 已下架模块的历史地址 → 现在的落地视图。导出模块整块移除后落到对照翻译。
 const LEGACY_WORK_VIEWS: Record<string, View> = { export: "read" };

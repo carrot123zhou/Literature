@@ -4,6 +4,251 @@
 
 > 条目为「最新在上」。2026-10-14 前的手工「第N轮」编号是遗留标记（历史上出现过重复，已用 `·` 后缀消歧），不再续编；新条目用 `## YYYY-MM-DD · 主题`，引用时以上文日期与主题为准。
 
+## 2026-10-26 · AIFold 整篇处理与上游阅读器移植
+状态：已编码 / 受控服务逐空间 81/81、完整 UI 48/48、冻结 binary 17/17 / 最后修复定向 149 项及 suppression 17/17、菜单主题 17/17 / 严格 CSP 零违规 / 已重建安装并实际 macOS 窗口点验 / 未系统评估真实整书语义质量、费用或大书性能；未提交 Git。
+
+- **用户决策与实现**：默认普通全文阅读；顶栏 AI 问答旁 AIFold 明确启动整篇处理，进度环、请求边界暂停/继续；完成后显示「启动」，用户启动才显示纯五档浮条。保留三栏与原译对照：源文折叠一次、派生译文短层、已有全文译文只读复用。原译 hover 对应圆点联动；右键整段与划词共用批注菜单。浅色/纸色/深色的 selbar 与 npop 均跟随阅读主题，主题切换不重建 iframe。
+- **真实移植边界**：固定上游 `2182d9a8` JS/CSS/i18n 原件保留；实际运行精确锚替换生成的 `engine-patched.js`，原译各独立 iframe。兼容补丁处理派生 Brief 独立词空间、目标摘句句空间、派生选词高亮及 srcdoc history；不是自写仿制版，也不是完全未修改的运行内核。无真实对应的模型新写词不伪造 m/k。词级 stage/morph 有受控浏览器真实运动证据；不据此声称原生逐帧性能已量化。
+- **持久化与契约**：整篇 fold-run 幂等、暂停续跑、重启转 paused、冻结绑定缓存复用；force 重采样源文与派生；事实变化/缺 native 不假 ready、失败不假 100%。原生 `engine_anchor` 按全文/写行/派生/章节摘要/标题分空间验证，UTF-16 指纹与 JS 一致，失效保留笔记而不误标。摘要挂真实标题 block_id。唯一现状契约为 `docs/READER_BACKEND.md` §4.8–4.9。
+- **实际故障与修复**：Tauri CSP 阻断 srcdoc 可执行内联脚本，现改同源离线外链，未放宽 script-src；空 overlay 的译文栏缺省不对称已修，显式关闭仍尊重。真实书 9/11 卡住是源 suppressed 单元在较长译文中回退 local，已使源抑制状态权威传播并支持旧缓存零调用纠正。未就绪逐节理由进入 errors；前端真实 TS parser 正确读取 error，避免对象转储。真机发现浅色 selbar 仍反差黑底，宿主 CSS 定点覆盖，纸色按上游 data-style 正确映射；不改 vendoredCSS。
+- **测试证据**：Orca Worker tester 独立逐空间 81/81（八场景与显式 trans=false）、完整矩阵 48/48；真实六页 PDF 文字像素及定位、notes 跨模式/重开/失效、确定性暂停恢复均有受控协议级证据。最后 backend 定向 149 passed；suppression 回归 17/17 含真实书只读副本；菜单主题 17/17 检查实际可见 selbar/npop computed 色与 shade hover、iframe 不重建；严格 CSP 双栏就绪零违规。早期错误的 `<mark>` 探针和假 PDF 夹具已纠正，不作为产品失败结论。
+- **最终包**：干净 CPython 3.12.15 重建，离线 TLS 检查、冻结 binary 17/17 通过；sidecar SHA256 `cfac4d2fc33a548e2ae05a9354d0f3250b5f1264af3e01133b221c2a11a36dad`、49089648 B，revision `82ef91e9ddb75266e321`。最终前端 `index-B0VhbmYc.js`，main SHA256 `d9264e8fe3add6d54462481daf871d5a28a5db2771b70eca36db35036d7e7c73`。候选与 `launcher/Literature.app` 主程序/sidecar 逐字一致，严格深度签名校验通过；安装前保留备份 `launcher/.rollback-Literature-20261026230453.app`（更早备份仍保留）。
+- **真实客户端结果**：Lead 在新安装客户端打开真实 Prince Moonlight，确认默认无五层条、缓存就绪「启动」入口、进入后原译双栏与 PDF 正常、切层可用、右键单菜单且浅色白底深字；退出回普通阅读。真实旧 run 恢复后 11/11 ready，本次缓存恢复 usage 记录 98→98、零新增模型调用。43 个 document/translation/raw manifest 事实文件哈希不变。截图 `tmp/aifold-native-key.png`、`tmp/aifold-native-theme-final.png`；包核对 `tmp/aifold-installed-final.json`，事实核对 `tmp/aifold-native-facts-after.json`。
+- **执行渠道与限制**：Orca Worker developer 完成前后端及修复、designer 迁移内核、tester 独立测试；Lead 审查、打包安装与原生点验。受控协议测试零付费，真实书已有模型产物可用；本轮真实缓存恢复零新调用不等于整书处理免费。此前真实模型请求的费用待对账，未把 UI 的 $0 解释为免费；整书语义质量、真实在途暂停手感及大书性能未系统验收。
+
+## 2026-10-25 · 整篇折叠状态与恢复边界补齐
+状态：已编码 / 已受控服务自动测试 / 未真实整篇模型验收、未打包。
+
+- **状态/实时/失效补齐（同日第二轮，Lead 指出的未落实项）**：
+  - ①目标 lane 语义校正（Lead 实读 apply_derived_reply 513 起）：`lad.brief`+`tn`+`topic` 是
+    **L2 Key/L1 Takeaway/L0 Topic**；**L3 Brief 是 `brief_sentences`**（模型分层译句）。native 新增
+    **`tr[locale].lad.derived_brief={toks,sents,source_ev}`**（brief_sentences 确定性分词，sents
+    逐项映射源 ev，无指向全文的 m——不伪造对齐）与 `ev_space:"source"|"target"`（derived 的 ev
+    是原文句下标只用于回跳；translation-local 的 ev 才可索引 z.sents）；`tr.fallback=true` 回退渲染
+    原文。早前“derived Brief 直接用 lad.brief”的错误建议已撤回并在 §4.8b 更正。
+  - ②逐节实时计数：`generate(on_section=)` 在每个节结果点回调（folded/reused/failed），
+    `ReaderJobRunner._run_on_section` 经 `_mutate_run`（**新增 `_run_io_lock` 串行化 fold_run.json
+    读改写**）原子更新 completed/reused/failed/pending；`start_run` 预先计算可信 total（build_sections）；
+    终态 ratio=就绪节/total，**失败不假 100**；暂停与进度不再互相覆盖（同一把锁 + 终态守卫）。
+  - ③ready 失效：`current_run` 用廉价事实指纹（绑定+layers/document/translation/native mtime+size）
+    门控完整 readiness 重算，变化即失效（状态转 failed，可 resume 只补失效节）；readiness 补齐
+    **全 suppressed 节算就绪（不死锁）**、**译文层要求源前置同样有效**、**native 缺失/写失败不能
+    ready**；readiness ladder 只建一次（不再是逐节 O(n) 重建）。
+  - ④resume 绑定冻结：沿用 run 记录的 service/model（API 端点按冻结绑定构建 provider 工厂，
+    不重新解析角色；换模型必须显式重启新 run）；**请求边界暂停细化**：源前置折完、派生请求发出前
+    检查 pause（源完成即可暂停，不立即发 derive）；派生请求前发现 `unit_evidence` 为空（源层全
+    suppressed）不发请求、沿用原文层（不算失败，不死锁）。
+  - ⑤suppressed 传播修复：源层装置 unit 在目标层曾被投影成 local（带装置内容的节永不 ready）——
+    `apply_derived_reply`/`_sync_source_lads`/`section_view` 现同步 `suppressed` 标志。
+  - 测试：tests/test_reader_fold_run.py **21 项**（新增：失败 ratio<1、事实变化 ready 失效、native
+    缺失失效、全 suppressed 不死锁、运行中逐节计数、请求边界暂停派生未发+源不重复计费+绑定冻结、
+    derived_brief 无 m/ev_sentences≠Key 断言）。全量 pytest **798 passed**。
+  - **源层过期复用修复（ready 失效闭环的关键缺口）**：`_ensure_source_fold` 的复用快路径
+  只看「存盘 unit 是 model 来源」，不校验 digest——事实（正文）变化后旧源层被当作有效 AI 复用，
+  源层永不重折、派生层永远 stale，resume 后 ready 永不恢复。现复用必须过 `flight_digest`
+  匹配（section_digest 与 run 绑定一致）；不匹配走 single-flight 重折。回归
+  test_full_lifecycle_in_one_process：ready → 事实变化失效 → resume 只补失效节（源 3 次调用
+  =S1 重折，S2 缓存 0 调用）→ 再次 ready。
+- **稳定点（可联调）**：全量 pytest 799 passed；文件 sha256 前缀——reader.py `8642ffd79d2254d4`、
+  textfold_adapter.py `f30ab81f809fdb7e`、api.py `a3a27b089171abf9`、test_reader_fold_run.py
+  `7d8bcaafb2167f73`、READER_BACKEND.md `e241eef0910971f5`。native 样本
+  `tmp/reader-native-sample/{native-zh-CN,native-source,fold-run}.json + README.md`。
+- **写入纪律**：本文件与 READER_BACKEND.md 均为 tmp+os.replace 原子替换（designer 曾两次撞到
+    在途写入窗口的语法不完整文件）。
+## 2026-10-25 · 整篇 fold-run 生命周期（AIFold 默认关闭）与词级 native 数据契约（后端，developer-2）
+状态：已编码 / 全量 pytest **790 passed**（含新增 tests/test_reader_fold_run.py 16 项：生命周期/幂等互斥/边界暂停/重启恢复/失败不 ready/旧缓存兼容/事实哈希不变/词级 m·k·ev·tr 结构/blocks 原序与 chunk lad·tr/消毒断言/API 契约含 401 隔离）/ 阅读模块 88 passed 不回归 / **未真实模型验收、未联调前端、未打包**。
+
+- **用户决策落地**（取代“按可见节自动生成”）：AIFold 默认关闭，点击后自动处理整篇文章，进度外圈、可暂停继续，全部应处理节齐备才 ready、ready 才显示「启动」进入五级阅读。后端负责整篇生命周期与完整上游数据适配；前端/打包归 designer/Lead。
+- **公开 API（`literature/api.py`，DTO extra=forbid，能力位新增 `reader_fold_run_v1`/`reader_native_v1`）**：`POST /reader/fold-runs {locale?, force?}`（幂等：running/pausing 返回既有 run；paused/failed 即 resume）、`GET /reader/fold-run`、`POST /reader/fold-runs/{run_id}/pause`（边界生效，不存在 404）、`POST /reader/fold-runs/{run_id}/resume`（仅 paused/failed，否则 409）、`GET /reader/layers/native?locale=&section=`；`/reader/state` 新增 `fold_run` 快照。locale 缺省=有译文取译文 locale 否则 source；显式 locale 无译文 400。
+- **实现（`literature/reader.py`）**：`fold_run.json` 持久状态（原子写+路径锁）；`ReaderJobRunner.start_run/pause_run/resume_run/current_run`；`generate(pause=)` 边界暂停分支（与 stop 语义分离，不计 failed、pending 随 run 持久化，`_finalize` 收尾共用）；`ReaderLayerService.fold_run_readiness`（零模型逐节 ready 判定：units 真实 source=model/suppressed 且存盘 hash 与按 run 绑定重算的期望键一致；local/partial 不冒充；无译文节沿用原文层不阻塞）。run 与按节作业同 `(project,locale)` 互斥（复用 single-flight 键）；重启 `recover()` 把 run 的 running 标 paused（reader_layers 仍标 failed），resume 同 run_id 只补未完成节、有效缓存 0 调用。
+- **词级 native 契约（`GET /reader/layers/native`，v2 对齐真实 fixture）**：对照 designer 提供的真实 gallery fixture 与 `upstream-reader.js` `view()/pieces()/build()` 逐字段核实。根字段齐全：`meta`（id/title/source/lang/cjk + langs）、`atoms`、`units`（dict）、`chunks`、**`blocks` 原文顺序**（`{k:h,chunk}`/`{k:u,u,chunk}`/`{k:fig}`表·图/`{k:eq}`，图片带 `src` asset 名）、`edges`/`alias`/`app:true`/`langs`/`katex:"inside"`/`pdfAt`/`bib`/`gone`/`notes`。unit 键 `id/role/toks/sents/chunk/lad/tr`（+Literature 适配字段）；chunk 键含 `html` 与 `lad:{take,topic}`、`tr:{lang:{title,lad}}`（章节级短层已由折叠管线写入）。适配层不再给非表格 unit 塞 `fig` shim（旧 tables_of 兼容条目，会被前端渲染成空图；tables_of 只认 kind=table/raw 行为不变）。**消毒**：所有 html 字段过 `_sanitize_html`（剔 script/style/iframe 等标签、on* 事件属性、javascript:/vbscript: 伪协议；转义后的惰性文本不是执行风险，已用 `<script>alert(1)</script>` 公式块验证）。fold 过程同步落盘 `reader/native_<locale>.json`（译文 run 同步写原文层；失败只记 warning）。上游 reader.js `view()/pieces()` 语义直接可移植；现有 `GET /reader/layers` string 投影不变。
+- **上游 pin 复核**：2182d9a8662e69790850021dd8c965d0398777c4 经 GitHub 插件确认真实存在于 chenxiachan/textfold（Xia Chen，2026-10-24，0.10.31），与 VENDOR.md 一致，不换 pin。词级 `m`/`k` 锚定语义已对上游 `written()` 核实：只有与 full 共享的词才带 `m`，模型自拟词无 `m`（测试回复用逐字原文前缀验证）。
+- **契约文档**：`docs/READER_BACKEND.md` 新增 §4.8（fold-run 生命周期）与 §4.8b（native 结构）；API 表新增五行。契约已报 Lead；designer 同步因 worker 桥无团队上下文，由 Lead 转达（native DTO 字段以 §4.8b 为准）。
+- **边界（不混写）**：未真实模型验收（整书耗时/费用/暂停在真实在途请求上的表现）；未与 designer 前端联调；未打包安装；`pending_sections` 是「resume 需要再过的节」非「会发模型的节」（resume 时有效缓存 0 调用）；run 期间 completed/reused 计数在 finalize 时重算，运行中仅 ratio/current_section 实时更新。
+
+## 2026-10-25 · TextFold 原客户端对照与 Literature 真机修复
+状态：已编码 / 全量 pytest 774 passed（最后仅进度文案改动后，阅读模块 88 passed）/ 最终生产前端隔离交互 21/21、包内 sidecar 18/18、tsc 与 Vite 通过 / 已安装并真实操作 macOS 客户端、真实模型章节折叠通过 / 整书质量与稳定耗时、上游词级连续形变未验收或未实现。
+
+- **执行渠道**：Orca Worker designer 对照上游源码与实际 TextFold.app，实现短层自动生成、圆点 hover、右键统一菜单及独立 21 项隔离检查；Orca Worker developer 修复 L4/L5 整节展开并只读检查冻结依赖/TLS。Lead 亲自操作 TextFold.app 与 Literature.app，修复构建环境、双语本地预览、PDF 与真机新发现，独立验收最终产物；未使用 native subagent。已有未提交改动全部保留，未提交 Git。
+- **迁移事实**：后端真实复用固定上游 2182d9a8 的 tokens/ladder/fold/llm，前端为 React 适配并仅部分移植交互。此前移植范围未覆盖上游词身份、stage 预渲染及词级 morph，不能称完整客户端迁移；问题不能归因上游不成熟。唯一界面现状 docs/ui/reader-design.md、唯一后端现状 docs/READER_BACKEND.md、逐文件来源 third_party/textfold/VENDOR.md。
+- **折叠失败根因**：旧包冻结的 Codex 补丁 ssl.py 引用未打包 codex-rejected-cas.pem，创建 SSLContext 即 FileNotFoundError，尚未到模型请求。改用干净 CPython 3.12.15 构建；构建前拒绝该补丁解释器、校验依赖；构建后实际执行冻结 binary --check-tls。补齐 bs4/soupsieve，避免章节表格上下文静默丢失。构建入口支持 LITERATURE_BUILD_PYTHON，未关闭 TLS 验证。
+- **简化交互**：删除常驻长状态条和章节范围选择。用户直接点简述/要点/主线/主题；先免费本地预览，自动模型请求每次只带当前可见节，去重并复用缓存。模型/失败细节收进 ⓘ；手动强制重折限定当前节。retryFailed 无合法节 id 不回落整书。主动停止的空 id 通知独立显示「已停止 · 已生成的内容已保留」，不再算失败章节或显示无效重试。
+- **原译内容**：目标本地预览先补缺失原文锚点，修正 L4 只有标题/L5 空白；保留已有 AI 内容时同步保留其 digest 元信息，不再错误 stale。L4/L5 展开按文档顺序渲染整节正文及图表公式，保留批注/缺译回退，不用要点冒充全文。
+- **原件空白**：可见页定位由 offsetTop 改为视口坐标换算；PDF 在离屏画布完成后原子复制，避免缩放/取消清空可见页。换项目不再复用已销毁文档；加载态与错误降级分开，单页失败可重试。隔离脚本滚到中间页检查实际文字像素，真机目录跳转后亦亲见真实原页文字。
+- **批注统一**：左键不弹批注条，右键整段创建真实 Selection，和鼠标划词使用同一墨色菜单；已有高亮右键进入唯一编辑态。原文/译文 hover 不铺整块背景，只动段前小圆点，原件 bbox 联动保留。长段 quote 前缀定位保留完整 range。真机额外发现并修复：overlay 异步挂载导致默认三栏首开不绑定右键监听；菜单按钮白底白字；目录误当来源于原文栏，原文自身未跳转。三项已补回归。
+- **最终隔离验证**：tests/manual/reader_interaction_v2_check.py + .cjs，21/21，0 pageerror，受控 provider 仅两次调用。包括首开默认三栏右键、目录定位原文、PDF 滚动文字像素、直接简述 local→单节 auto、缓存/全文零新请求、hover 透明、整段完整 Selection、高亮保存、右键编辑、笔记真实落库、实际鼠标拖选复用菜单、停止通知无空重试；该隔离 fixture 不写真实 Keychain。日志 tmp/reader-ui-final.log。包内后端冻结 18/18 见 tmp/reader-frozen-final.log；全量与阅读回归分别 tmp/reader-pytest-final.log、tmp/reader-backend-final.log。
+- **真实服务与客户端**：用户原书 S3（12 段）通过原文一次折叠→译文短层派生，2 次模型请求，共约 229.6 秒；source 3634in/1093out、derive 3107in/1823out，reasoning 0。最终客户端保留简述层首开时自动完成 S1（4 段），约 8.54 秒、2 次请求（1533in/468out、1459in/588out）。S3 再次切简述仅复用缓存，0 新模型调用。主线视图可见节变为 S4 后按单节自动生成，实际点过停止；在途请求未即时取消，返回后保留完成内容并标记 stopped，未声称停止可撤回已发生费用。S4 两次请求为 3900in/1297out、3310in/1919out。以上均通过既有绑定读取 Keychain，价格未配置，estimated_cost=null，不等于免费。另有隔离三段真实 frozen 模型样本约 6 秒，不能替代真实整章性能。
+- **真实窗口证据**：Lead 用电脑工具点击层级、目录、右键段落、停止，截图确认三栏、原件文字、双语简述和单菜单；未在真实书籍创建测试笔记。最终菜单 tmp/reader-native-final-menu.png、三栏目录 tmp/reader-native-toc-three-panes.png、双语简述 tmp/reader-native-fold-bilingual.png。真实鼠标拖选及笔记保存为隔离 Chromium 证据，未混作 WKWebView 原生拖选验收。原件、canonical、译文、raw manifest 四项 SHA256 与操作前完全一致（tmp/reader-original-facts-before.json），仅 reader 派生层/偏好及用量发生预期写入。
+- **最终安装产物**：launcher/Literature.app；main SHA256 4f6184834aa99473a130381e1ba5f501ec2ce2f2274ebde9827e9fec44fbe197（13209952 B）；sidecar 1dfee35f2584596b700fea8f02b9d4146783ac3edcc319e429bf4314609ec48f（49041424 B）、runtime_revision 800699ef6e3430397d41；内嵌 index-B1bP7xiU.js / index-CbkygRAb.css 与 dist 标识一致。候选与安装两二进制逐字节一致（tmp/reader-installed-final.json），adhoc 严格签名通过。每次先正常退出，再安装，未强杀或运行中替换；最初旧包备份 launcher/.rollback-Literature-20261025164243.app。最终 app 保持打开全文层供用户使用。
+- **仍需继续**：S3 约 3 分 50 秒仍过慢，真实耗时波动大，尚无足够证据定位服务排队、首响应等待与模型生成各占比；需要带阶段计时优化，不用成功返回掩盖。上游词级连续 morph/词对应未接入，当前为块级过渡；整书费用、多轮折叠质量、干净机器安装、公证未验收。只有标题无 unit 的上游适配章节仍可能丢失 L4/L5 中无归属透传块，不宣称完全复刻。
+
+
+## 2026-10-25 · 候选客户端安装与真机启动（本轮交付收口）
+状态：已构建候选包 / 包内 sidecar 冻结验收 18/18 / 已安装到 launcher（安装字节与候选逐字节一致、adhoc 签名通过）/ 已启动并通过健康检查、进程与日志验收 / **逐元素真窗口检查未执行（AX 与录屏权限缺失）** / 未触发任何付费模型请求。
+
+- 处置：安装前确认**无** Literature 与 literature-sidecar 进程（tester 的隔离窗口已自行退出，未强杀、未运行中替换）。旧安装包先持久备份为 `launcher/.rollback-Literature-20261025143446.app`（main `1f7601953a1bf6dc…`、sidecar `241927c4cacb1d60…`），再用 `scripts/setup_macos_launcher.sh --app-only` 安装同一候源码；该脚本先校验候选 codesign、断言目标未被运行、以临时目录原子替换，不重建产物。
+- 候选与安装标识（SHA256）：主二进制 `c4848feddaec8880496aeaab4c7e5b53e6c5f222d9ad5766272480feea816987`（13209952 B）；sidecar `a9e6cd78076f0017897bef0da1c020e646204ee80d24497a7400d3203ece23e5`（48797168 B，与 `src-tauri/binaries/manifest.json` 逐字节一致）；`runtime_revision 1efb23d770f288375b60`；内嵌前端 `index-CJbr-2jP.js 511b789adaff445a…`、`index-DaALQUmp.css b8820e13b5e47cc0…`（与 `frontend/dist` 同哈希，构建前后 dist 未变）。安装后 `launcher/Literature.app` 的 main/sidecar 哈希与候选完全相同，`codesign --verify --deep --strict` 通过；`spctl` 因 adhoc 无公证而 rejected，属预期，未做任何信任/sideload 变通。
+- 源码冻结（构建时实测）：`literature/reader.py 8ec47e4c…`（含 F5 修复）、`textfold_adapter.py 194a88ec…`、`frontend/src/reader/ReaderWorkspace.tsx b8df87e2…`、`types.ts d6041c05…`、`reader-interactions.css ce65ac78…`、`literature/api.py d219cd07…`。
+- 包内 sidecar 冻结验收 **18/18 PASS**（未跳过、未放宽任何一项）：health/能力/reader_state/bbox_space/overlay 与过期 409/本地折叠受理与完成/作业声明本地来源/layers 结构/brief 逐字与 evidence 合法/上游 fold.markdown/未绑定问答 400/空 chat/无效 stop 400/事实来源哈希未变/阅读层落 reader/。另在隔离副本直接执行包内 sidecar，确认携带本轮新代码：`GET /reader/state.section_index` 返回 S1（id/title/block_id/page_index/unit_ids/foldable）、`roles.fold` 含 binding/effective/model_source/origin/problem/role/source、`GET /model-services/roles/state → 200`。
+- 启动结果：`open launcher/Literature.app` 后进程为 `launcher/Literature.app/Contents/MacOS/literature`（pid 40013）与其 sidecar（40019/40021），sidecar 监听 `127.0.0.1:62113`；`/health` → `status=ok`、`version=0.1.0`、`runtime_revision=1efb23d770f288375b60`、26 项能力含 `reader_v1/reader_v2/reader_chat_v1/reader_roles_v1`。`~/Library/Logs/Literature/sidecar.log` 本次启动段（自 `Uvicorn running …:62113` 起）**0 条 ERROR/Traceback**，唯一非 2xx 为 `POST /mineru/token/check → 400`（未配置 MinerU Token，预期）。应用已实际拉取真实库只读数据（`GET /projects`、`/document`、`/translations/zh-CN`、`/model-services`、`/ocr/tasks`、`/parse/backends` 均 200），系统侧无 Literature 崩溃报告（DiagnosticReports 无匹配）；仅出现 macOS AppIntents/`linkd.autoShortcut` XPC 噪声（adhoc 应用系统级常见，非本应用错误）。
+- 未验边界（不得表述为已验）：逐元素真窗口点验（AX 无窗口信息、录屏权限缺失，只到「进程为 Foreground + WebKit XPC 活跃 + sidecar 正常服务页面请求」）；真实付费整书折叠与费用、多轮上下文质量；真机鼠标拖拽划词；干净机器安装与 Developer ID/公证。窗口保持打开供用户试用，未回滚。
+- 本轮独立验收记录（由 Lead/tester 出具，不由安装动作代偿）：源码 pytest **773 passed / 0 failed**、阅读器生产 UI **42/42**、章级 AI UI **24/24**（complete_calls 4）、设置 **9/9**、并发 **6/6**；真实外部模型仅小样本（原文单次语义折叠 + 目标短层派生，source 4317 in/1141 out、derive 2581 in/1510 out、reasoning 0），预算约束为「一次 AI 折叠只驱动一个 target controller，source 命中缓存则 0 调用，禁止按 locale 各跑一遍全文」。
+
+## 2026-10-25 · 真机反馈修复、全局审计与 TextFold 源文单次折叠重审（进行中）
+状态：**已由同日条目「候选客户端安装与真机启动（本轮交付收口）」收口**（源码 773/0、UI 42/42、章级 AI 24/24、设置 9/9、并发 6/6 已独立过，包内 18/18，已安装并启动）；本条目保留沿途事实，其“未构建/未替换”描述已过期。
+
+- 用户真实截图暴露聊天模型菜单被截、设置模型行布局混乱；另要求五个层级原件持续跟随、原译悬停联动、点击整段直接显示高亮/笔记/追问条，并每次点击将原件 bbox 垂直居中。随后授权全 app 功能/UI/交互审计，不限原四项。
+- 执行渠道均为 Orca Worker：原 developer 负责 ReaderWorkspace、API、模型配置及全 app 接线；designer 负责设置/模型菜单/共享阅读样式；tester 独立复现与回归；用户新设 developer-2 专责 reader.py、TextFold adapter/vendor 与新 fold controller。不并行覆盖归属文件，暂不打包安装。
+- 用户指出真实 AI 折叠体验并未完成，Lead 对照上游固定源码及本机 TextFold.app 源码确认：已有 vendor/小样本不代表完整迁移；首次自动 local 生成使 generated=true 后隐藏 AI 入口，fold 还可能误用 chatBinding。新核心必须常驻 AI 生成/升级/重生成入口、本地预览不算 AI 成品、使用真实 reader_fold effective 绑定。
+- 用户新增预算硬约束：已有全文译文只读复用，禁止重新运行 TextFold 全文翻译，也禁止 source/target 各发一份全文。Lead 实查过渡 trans_prompt 枚举完整译文句再送模型，虽不返回全文仍浪费输入；已要求替换为 source 单次语义折叠→仅短层目标语言派生。稳定 block 不是句对齐证明，缺少真实句级映射时明确段落/派生译句身份，不伪逐字复用。独立预算测试曾有两项失败，新流程未终验。
+- 独立核心验收发现失败章 fallback 被缓存而不补齐、local 重跑覆盖有效 AI、原译 evidence 漂移；均交专项 worker 修。期间 reader.py 语法错与 adapter 导入不一致曾阻断联调，现 Lead py_compile 已通过；不能把在途旧版本测试通过混作当前终态。
+- 原 developer 修复 App 同项目解析完成后重开不重拉（隔离 3/3），补页面 load 代次/切语种清旧层；改善 422 字段提示、全局数字键、整段标记换色不重复创建。联动自测 15/15 不代偿 tester 的五层矩阵；tester 更正早先 570px 的二维测量，垂直中心距 2px、重复 click 和 follow 关时单次定位已过，但连续文字滚动五层 origin.scrollTop=0 尚待闭环。
+- 角色配置审计发现 PUT 请求 schema 漏 reader_* 导致保存被静默忽略，已补；新全局 role_states 区分 binding（保存值）与 effective（生效值）、origin/source/problem。tester 又发现空 model 被写成首模型、fold/chat 解析不同源，交原 developer 修后待独立回归。设置改读真实全局状态，不能用空值猜继承。
+- designer 将 picker portal 至 body 并重排设置；独立场景出现 block bar→chat picker 挂起，designer 后续自测 9/9 报已修 rAF 节流、位置去重与列表滚动反馈。Lead 实查当前 ModelPicker SHA256 452310ad4b435bea93421eb0fd5233f1651d5c82359061a5e07ee5dd547fde78；ReaderSettings 8ee0831a3c480b29f8fa6e41aa8d3f1021ff05eb63155509de0798ea32663bda；reader.css b093b4462b1b4eb581e737eb37bd2f7a6a1eb54265f5d8e16b015cc900a80515。设置菜单边缘先前 6/7 仍有失败，已退回冻结，须完整可视/命中与挂起复验通过，不留待下一轮。
+- 当前剩余：core 实际浏览器点击→源文 AI 多层产物→目标短层无双份全文→刷新/缓存/失败补齐真实闭环；UI 菜单、全设置配置和五层联动独立回归；再统一冻结、包内 sidecar 与真实 Tauri 窗口点验。旧安装包仍运行，不因这次研发改动自动换包。
+
+- **阶段独立验收（当前核心）**：reader.py SHA256 `a61446842a25e08e054f2648c4bc2e2000afc06ee87c1c63006b69c440d60691`，adapter `194a88ecd3fbcff58eaff3528c3237dc2ccfd6a2e7837ad7c9ffc81d50c59d43`，hook `5c4fa2f7b1c1128222e101d30563cde1f92a184d89c2a7ee7b1dd4407e1bf7f4`。tester 独立 773/0，20 项严格预算/生命周期/并发测试通过。同节 source+target 并发限定 S1、延时重叠后仅一次 source 调用，S2 无调用；owner 持久化成功再唤醒等待者。派生证据少/多均整段拒绝、不裁源 evidence，有数量一致对照。source/target 内容与模型不同不错误复用。
+- **持久化争议更正**：tester 曾将 clear 之后、未重建前的空层断言误报为 F4。Lead 亲读测试纠正顺序后，独立验证初生成→落盘→clear→重建→新 store 读回→再次刷新零调用全部通过；该错误证据撤回，不记未闭环产品缺陷。single-flight 旧测试也曾对两章全文总调用断言一次，现改为精确单节验证。脚本化 provider 只证明协议，不冒充真实语义质量。
+- **真实核心两阶段样本**：developer-2 在 S9 实质章 The Death of the Dharma（11 units、7723 字正文）执行原文 fold input4317/output1141、target derive input2581/output1510，reasoning 均0；target 仅短产物/选证据/有限术语，未含整章译文，已有 translation.json 不改。展示真实非截句转写及 derived brief；不许外推固定省半成本、整书质量。样本走产品既有 thinking 缓存，旧高 reasoning 样本因脚本绕过产品策略已更正。
+- **菜单证据更正与当前设置**：所谓产品挂起最后由 tester 判定为 runner 向 evaluate 传 Node 闭包的脚本错误，撤回产品挂起归因；picker rAF/位置去重作为防御优化保留。Lead 首次读取 settings-models-fixed/settings-reader-fixed 两张为首页，不能证明设置；后续 settings-reader-picker-open-1440.png 已亲见真实设置与完整 portal。Esc 连关设置确属交互问题，designer 已补最上层 Esc 消费与焦点恢复；配置缺 roleState 仅显示加载/暂不可用不猜继承。最新 ReaderSettings `5bc946fb…` / ModelPicker `42972483…` 尚待 tester 独立完整 UI 回归。
+
+## 2026-10-25 · 用户授权安装阅读器客户端并启动点验
+状态：已安装 / Orca Worker developer 核验已验包字节、签名与实际运行健康检查 / 真实 macOS 窗口 AX 与截图点验三栏、五层、设置阅读模型 / 未发付费模型请求 / 真机拖拽划词及客户端内真实聊天未验。
+
+- 用户明确要求「安装看看」，撤销上一阶段不安装/不启动限制。由 Orca Worker developer 执行安装、备份与启动；安装前确认无客户端及 sidecar 进程，不强杀、不运行中替换。使用 scripts/setup_macos_launcher.sh --app-only 将最终验收包装入 launcher/Literature.app；未改旧 Litera 或 Cindy。
+- 持久旧包备份 launcher/.rollback-Literature-20261025103517.app，签名校验通过。安装主二进制 SHA256 `1f7601953a1bf6dc0f7f6a27793d9a5292a1db4ce6b6cc2a301a3f0572a5abe9`；sidecar SHA256 `241927c4cacb1d60598e88cb1b8931e2a510f3fef0d8fc4baa7bfc5f39bdf692`、48744720 B；JS index-jZBi_Goc.js / CSS index-DS-1nv-q.css，与已验源包和 manifest 一致，安装后 codesign --verify --deep --strict 通过。
+- 已从 launcher 正常启动，实际 app 与 sidecar 进程路径均在该安装包内；/health status=ok、revision=9089521e5ebe7bed8f50，reader_v1/v2、reader_chat_v1、reader_roles_v1 均存在。本次启动完成后日志无 ERROR/Traceback；MinerU Token 未配置的检查 400 为预期行为，不冒充云端就绪。
+- developer 通过真实窗口 AX/截图检查：阅读页三栏原件 PDF/原文/中文译文可见，三独立选框、目录/Aa/AI 问答及五档浮条存在；设置→阅读含折叠默认模型/对话默认模型，picker 按服务商分组。窗口保持打开供用户试用。启动自动生成 source/zh 本地摘句层，mode=local、无 reader_layers/reader_chat 计费；只读点击产生 reader/overlay.json 偏好写入属预期交互层，不改 raw/document/translation。
+- **已知非阻断 UI 缺陷**：生产旧配置 reader 角色 unset 时，后端实际继承 translation，/reader/state.roles 已给 source=inherited_translation 与有效绑定；但 AI 面板及阅读设置仍显示未绑定/未选择，未呈现真实继承来源。功能路由可用，显示尚待修复，不能声称所有界面细节已验无缺陷。
+- 未验：真实鼠标拖拽划词、真实客户端付费对话、干净机器/Developer ID 公证。回滚须先正常退出，保留新版后再将持久备份改回 launcher/Literature.app；本轮未执行回滚。
+
+## 2026-10-25 · 阅读器生产集成与审查产物收口
+状态：已编码 / Orca Worker tester 独立全量 pytest 750 passed、冻结版本生产 UI 40/40、最终包内 sidecar 18/18 / 类型与生产构建通过 / 真实外部服务小样本已验收 / Lead 独立复核最终签名与字节标识 / 审查包已构建，未安装、未启动新客户端。
+
+- 用户已授权从交互原型进入端到端落地。Orca Worker developer 负责后端、模型角色与打包，designer 负责真实 React 阅读前端，tester 独立验证；未使用 native subagent。保留全部既有未提交改动与旧安装包。
+- 实现真实 PDF/MinerU bbox 与原译块联动、三独立栏开关与调宽、图表/脚注/缺译回退、TextFold 五层、独立高亮笔记、统一持久化对话。引用为一次性快照，译文引用回溯原文证据；按条冻结服务商与模型；停止、重试与跨项目响应隔离由真实后端及 hook 接线，无 token 级伪流式。交互写入 reader/，原件/raw/canonical/translation 保持只读。
+- TextFold 固定提交 2182d9a8662e69790850021dd8c965d0398777c4，复用 tokens/ladder/fold/llm 与抽取的检索核心，许可及修改见 third_party/textfold/VENDOR.md。模型传输复用既有 Keychain、预算账本、HTTP 显式同意与 TLS 校验；增加 beautifulsoup4 与正式分发声明。
+- 修复并发批注 CAS（409）、来源误标、重复批注 ID、纯笔记与无效引用处理、多语言折叠去重、角色旧配置继承。只有 unset 继承 translation，显式清空或失效绑定在提交期拒绝；折叠/对话各有独立角色，聊天可按服务商分组切模型。
+- 真实服务小样本：原文两节 44 AI + 18 local unit，译文两节 58 AI + 4 local unit；brief 逐字、evidence 0 起合法、事实层哈希不变。developer 新增持久 chat 单次真实请求完成、原文证据与消息落盘；复用能力探测后该服务关思考样本 reasoning 0%，未知费用保持 null。后续 tester 真实多轮小样本已验证按条换模型、历史恢复、usage 与重试；未外推整书质量/成本或多轮上下文质量。
+- 本轮不引入 embedding，复用 TextFold IDF 词面召回及译文词袋；抽词回检不代表自然语义准确率，9 题人工改写的 7/9 仅探索结果。tester 的另一份 0/4 目标选择存在待复核分歧，按可回答证据独立判断，不以同关键词/同章替代命中。
+- Lead 复查发现两次验收面错位：源码窄屏布局最初缺单栏逻辑，修复后 developer 报告 320/390/768 内部溢出归零；其 07:42 包之后 ReaderWorkspace 在 07:57:33 又有更新，旧包不能作为最终证据，已要求按冻结源码重新打包并由 tester 核对同一产物。designer 的 24/24 来自 vite dev 夹具，不能代替生产包完整聊天验收。
+- **独立验收发现并闭环**：tester 初次完整生产 UI 37/40，三缺陷分别为 hook 把模型放在 binding 而后端需要顶层 service_id/model、stopped 缺重试按钮、L1 缺译标记丢失。现已修复、连续两轮 40/40，最终冻结版再跑 40/40；请求 DTO extra=forbid 防字段漂移静默回落。真实模型还发现响应名 Qwen 不能用来路由重试，binding.model 现保留请求模型，binding.actual 仅展示；真实重试已成功。译文选段的 srcText 与原文 block 逐字核对成立，旧 quote_evidence_is_source=false 是临时探针硬编码别书关键词的误报，正式判据已修。
+- **唯一最终审查包（09:02）**：src-tauri/target/release/bundle/macos/Literature.app；main SHA256 `1f7601953a1bf6dc0f7f6a27793d9a5292a1db4ce6b6cc2a301a3f0572a5abe9`；包内 sidecar SHA256 `241927c4cacb1d60598e88cb1b8931e2a510f3fef0d8fc4baa7bfc5f39bdf692`、48744720 B、revision `9089521e5ebe7bed8f50`，与 manifest 一致；JS index-jZBi_Goc.js SHA256 `6bb1306f2ee3429f7c658c6d67fadfe163f2a67e1b7210c73e1c22ca263e4b65`；CSS index-DS-1nv-q.css SHA256 `bb475e8d9a15ec9d9a92a720e80b25519a0435e74397deb2ac6f380d110ca632`。ReaderWorkspace SHA256 `ae70b9288fa68fcb017b52f0f029ba3c7e8c0aab646260b6916df6a9c6dd0a21`。tester 与 Lead 分别校验签名及字节标识，未再次重建或安装。
+- **证据边界**：Tauri 资源内嵌主二进制，tester 未直接提取包内 JS 运行；UI 用给定 SHA256 逐字节一致的 dist + 真实 API 隔离项目运行，主二进制 strings 核对两资产标识；bundle 内 sidecar 则直接执行 18/18。40 项包含真实 UI 停止/重试、按条冻结引用与模型、A→B 迟到响应隔离、服务名搜索与禁用项键盘守卫；跨服务商路由为受控 provider 证据。全 app 五路由×五宽度溢出检查通过。
+- **真实外部服务新增**：tester 的 tests/manual/reader_real_chat_evidence_check.py 验证译文引用→原文证据、两条真实模型请求及历史/usage/事实哈希；qwen3.8-flash-next 与 deepseek-v4.1-flash 成功，deepseek-v4-flash 网关无渠道如实 model_not_found，不冒充应用成功；无价格 cost=null。同一服务换模型真实通过，真实跨服务商因只有一家配置未测。
+- **剩余边界**：未安装/启动新客户端，launcher 旧版未动；真实鼠标拖拽划词需真机点验（headless 流程使用合成 Selection + 真实处理器），>50 节整书折叠耗时/费用、多轮上下文质量、干净机器与公证未验。停止消息重复显示一次「已停止」为已知非阻断视觉冗余，本轮冻结保留。唯一后端现状为 docs/READER_BACKEND.md，唯一界面现状为 docs/ui/reader-design.md；当前没有未闭环阻断缺陷。
+
+## 2026-10-25 · 阅读原型问答面板圆角留白与角色标签精简
+状态：已完成独立原型视觉微调 / Orca Worker designer 实现、Lead 独立浏览器复跑 27/27 通过，0 脚本错误 / 已更新同一 OpenDesign 稿件 / 未打包客户端、未真实服务验收。
+
+- 用户要求问答窗口增加圆角、上下留白，并去除消息内「你/AI」身份标签。桌面面板上下右各 16px、圆角 18px；窄屏边距 10px、圆角 16px；内部裁切圆角、聊天历史可滚、底部输入与引用保留。气泡继续左回答/右提问，ARIA 保留身份语义；Lead 去除逐条演示徽章，顶部统一说明模拟回答。
+- `tmp/reader-rounded-check.cjs` 独立复跑 27/27（`tmp/reader-review/rounded-delivery-result.json`），覆盖 1440×900、390×844、320×640 的面板几何与边距、发送/关闭/引用按钮可达、长聊天滚动、一次性引用清空及草稿保留；截图 `tmp/reader-review/rounded-delivery/` 已目视查看。以 expectedRevision 校验，通过 `opendesign_update` 保存原会话同一稿。唯一现状设计仍为 `docs/ui/reader-design.md`，阅读器其他交互及原型隔离边界保持。
+
+## 2026-10-25 · 阅读原型统一 AI 对话与一次性可折叠选段引用
+状态：已完成独立原型修订 / Orca Worker designer 实现，Lead 独立浏览器复跑 27/27 通过、0 脚本错误；Worker 报告核心交互回归 38/38 / 已通过 OpenDesign 更新同一稿件 / 未接真实模型或后端、未打包客户端。
+
+- **用户确定交互**：去除「全文问答/选段追问」两 tab，合并为统一对话。选段附在输入框上方，可关闭；后续补充明确引用为一次性：发送的问题下方附此次引用（默认部分折叠，可展开与回原位置），提交后清空待发送引用，下一问面向全文；继续追问须再点阅读器高亮的「追问」。历史引用展开不激活新引用，不删除原高亮/笔记。
+- **实现边界**：唯一输入上下文为可空 activeQuote；每次发送冻结引用快照，异步演示回答与历史消息使用该快照，清除/替换输入引用不串台。译文引用显示选中译句并标关联原文，实际证据取原文 block，无句级对齐不冒充精确回译；空问题不消费引用，关闭引用/侧栏不丢草稿。输入框占位随有无引用切换。
+- **验收与 Lead 补充**：`tmp/reader-unified-chat-check.cjs` 独立复跑最终 27/27（`tmp/reader-review/unified-release-result.json`），覆盖一次性生命周期、历史引用回看、再点高亮重新附引、原译引用证据、320/390 输入区。Lead 目视截图后补历史引用的高对比阅读底色与选段/整段证据区分；追加标题引用复现 `Cannot read properties of undefined (reading 'point')`，改为无预写要点时明确返回演示边界与来源，复验 `tmp/reader-review/quote-extra.cjs` 无脚本错误、正常生成用户与回答两消息。
+- **交付**：暂存 `tmp/reader-unified-chat.html` 经 expectedRevision 校验用 `opendesign_update` 保存原会话同一稿；截图 `tmp/reader-review/unified-release/`。唯一现状设计仍 `docs/ui/reader-design.md`；真实后端仅预留每条请求携带冻结 context 的边界，尚未实施。引用/聊天历史当前仅前端内存；批注仍独立 localStorage，不写回原始文件。
+
+## 2026-10-25 · 阅读原型高亮浮窗补齐笔记/移除/换色/追问
+状态：已完成独立原型修订 / Orca Worker designer 实现、Lead 复查；高亮操作浏览器 27/27 + Lead 补充 6/6 通过，0 脚本错误；Worker 报告核心交互回归 38/38 / 已更新同一 OpenDesign 稿件 / 未接真实后端、未打包客户端。
+
+- **需求与实现**：用户在稿件批注要求点击已有高亮即可笔记、移除高亮、替换颜色、追问。紧凑浮窗保留笔记编辑保存，新增五色替换与追问入口，无需重新划词；颜色改变只修改当前记录，保留 ID/字符范围/quote/笔记，对照段落标记和列表同步。追问从目标高亮取原文 block 证据，不被之前其他选段污染、不自动发送。
+- **移除语义**：有笔记时摘除高亮但保留纯笔记记录与页边入口；无笔记时删除整条。Lead 补充在移除/追问前保留当前输入草稿，避免未点保存即丢失；色块改为原生按钮（Enter/Space 生效），添加可见「替换颜色」标签。
+- **证据**：`tmp/reader-hl-actions-check.cjs` 独立复跑 27/27（`tmp/reader-review/highlight-delivery-result.json`，含原译追问、同记录换色刷新、320/390 浮窗边界）；`tmp/reader-review/hl-supplement.cjs` 6/6（真正同段两记录互不影响、键盘换色与草稿保留）。桌面/手机截图 `tmp/reader-review/highlight-delivery/`。以 expectedRevision 校验，经 `opendesign_update` 保存同一稿 `opendesign-projects/73279d59-c5cf-4681-b7f9-436148a40b47/design.html`。
+- **边界**：整体阅读器、三独立栏开关、TextFold 浮条和原型隔离保持；批注仍仅 localStorage、问答仍为标注演示。唯一现状设计仍 `docs/ui/reader-design.md`，未改真实项目文档或业务代码。
+
+## 2026-10-25 · 阅读原型三选框与 TextFold 源码适配优化
+状态：已完成独立原型修订 / Orca Worker designer 制作，Lead 实际阅读上游源码并复查；浏览器 38/38 + 交付补充 6/6 通过 / 已通过 OpenDesign 更新同一稿件 / 未接真实后端与模型、未集成或打包客户端、未由用户点验。
+
+- **用户校准**：阅读器整体已认可，只优化 TextFold 相关部分，并将布局下拉换成【原件】【原文】【译文】三个独立选框。后续方向是迁移适配 TextFold 核心能力以便后端对接，本轮不授权后端迁移或整体重做。
+- **源码依据**：Lead 读取上游 `textfold/web/reader.js`（blob `fe109727…`）、`reader.css`（`f423f7bb…`）、`template.html`、`docs/format.md` 与 LICENSE/NOTICE。部分 CSS 注释沿用旧层名，以 reader.js 顶部当前层语义为准。GitHub 插件大文件截断且落盘失败后，经已返回的 raw URL 下载本地调研副本（`tmp/textfold-reference/`）。
+- **改动**：三个真实 checkbox 显隐对应栏并保留调宽；窄屏选中集合与单栏 tab 一致。五层下拉改为底部拖动浮条，复用/适配轨道与滑块、指针捕获/阈值、键盘与滚轮逻辑；折叠内容为连续正文流（粗体主张+灰理由/脊线/主题卡），局部展开原译同步；批注改用字符偏移+quote 上下文，支持重复词与跨内联节点的准确刷新恢复，页边标记随折叠保留。整体阅读结构、图表、目录、Aa、双向联动和原文证据问答保留。
+- **交付与证据**：暂存 `tmp/reader-three-toggle.html` 经 Lead `opendesign_update` 保存到原绑定稿 `opendesign-projects/73279d59-c5cf-4681-b7f9-436148a40b47/design.html`；`tmp/reader-final-check.cjs` 独立复跑 38/38（`tmp/reader-review/textfold-delivery-result.json`），0 脚本错误；Lead 补键盘 Enter/Space、许可内嵌与底部避让后以 `tmp/reader-review/delivery-check.cjs` 验证 6/6。默认桌面、中文要点、320/390/768 截图位于 `tmp/reader-review/delivery-*.png`，已目视查看。
+- **许可与边界**：改编代码保留 TextFold（Copyright 2026 Xia Chen）来源、修改说明及完整 Apache-2.0 LICENSE/NOTICE（内嵌演示说明，单 HTML 不依赖临时许可文件）；不带入上游字体/vendor/论文。动画仅块级 FLIP，未移植词级连续 morph/stage 或双指捏合；AI 与原件继续为显式演示，批注仅 localStorage，无原始数据写回。唯一现状文档仍 `docs/ui/reader-design.md`。
+
+## 2026-10-25 · 三栏对照阅读器交互原型与两轮设计复核
+状态：已完成独立交互原型 / Orca Worker designer 制作、Lead 两轮复核并独立复跑浏览器 63/63 通过，0 脚本错误 / 未接真实文档与模型、未集成客户端、未打包、未由用户点验。
+
+- **需求与范围**：用户要求先制作【原件—原文—译文】可开关/调宽/组合的阅读原型，融合 MinerU 页块对应、同步阅读、Apple Books 式高亮笔记、TextFold 五层与原文问答。用户随后明确要求由 Orca Worker 完成设计并由 Lead 查验指导优化。
+- **交付**：当前会话绑定稿 `opendesign-projects/73279d59-c5cf-4681-b7f9-436148a40b47/design.html`（本地独立 HTML，无 CDN）；唯一现状设计文档 `docs/ui/reader-design.md`。采用自编双语样本与自绘插图；原件为明确标注的示意版面，AI 概括/回答为演示文案；不构成真实 PDF/MinerU/模型验收。
+- **主要交互**：七种栏组合、相邻栏调宽与默认布局恢复；原页/原译块定位与双向滚动；两个独立联动开关；全文→原句摘取→要点及理由→章节主线→主题卡五层，原译同步并可局部展开；划词高亮、笔记编辑删除、列表回跳、折叠批注标记；选译文提问也回溯原文证据，引用可回跳；Aa 字号/行距/字体/外观与专注模式、目录、图表/脚注/缺译回退。
+- **Lead 复核修正**：初版存在正文空白、五层误做标题树、联动开关未接线、中栏隐藏无法调宽等问题，已交 Worker 修复。首轮 52 项通过仍漏掉窄屏栏宽为 0（截图空白）、拖动 +120 导致宽度变化 +467、开关耦合；第二轮修复像素权重/窄屏 flex/相邻可见栏分隔条，并补真实 rect、拖动误差、开关行为断言。不能以无脚本错误或 class 存在替代可用性验收。
+- **最终证据**：`tmp/reader-proto-check.cjs`（失败非零退出）；Lead 独立复跑结果 `tmp/reader-review/round2-result.json`，63/63、0 脚本错误、退出码 0；截图 `tmp/reader-review/round2/`（默认桌面、拖动后、主题卡、320/390 手机）。Lead 已查看桌面与手机截图，正文真实可见；768px 窄屏切栏亦有几何检查。
+- **隔离与边界**：批注与阅读偏好仅存浏览器独立 `literature-reader-proto:` localStorage，未写回原件/raw/canonical/译文。跨语言标注为对应段落级，未宣称逐词对齐；仅支持同段划词。真实数据接入、真实折叠生成/问答、后端独立阅读层持久化与客户端集成尚未开始。业务代码及已有未提交改动均保留。
+
+
+
+## 2026-10-25 · UI v3 legacy 瘦身：styles.css 全量收口 + mineru.css 批次 1/2 剩余工单执行
+状态：已编码 / tsc --noEmit 与 Vite 生产构建通过 / 隔离真实浏览器三套运行完成，相关断言通过，2 项历史断言失败（parse_ui 的「旧 #/p/<id>/export 回退」「主导航不暴露导出标签」为导出模块 2026-10-17 重新引入后的陈旧断言，与本轮无关）/ 截图像素级对照确认零视觉变化 / **未打包安装、未真机验收、未提交 git**。
+
+需求（Lead 指派）：新功能建设完成后，完成前端的优化和开发。执行对象即 `docs/ui/legacy-slim-plan.md` 中剩余批次：批次 1 剩余 safe_delete + 批次 2 partial_delete 迁移 + E.4 遮罩令牌。
+
+- **styles.css 全量收口（25 行 → 16 行）**：逐条对照覆盖层级叠（载入顺序 styles → mineru → … → theme → base → shell → intake → app-settings）删除已证死规则：无 TSX 元素的 `.topbar` 四条、无元素引用的 `.lock` / `.translation-reader` 两条 / `.bstate.s-{translated,refined,edited,locked,stale}`（`STATE_META.cls` 只产出 idle/act/run/done/lock/fail/stale/synced，且这些状态色已由 reading.css `.rdg-root .bstate.s-*` 以更高优先级接管）；被后层完整覆盖的 `:root` 四属性（base.css body 已设 font-family/color/background/font-synthesis）、`.review-grid`/`.workspace`/`.sidebar,.inspector` 三条/`.block-button`/`.toc-row`/`.pdf-scroll`/`.block-card` 底座/`.reader-block` 底座与 `.selected` 背景/`.intake-brand-group .intake-brand`/`.project-topbar-title` 两条/`.home-topbar.project-topbar nav` 两条；组合选择器收窄（`.local-resource-actions` 移除、`.local-resources code` 整条删）。仍生效属性按同值迁移：`.review-grid` 的 `display:grid` 与 `.bbox` 的 `position:absolute/pointer-events` 归 review.css；`.reader-block` 的 16px/1.78/400/min-height:52px 归 reading.css；`.project-topbar-right`/`.settings-button` 的 `justify-self` 归 shell.css；`.export-result code` 的 `margin:8px 0` 归 app-settings.css；`.bstate`/`.stalenote` 的边框归 reading.css。
+- **mineru.css（282 行 → 174 行）**：删除 `.topbar` 两条、`.bbox` 三条、`.intake-topbar` 全族（除 disabled 光标迁 shell）、`.intake-heading h1`、`.intake-main-column,…` 组合边框条、`.intake-progress-card` 两条、`.file-settings-*` 五条、`.html-format-note`、`.home-topbar nav` 两条、`.empty-note`、`.toc-row` 底座、pdf 族六条（position/inset/pointer-events/display/grid/place-items/background 同值迁 review.css）、`.block-card{cursor}`/`.block-list`/`.source-preview-body/.source-image/.source-frame`/`.preview-notice p`/`.raw-files/.raw-file-row/.raw-preview pre`（同值迁 review.css）、`@media 1120` 与 `@media 900` 内全部已失效覆盖（保留 review-grid/reading-grid/status-steps-panel 三条媒体内规则）、`.split-handle` 三条（同值迁 shell.css）、`.workspace-state h2`、`.settings-button`、`.instant-card` 三条（同值迁 reading.css）、`.glossary-editor textarea`（同值迁 reading.css）、task-picker 五条与 model-role/service/picker/entry-thinking/history-head/history-actions/history-pager/settings.settings-v2/settings-v2 族（同值迁 app-settings.css）、`.intake-head-actions button`/`.intake-pager button`/`.ocr-job-content progress` accent-color/`.token-button` 三条/`.file-selector-button` width/`.intake-file-actions button`/`.intake-brand` justify-self（同值迁 intake.css/shell.css）。`:root` 只删 color/background 两个已被 base.css body 覆盖的属性，`--mineru-*` 变量保留（仍被引用）。
+- **E.4**：shell.css/resource.css 的 `.modal-backdrop` 背景 `rgba(0,0,0,.32)` → `var(--scrim)`（浅色模式同值；暗色模式恢复令牌本意的 0.55）。
+- **边界保留（批次 3，待拍板）**：两条全局 `button:hover`（disabled 悬停描边边缘态）、`.project-close-button:hover`（同因）、styles.css `.bstate.s-failed`（ReadingPanels 字面量使用）、`.card-actions`/`.block-card.selected` 等仍生效的 legacy 色、`.review-grid`/`.reading-grid` 媒体列宽（SplitPane 内联列宽的兑底）、`@media 900` 中 intake 断点与 intake.css 899 断点之间的 1px 窗口（理论可达但客户端 minWidth 1024 不可达）。
+- **像素级验收**：改动前后同流程截图逐像素 diff；发现并修复 1 个真实回归——border 迁移误把 `.chip` 一起加边（内容盒下每枚 +2px，chips 行整体右移），已收窄回仅 `.bstate`；复验后全部剩余差异均落在两处已知非确定性区域（顶栏计时文本、块状态时序徽标的亚像素 AA），同构建两次运行复现同等差异，HEAD 基线对照证实与本次改动无关。
+- **审计指标（scripts/ui_audit.py，改动前 → 改动后）**：硬编码色 263 → 155（styles 78→38、mineru 180→81）；圆角违规 39 → 27；字号 <11px 13 → 9；非 4pt 间距 136 → 82。迁移使部分同值 hex 进入 intake/app-settings/review/reading（+6/+18/+7/+2），属批次 2 预期，待批次 3 令牌化时一并收口。
+- **边界**：后端未改；未动并行开发中的本地解析引擎文件（App.tsx/main.tsx/parse-engine.css 等）；全量 pytest 不适用（本轮仅 CSS）；未打包安装客户端，未由用户真机验收。
+
+
+## 2026-10-25 · 修复安装包两项真实故障（冻结 TLS 失效 / 本地来源不生效）+ 来源偏好回归
+状态：已编码 / 全量 pytest 686 passed（含 tester 新增 `tests/test_tls_environment.py` 9 项）/ tsc + Vite 通过 / 新包已重建安装 / 冻结 sidecar 既有冒烟 15/15 + 引擎冻结验收 15/15 / 隔离真实浏览器：来源偏好 11/11、引擎卡 14/14 / **真实客户端**：设置与首页均显示本机来源、用户原先失败的云端任务在新包下自动续跑完成；文件选择面板受桌面驱动限制未能程序化点验（见边界）。
+
+用户报告「安装包实际不能用」：① 在线连接检查失败；② 配置本地引擎后仍不能用。逐项定位并修复：
+
+- **根因 1（两者共同）：构建用 Python 的 stdlib 被上游工具打过补丁，冻结后 CA 加载失败**。日志两处同一堆栈 `httpx/_config.py:40 create_ssl_context → ssl.py:714 → ssl.py:442 → FileNotFoundError [Errno 2]`（发生在发请求之前）；`/mineru/token/check` 500，任务 `58e8ca23…` 在 `MinerUClient.__init__` 同处失败。真因：仓库 `.venv` 的 Python 是 Codex 运行时解释器，其 `ssl.py` 的 `SSLContext.__new__` 额外加载同目录 `codex-rejected-cas.pem`；冻结后该文件不在包内 → 所有 HTTPS 失败。**修复**：用 uv（项目自带 0.13.5 + sha256）安装托管 CPython **3.12.15**（ssl.py 未打补丁）建独立构建 venv，用它重打 sidecar + Tauri 包（不在系统 Python 上动手、不动 TextFold）。
+- **运行时健壮化（不只靠换构建环境）**：新增 `normalize_tls_environment()`（`providers.py`）在 `create_app()` 启动时剔除指向不存在路径的 `SSL_CERT_FILE/SSL_CERT_DIR/REQUESTS_CA_BUNDLE/CURL_CA_BUNDLE`（保留存在的自定义 CA；**证书校验始终开启，绝不 verify=False**，并写 warning 日志）；`MinerUClient`（API + 下载两条客户端路径）、模型服务客户端、`/mineru/token/check` 全部把 TLS 初始化失败转成可操作中文错误（不再 500，`code="tls_context"`）。
+- **根因 2：设置里的本地来源没有贯通到导入页**。证据：失败任务 `backend_id=mineru_remote`、`engine_source="remote"`，而 `parse-engine.json` 已是 `external_cli`；导入页初始 `useState` 硬编码云端，首页状态条只显示云端 Token 状态。**修复**：导入页来源默认跟随已配置来源（本地就绪→默认本机）；顶部状态条并列显示「本机解析就绪 · 版本/未就绪原因」与云端状态；云端无 Token 时提示可切本机；本地未就绪时给原因并跳设置；本地模式隐藏不适用的云端参数（解析模型/语言包/表格公式开关/额外输出格式）。
+- **tester 复核问题（显式云端重启后被本地覆盖）**：`localStorage` 有效值（`mineru_remote`/`mineru_local`）即视为用户显式选择——初始 `backendTouchedRef` 据此为 true，`refreshLocalEngine` 不再覆盖；仅完全无有效记录时才按「本地可用→local，否则 remote」；显式 local 失效只提示不可用、不静默转云端；异常/非法值按无记录处理并清理；用 ref 规避首次挂载异步竞态。
+- **回归**：`tests/manual/parse_source_pref_browser_check.py` + `.cjs`（真实生产构建前端 + 真实 API，每场景独立 browser context）11/11——无记录+本地可用→本机；显式云端→保持云端（两次重新挂载仍云端）；显式本机→保持本机；非法记录→回落默认并清理；显式本机但本地不可用→保持本机+明确提示；0 脚本错误。另有 `tests/test_mineru_local.py` 内 TLS 环境清理/可操作错误/真实 API 入口 4xx-502/无 Token 本地建任务 4 项回归。
+- **打包与冻结验收**：新包 sidecar `runtime_revision 86db0cbeeac5c3577465` / sha256 `0f283c23…d903c2e` / 48407328 字节（与 manifest、bundle 内嵌副本一致）；内嵌前端 `assets/index-DwFX3It7.js`；adhoc 签名校验通过。冻结验收在**主动注入失效 `SSL_CERT_FILE`/`SSL_CERT_DIR`** 的继承环境下完成：真实在线 `/mineru/token/check` 返回 200 `connected`；用本机 TextFold 引擎（4.0.10）端到端解析短样本 completed、canonical 2 pages、raw 校验无错误；sidecar 日志记录 `Ignored unusable TLS trust-store env vars: SSL_CERT_FILE, SSL_CERT_DIR`。
+- **真实客户端证据**：安装后启动 `launcher/Literature.app`，窗口状态条显示「本机解析就绪 · 本地 CLI 引擎（外部安装 4.0.10）」，解析来源下拉为「本机解析 · 可用」并提示「文件不出本机」；用户原先因 TLS 失败而失败的任务 `58e8ca23…`（12 页，云端）在新包下恢复并 **completed**，后续任务同样完成。
+- **边界（如实记录）**：① 文件选择面板（NSOpenPanel）在本机桌面驱动下 AX 不可解析、键盘输入被拒，未能程序化完成「点选文件 → 开始解析」这一步真实点击；UI 提交路径由真实浏览器验收（同一生产构建前端 + 真实 API）与冻结 sidecar 双次真实解析覆盖；② managed 全新下载安装仍未真实执行；③ 未提交 git；旧包备份 `launcher/.rollback-Literature-20261025050116.app`（更早备份 `…044309`）。
+
+## 2026-10-25 · 本地 MinerU 四类接入打包安装（launcher/Literature.app）
+状态：已编码 / 全量 pytest 673 passed + tsc/Vite 通过 / 冻结 sidecar 既有冒烟 15/15 + 新能力补充冻结验收 15/15（含打包后用已有 TextFold 引擎完成短 PDF 真实解析链路）/ 隔离真实浏览器验收 14/14 / **已打包安装（用户授权）**；managed 全新下载安装仍未真实执行，客户端 UI 未由用户真机点验。
+
+- **构建与核验**：按 PACKAGING 环境回退流程——tsc --noEmit + Vite 前端 `index-DxDSNoFa.js` / `index-Zq3OekpU.css`；PyInstaller sidecar（scripts/build_sidecar.py）；Tauri bundle（ms-playwright-go node 1.57.0 + NAPI_RS_NATIVE_LIBRARY_PATH 指向 @tauri-apps+cli-darwin-arm64@2.12.1 + beforeBuildCommand 跳过前端重建）；adhoc `codesign --force --deep --sign -` 后 `--verify --deep --strict` 通过。安装包 sidecar `runtime_revision 344491aeeb59385619a5` / sha256 `506ff76b…d512475` / 47970432 字节，与 `src-tauri/binaries/manifest.json` 及 bundle 内嵌副本一致；`strings` 核对内嵌前端资源名与 `frontend/dist/assets` 一致。旧包备份 `launcher/.rollback-Literature-20261025044309.app`（旧 sidecar `218f508d…`）。安装前确认无运行中客户端/后端进程；未提交 git。
+- **既有冻结冒烟**（tests/manual/frozen_sidecar_check.py）：15/15 PASS（revision/manifest 一致、迁移、任务中心等）。
+- **新能力冻结验收**（新增 tests/manual/frozen_engine_check.py）：15/15 PASS——parse_engine_v1 能力位；GET /parse/engine；/parse/backends 的 mineru_local 动态探测（未安装明确不可用+引导文案）；无效外部路径与公网明文 HTTP 的 select 拒绝（400）；发现并选用本机 TextFold 引擎（mineru 4.0.10，只读探测）；**冻结 sidecar 用外部引擎完成 2 页短 PDF 完整解析链路**（本地后端无 Token → canonical ready、页几何 595×842、raw 封存校验无错误）——证明打包产物能完成派生/规范化，不只源码通过。全部在隔离 runtime/library，不触碰用户生产配置、不触发下载。
+- **安装副本验证**：launcher/Literature.app 内 sidecar 直接启动（隔离 runtime）→ /health revision 一致、parse_engine_v1 在能力位、/parse/engine 可用；验收服务已清理退出，未自动启动长期客户端窗口。
+- **边界（不混写）**：managed 独立下载安装（uv 引导 + ~3.4GB 模型）仍未真实执行（冻结验收只覆盖引擎 API/探测/外部引擎链路）；干净机器全新安装待验；客户端 UI 未由用户真机点验；其他 Worker 的 CSS 改动（styles/mineru 等瘦身）随本包一并交付、未单独验收视觉。
+
+## 2026-10-25 · 解析引擎第二轮复核修复（来源身份冻结/密钥绑定/明文边界/UI 交互）
+状态：已编码 / 全量 pytest 673 passed / tsc --noEmit 与 Vite 生产构建通过 / 隔离真实浏览器验收 14/14 PASS、0 脚本错误 / 非 PDF（HTML+DOCX）真实解析验收通过；managed 全新下载仍未真实执行，客户端 UI 未真机验收。
+
+Lead 复核发现的 7 类问题逐项修复：
+
+- **来源身份完整冻结（修 TOCTOU）**：任务 backend_config 新增 `engine_source_config`——HTTP 规范化 URL / 外部 CLI 的 kit+python+模型路径与版本 / managed 引擎根目录（不含密钥）。`_check_source_snapshot` 逐片比较 kind+identity；`_cli_toolchain(job)`/`_run_http_parse(job)` 一律用冻结配置，执行期不再读全局 selection。同 kind 换地址/换路径 → 明确拒绝；外部应用升级导致冻结 kit 消失 → 明确失败。回归：同 kind 不同 URL 拒绝、identity 含路径版本、冻结 kit 消失拒绝。
+- **HTTP 密钥按地址绑定**：Keychain account = `engine-api-key-<规范化地址摘要>`；`get/save/delete_http_service_key(url)`；probe 不再把旧服务密钥发往新地址（显式 key 参数优先）；`select` 支持 `http_key`——连接验证成功才保存密钥并落 selection，失败两者都不动（不再「先覆盖 key 再 probe」）。回归：A→B 探测不带 A 密钥、验证失败不存密钥不落配置。
+- **明文 HTTP 边界统一（复用 providers 规则）**：新增 `validate_http_endpoint` 复用 `providers._is_loopback_host`——只有精确 localhost、127.0.0.0/8、::1 豁免；`0.0.0.0`/`*.local` 不豁免；userinfo/query/fragment 拒绝；probe 与每次执行前都校验；httpx `follow_redirects=False`，3xx 一律拒绝（防 HTTPS→HTTP 绕过）。回归：边界矩阵用例。
+- **UI 交互修复（ParseEngineCard 重写）**：「切换其他来源」统一草稿表单（URL+密钥+明文同意一次填写、一次「检测并连接」，消除首次连鉴权服务的死路）；allow_plaintext 状态回填；用户编辑中的字段不被轮询覆盖（dirty 标记）；本机发现候选在首次「使用已有安装」入口即可见并一键选用；loadEngine 失败显示可见错误+重试；managed 已安装态新增「修复（重跑幂等安装步骤）」按钮（`install(force=True)`，与解析任务互斥），文案与功能一致。隔离真实浏览器验收 14/14 PASS、0 脚本错误（`tests/manual/engine_ui_browser_check.py` + `engine_ui_check.cjs`：初始 managed→发现 TextFold→一键选用→带密钥首次连接假 v1 服务→断开清密钥→无效路径明确原因→external/http 无卸载修复按钮）。
+- **tier/参数按真实能力**：仅 PDF 传 `--tier standard`（HTTP 同理）；非 PDF/图片由 kit/服务按格式自定（flash-only 强制 flash）。前端本机模式下禁用语言包（自动识别）、表格/公式开关（标准档默认保留）、额外输出格式（不适用），并说明原因；OCR 开关保留（映射 ocr_mode）。真实验证：HTML 与 DOCX 经本机 TextFold 引擎完整链路解析成功（title/paragraph 正确、canonical 生成）。
+- **进程标签隔离**：engine 进程按 install/parse 标签登记；安装取消只终止 install 进程，绝不误杀正在执行的解析进程（回归用例）；启动清理仍清全部遗留。
+- **HTTP 断点恢复边界（如实声明，未宣称实现）**：远端 job_id 只存活在单次执行内；重启后进行中切片重新提交（已完成切片保留、不重复合并），不做远端任务续接——已写入 `docs/LOCAL_MINERU_BACKEND.md` 与代码注释。
+- **附带修复**：`normalize_proxy_environment()` 移入 `create_app()`（原先只在 serve() 入口调用；浏览器开发/测试直接 create_app 时，NO_PROXY 含 `[::1]` 会让首页 token 检查 httpx InvalidURL 500）。
+
+边界：真实 CLI/HTTP 端到端验收沿用第一轮结果；managed 全新下载未真实执行；浏览器验收使用本机 TextFold 候选与内存假 v1 服务（真实服务验收另见第一轮）；未打包安装、未真机验收；未提交 git。
+
+## 2026-10-25 · 解析引擎四类接入：独立安装/已有安装/已有服务（本地 MinerU 实装）
+状态：已编码 / 全量 pytest 通过（新增 `tests/test_mineru_local.py` 24 项）+ tsc --noEmit 与 Vite 生产构建通过 / **真实验收两项：本机已有 CLI 引擎（TextFold 布局）与自建 mineru-api V1 服务均完成端到端解析**；managed 全新下载安装（~3.4GB）未真实执行；客户端 UI 未真机验收。
+
+需求（用户）：客户端内提供本地 MinerU 引擎选项并可下载安装（参考 TextFold）；随后补充——允许复用本机已有引擎（TextFold 只是可发现的一例，通用路径选择），已有用户自部署的 mineru 引擎/HTTP 服务也要支持；四类接入统一呈现、按真实能力启用；优先验证本机已有 TextFold 引擎（用户已授权调用）。
+
+- **四类来源统一（`literature/mineru_local.py`，新模块 ~1500 行）**：`managed`（独立安装：uv 引导托管 Python 3.12 venv → `mineru==4.0.10` pinned → `mineru-kit models download --tier standard`；uv 缺失时下载固定版本 0.13.5 并 sha256 校验，四平台哈希内置；`installed.txt` 最后写入，步骤幂等支持取消/断点续装；与本地解析任务互斥；进程日志+重启清理遗留推理进程）/ `external_cli`（通用路径探测：`venv/bin/mineru-kit` 或直接二进制；仅接受 MinerU 4.0.x；TextFold/PaperFold 路径仅是自动发现候选）/ `http_service`（官方 mineru-api **/v1 自托管协议**：health/tiers/uploads/parse-jobs/files，与官方云端 API 严格区分）/ 云端 `mineru_remote`（原有适配器不动）。来源选择持久化 `<runtime>/parse-engine.json`；`/parse/backends` 的 local 能力按来源动态探测。
+- **MinerU 4 输出适配（关键）**：kit ZIP（markdown.md/middle_json.json/structured_content.json/images/）与远端 content_list_v2 不同构。原样封存 kit 输出 + 派生 `content_list_v2.json`（CLI 引擎用官方 renderer `render_content_list_v2`（实测 `from mineru.types import MiddleJson` 导入），表格 html 补 `table_content` 别名；HTTP 来源用内置适配器 `middle_json_to_content_list`）+ 派生 `layout.json`（页几何优先 `structured_content.json` 的官方 `docvortex_layout`（实测含每页 pt 尺寸），PyMuPDF 兜底）。之后走同一 seal → normalize/merge，稳定 block/cell ID 契约不变。
+- **来源快照防静默切换**：任务创建时 `backend_config.engine_source` 冻结；运行时来源不一致明确失败。Token 只约束云端：调度器与 start/retry/continue 入口按任务后端判定，本地任务不再被「无 Token」阻塞。
+- **明文 HTTP 契约**：`http://` 仅 loopback 或显式勾选「允许明文 HTTP」；服务密钥存 Keychain（`local.literature.mineru-http`），不进项目/日志/快照；HTTP 客户端 `trust_env=False`（规避环境 `NO_PROXY` 含 `[::1]` 时 httpx「Invalid port」解析错误，实测修复）。
+- **API**：`GET /parse/engine`（状态：安装/版本/占用/进度/错误/活跃任务）、`POST /parse/engine/install|cancel|uninstall`（卸载与安装/任务互斥，409）、`GET /parse/engine/sources`（当前选择+本机发现+密钥状态）、`POST /parse/engine/select`（探测通过才允许选用）、`GET /parse/engine/probe-external`、`PUT|DELETE /parse/engine/http/key`；`/health` 新增能力位 `parse_engine_v1`；`MinerUJobCreate/ParseStart/IntakeJobCreate/ParseContinue` 增 `backend_id`。
+- **前端**：新增 `workbench/ParseEngineCard.tsx`（设置 → 解析引擎：下载安装/使用已有安装/连接已有服务三入口，安装进度/取消/卸载、外部目录检测与发现列表、服务地址+密钥+明文确认；external/http 无卸载修复按钮）；导入页解析来源选择（云端/本机，未就绪时导向设置，本地模式下模型选择禁用并说明标准档）；`main.tsx` 仅新增 `parse-engine.css` 导入（现有 CSS 顺序未动）；`OcrJob` 类型补 `backend_id`。
+- **测试**：`tests/test_mineru_local.py` 24 项——安装成功（marker 最后写）/失败不落 installed/取消→断点续装/卸载互斥（任务占用与安装中）/状态字节；外部引擎探测（兼容/版本不符/缺模型/无 kit）/选用持久化与能力联动/不兼容拒绝；明文 HTTP 契约；来源快照防切换；kit ZIP 安全解包/页数校验/`layout.json` 派生（fitz）；派生脚本编译与 table_content 映射；HTTP v1 执行链（httpx.MockTransport：上传→任务→轮询→zip 下载→ocr_mode/tier 断言；失败透出）；内置适配器核心块映射 + 产物被现有 `_parse_slice` 消费（表格 cell 解析、页映射）。全量 pytest 通过，既有 remote/parse_backends 回归全绿。
+- **真实验收（本机 TextFold 引擎，用户授权调用）**：`~/Library/Application Support/TextFold/engine`（mineru 4.0.10，模型 2.0GB，总 3.3GB）→ 探测（installed.txt/kit 二进制/模型）→ `tests/manual/local_engine_real_check.py` 完整服务链路：创建项目 → `start_parse`（local 后端，无 Token）→ run 完成；canonical 9 blocks/3 pages/coverage=full，页几何 595×842、bbox 0-1000、raw 封存 `verify_raw` 无错误、source.md 生成。**写入边界实测**：外部 `mineru-home`（config/模型）零写入（`find -newer`）；kit 会向其托管 Python 写 `__pycache__`，已用 `PYTHONPYCACHEPREFIX` 重定向隔离；`MINERU_CONFIG` 自建 config（`model.base_dir` 共享 + `source: local`）+ `MINERU_HOME` 指向 Literature 目录，doclib/日志/锁全部隔离。
+- **真实验收（自建 V1 服务）**：同一引擎 `mineru-kit api-server --tier standard`（127.0.0.1:18123，隔离 MINERU_CONFIG/MINERU_HOME）→ 探测（version 4.0.10 + tiers）→ 完整链路（uploads → parse/jobs → 轮询 → zip → 适配 → 合并）→ canonical 4 blocks/2 pages/coverage=full。服务验收后已停止进程。
+- **未验收 / 边界**：managed 全新下载安装未真实执行（安装器有隔离测试）；干净机器全新安装待验；HTTP 鉴权路径/断点恢复/远端取消真实演练未做；其他 MinerU 版本不承诺兼容（CLI 仅 4.0.x，HTTP 须 v1 协议特征）；客户端 UI 未真机点验、未打包安装；本地解析结果的下游结构校对/翻译未复跑；并行使用不承诺跨应用互斥（大文档可能与 TextFold 争内存）。现状口径见 `docs/LOCAL_MINERU_BACKEND.md`（唯一现状文档，已重写）。
 
 ## 2026-10-25 · 导出主文件统一使用文档名
 状态：已编码 / 全量 pytest 634 passed（exporters+api 66，新增 2 项）；本轮未改前端（tsc/Vite 不适用）；**未打包安装，未在安装客户端真实验收**。

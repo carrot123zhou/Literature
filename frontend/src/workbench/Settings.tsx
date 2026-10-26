@@ -1,17 +1,20 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { api } from "../api";
 import LocalResources from "./LocalResources";
+import ParseEngineCard from "./ParseEngineCard";
 import ModelServicesPanel from "./ModelServicesDialog";
 import type { ModelServicesApi } from "../modelServices";
+import ReaderSettings from "../reader/ReaderSettings";
 import type { DocumentGraph, UsageRecord } from "../types";
 
-export type SettingsSection = "general" | "models" | "translation" | "structure" | "parsing" | "usage" | "about";
+export type SettingsSection = "general" | "models" | "translation" | "structure" | "reader" | "parsing" | "usage" | "about";
 
 const SECTIONS: { id: SettingsSection; label: string; hint: string }[] = [
   { id: "general", label: "通用", hint: "语言与全局行为" },
   { id: "models", label: "模型服务", hint: "服务商与模型" },
   { id: "translation", label: "翻译", hint: "目标语言与附加要求" },
   { id: "structure", label: "结构校对", hint: "默认校对档位" },
+  { id: "reader", label: "阅读", hint: "折叠与对话模型" },
   { id: "parsing", label: "文档解析", hint: "MinerU 与本地资源" },
   { id: "usage", label: "用量与预算", hint: "调用明细与费用上限" },
   { id: "about", label: "关于", hint: "版本与运行信息" },
@@ -113,12 +116,40 @@ export default function Settings({ projectId, document, selected, instructions, 
             <p className="settings-hint">默认结构校对模型：{models.entryFor("structure") ? `${models.serviceFor("structure")?.name ?? ""} · ${models.entryFor("structure")?.name || models.entryFor("structure")?.model}` : "未绑定（可到「模型服务」里设置）"}。</p>
           </>}
 
+          {section === "reader" && <>
+            <h3>阅读默认模型</h3>
+            <p className="settings-hint">五层折叠与阅读对话各自绑定：折叠要便宜、JSON 稳定；对话要长上下文。两者都复用「模型服务」里的服务商与 API Key（本机 Keychain），不另存密钥。聊天里可临时切换模型，只影响下一条消息。</p>
+            <ReaderSettings
+              providers={models.services}
+              roles={{ fold: models.roles.reader_fold, chat: models.roles.reader_chat }}
+              translationBinding={models.roles.translation}
+              roleStates={models.roleStates ?? undefined}
+              modelsReady={models.ready}
+              onChange={async patch => {
+                // roles API 是整体 patch：只提交本次改动的两个键，其余角色保持原样。
+                try {
+                  await models.setRoles({
+                    ...(patch.fold ? { reader_fold: patch.fold } : {}),
+                    ...(patch.chat ? { reader_chat: patch.chat } : {}),
+                  });
+                  onMessage(patch.fold ? "已保存折叠默认模型" : "已保存对话默认模型");
+                } catch (error) {
+                  onMessage(error instanceof Error ? error.message : String(error));
+                }
+              }}
+              onConfigure={() => onSectionChange("models")}
+            />
+          </>}
+
           {section === "parsing" && <>
-            <h3>文档解析</h3>
+            <h3>解析引擎</h3>
+            <ParseEngineCard onMessage={onMessage}/>
+            <hr/>
+            <h3>本地资源</h3>
             <LocalResources onMessage={onMessage}/>
             <hr/>
-            <h3>MinerU 精准解析</h3>
-            <p className="settings-hint">用于扫描版 PDF 的版面/公式/表格识别；Token 属于全局设置，一直可用。</p>
+            <h3>MinerU 云端解析</h3>
+            <p className="settings-hint">用于云端精准解析的 Token；Token 属于全局设置，一直可用。本地解析来源在上方「解析引擎」管理，不需要 Token。</p>
             <label>Token<input type="password" value={mineru} onChange={e => setMineru(e.target.value)}/></label>
             <button onClick={async () => { await api("/mineru/token", { method: "PUT", body: JSON.stringify({ value: mineru }) }); setMineru(""); onMessage("MinerU Token 已保存"); }}>保存 MinerU Token</button>
           </>}

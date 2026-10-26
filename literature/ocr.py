@@ -11,12 +11,13 @@ from pathlib import Path
 from typing import Any
 
 from .mineru import coverage_pages, coverage_payload, merge_imported_project
+from .mineru_local import LocalMinerUEngine, active_source_kind, local_engine_ready, set_shared_engine, shared_engine, source_identity_snapshot
 from .mineru_workflow import (
     ACTIVE_JOB_STATES, RESUMABLE_JOB_STATES, JobState, MinerUWorkflow, SliceState,
     WorkflowJob, delete_mineru_token, format_page_ranges, get_mineru_token,
     parse_page_ranges, save_mineru_token,
 )
-from .parse_backends import REMOTE_BACKEND_ID, ParseResult
+from .parse_backends import LOCAL_BACKEND_ID, REMOTE_BACKEND_ID, ParseResult, resolve_job_backend
 from .parse_queue import ParseQueue, select_next_runnable
 from .storage import ProjectStore, StorageError, atomic_json
 from .task_history import (
@@ -47,6 +48,13 @@ class MinerUService:
         self.jobs_root = self.runtime_root / "ocr-jobs"
         self.jobs_root.mkdir(parents=True, exist_ok=True)
         self.workflow = MinerUWorkflow(self.jobs_root, merge_callback=self._finish_import)
+        # 本地引擎与解析任务共享同一 runtime 根；不同根（如测试隔离）时重建并登记为共享实例。
+        engine_root = (self.runtime_root / "mineru-local").resolve()
+        engine = shared_engine()
+        if Path(engine.root) != engine_root:
+            engine = LocalMinerUEngine(engine_root)
+            set_shared_engine(engine)
+        self.engine: LocalMinerUEngine = engine
         self.queue = ParseQueue(self.jobs_root / "queue.json")
         self.archive = JobArchiveStore(self.jobs_root / "archive.json")
         self._scheduler_thread: threading.Thread | None = None
@@ -169,6 +177,7 @@ class MinerUService:
         page_ranges: str = "", extra_formats: list[str] | None = None,
         page_limit: int = 200, requested_pages: list[int] | None = None,
         append: bool = False, enforce_single: bool = False,
+        backend_id: str = REMOTE_BACKEND_ID,
     ) -> dict[str, Any]:
         with self.project_lock(project_id):
             if enforce_single:
@@ -179,7 +188,7 @@ class MinerUService:
                 project_id, language=language, model_version=model_version, is_ocr=is_ocr,
                 enable_table=enable_table, enable_formula=enable_formula, page_ranges=page_ranges,
                 extra_formats=extra_formats, page_limit=page_limit, requested_pages=requested_pages,
-                append=append,
+                append=append, backend_id=backend_id,
             )
 
     def _create_locked(
@@ -187,12 +196,13 @@ class MinerUService:
         is_ocr: bool = True, enable_table: bool = True, enable_formula: bool = True,
         page_ranges: str = "", extra_formats: list[str] | None = None,
         page_limit: int = 200, requested_pages: list[int] | None = None,
-        append: bool = False,
+        append: bool = False, backend_id: str = REMOTE_BACKEND_ID,
     ) -> dict[str, Any]:
         project = self.store.project_path(project_id)
         source = self.store.source_path(project_id)
         is_pdf = source.suffix.casefold() == ".pdf"
         is_html = source.suffix.casefold() == ".html"
+        resolved_backend = resolve_job_backend(backend_id).backend_id
         job: WorkflowJob | None = None
         try:
             job = self.workflow.create_job(
@@ -204,8 +214,13 @@ class MinerUService:
                 keep_original_pdf=False,
                 requested_pages=requested_pages, requested_ranges=page_ranges,
                 append=append,
-                backend_id=REMOTE_BACKEND_ID,
+                backend_id=resolved_backend,
                 backend_config={
+                    # 任务创建时冻结引擎来源快照，运行时不得被静默切换；
+                    # identity 含规范化 URL / 引擎与模型路径 / 版本（不含密钥）。
+                    "engine_source": active_source_kind() if resolved_backend == LOCAL_BACKEND_ID else "remote",
+                    **({"engine_source_config": source_identity_snapshot()}
+                       if resolved_backend == LOCAL_BACKEND_ID else {}),
                     "model_version": model_version,
                     "language_pack": LANGUAGE_MAP.get(language, language),
                     "is_ocr": is_ocr, "enable_table": enable_table, "enable_formula": enable_formula,
@@ -658,6 +673,7 @@ class MinerUService:
     def continue_parse(
         self, project_id: str, *, page_ranges: str = "", language: str = "",
         model_version: str = "", page_limit: int = 200, extra_formats: list[str] | None = None,
+        backend_id: str = "",
     ) -> tuple[dict[str, Any], list[int]]:
         """对同一资源继续解析未覆盖的源页；返回 (job, 被过滤的已覆盖页)。
 
@@ -668,11 +684,13 @@ class MinerUService:
             return self._continue_parse_locked(
                 project_id, page_ranges=page_ranges, language=language,
                 model_version=model_version, page_limit=page_limit, extra_formats=extra_formats,
+                backend_id=backend_id,
             )
 
     def _continue_parse_locked(
         self, project_id: str, *, page_ranges: str = "", language: str = "",
         model_version: str = "", page_limit: int = 200, extra_formats: list[str] | None = None,
+        backend_id: str = "",
     ) -> tuple[dict[str, Any], list[int]]:
         project = self.store.project_path(project_id)
         if not (project / "document" / "document.json").is_file():
@@ -716,6 +734,8 @@ class MinerUService:
         resolved_language = language or (template or {}).get("language") or "ch"
         resolved_model = model_version or (template or {}).get("model_version") or "vlm"
         resolved_formats = list(extra_formats) if extra_formats is not None else list((template or {}).get("extra_formats") or [])
+        # 继续解析延续原任务的后端（历史任务缺字段按 remote 读取）。
+        resolved_backend = backend_id or str((template or {}).get("backend_id") or REMOTE_BACKEND_ID)
         job = self.create(
             project_id,
             language=resolved_language, model_version=resolved_model,
@@ -724,7 +744,7 @@ class MinerUService:
             enable_formula=bool((template or {}).get("enable_formula", True)),
             page_ranges="", requested_pages=selected, append=True,
             page_limit=page_limit, extra_formats=resolved_formats,
-            enforce_single=True,
+            enforce_single=True, backend_id=resolved_backend,
         )
         return job, skipped
 
@@ -734,23 +754,29 @@ class MinerUService:
         model_version: str = "vlm", is_ocr: bool = True, enable_table: bool = True,
         enable_formula: bool = True, page_limit: int = 200,
         extra_formats: list[str] | None = None,
+        backend_id: str = REMOTE_BACKEND_ID,
     ) -> dict[str, Any]:
         """为从未生成规范文档的资源创建首个解析任务（语义不同于“继续解析”）。
 
-        这是一个完整的服务端操作：在锁内依次完成 Token 校验、活动作业检查、
+        这是一个完整的服务端操作：在锁内依次完成 Token/引擎校验、活动作业检查、
         无规范文档检查、源文件存在/hash 校验、创建与调度。锁序遵守
         ``schedule_lock → project_lock``（schedule_lock 为可重入锁，
         ``start_job`` 再取一次也不会死锁）。两个并发点击只会创建一个作业；
         创建成功但调度失败时任务会保留为可恢复的 queued 状态并报出具体错误。
+        Token 只约束远端后端；本地后端改为要求引擎就绪（create_job 入口会再校验）。
         """
         with self._schedule_lock, self.project_lock(project_id):
-            if not get_mineru_token():
+            if resolve_job_backend(backend_id).backend_id == LOCAL_BACKEND_ID:
+                if not local_engine_ready():
+                    raise StorageError("本地解析来源尚未就绪；请在设置 → 文档解析里安装引擎或检查已有安装/服务连接。")
+            elif not get_mineru_token():
                 # 没有 Token 时不创建任何作业，避免孤儿任务。
                 raise StorageError("请先配置 MinerU Token。")
             job = self._start_parse_locked(
                 project_id, page_ranges=page_ranges, language=language,
                 model_version=model_version, is_ocr=is_ocr, enable_table=enable_table,
                 enable_formula=enable_formula, page_limit=page_limit, extra_formats=extra_formats,
+                backend_id=backend_id,
             )
             try:
                 self.start_job(job["job_id"])
@@ -764,7 +790,7 @@ class MinerUService:
     def _start_parse_locked(
         self, project_id: str, *, page_ranges: str, language: str, model_version: str,
         is_ocr: bool, enable_table: bool, enable_formula: bool, page_limit: int,
-        extra_formats: list[str] | None,
+        extra_formats: list[str] | None, backend_id: str,
     ) -> dict[str, Any]:
         project = self.store.project_path(project_id)
         if (project / "document" / "document.json").is_file():
@@ -803,7 +829,7 @@ class MinerUService:
             is_ocr=is_ocr, enable_table=enable_table, enable_formula=enable_formula,
             page_ranges="", requested_pages=selected or None,
             append=False, page_limit=page_limit, extra_formats=extra_formats,
-            enforce_single=True,
+            enforce_single=True, backend_id=resolve_job_backend(backend_id).backend_id,
         )
 
     def active_job(self, project_id: str) -> dict[str, Any] | None:
@@ -952,6 +978,14 @@ class MinerUService:
         except Exception:
             return None
 
+    def _job_needs_token(self, job_id: str) -> bool:
+        """本地后端任务不需要 MinerU Token；远端任务需要。"""
+        try:
+            job = self.workflow.load_job(self._job_path(job_id))
+        except Exception:
+            return True
+        return resolve_job_backend(job.backend_id).backend_id != LOCAL_BACKEND_ID
+
     def _scheduler_loop(self) -> None:
         runnable = {state.value for state in RESUMABLE_JOB_STATES}
         while not self._scheduler_stop.is_set():
@@ -965,13 +999,14 @@ class MinerUService:
                     self.auto_archive()
                 except Exception:
                     logger.exception("Auto archive daily pass failed")
-            if not get_mineru_token():
-                # 没有 Token 时不消耗轮询；保存 Token 后由 resume_all 唤醒。
-                continue
-            # 第一次候选选择不持锁（可能并发调序）。
-            if not select_next_runnable(self.queue.order(), self._job_state, runnable):
+            candidate = select_next_runnable(self.queue.order(), self._job_state, runnable)
+            if not candidate:
                 with self._schedule_lock:
                     self.queue.prune(lambda value: self._job_state(value) in runnable)
+                continue
+            # Token 只约束远端后端；本地任务在引擎未就绪时会在执行入口明确失败。
+            if self._job_needs_token(candidate) and not get_mineru_token():
+                # 没有 Token 时不消耗轮询；保存 Token 后由 resume_all 唤醒。
                 continue
             # 领取临界区：重新检查队首 + 确认没有运行任务 + 停止标志，然后从队列移除。
             with self._schedule_lock:

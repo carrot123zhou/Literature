@@ -43,10 +43,10 @@ MinerU 服务适配层 --------> ocr/raw/mineru/（只读证据）
 
 `literature/parse_backends.py` 定义解析方式与工作流的边界：
 
-- `mineru_remote`：当前唯一已实现、默认使用的解析方式，走 MinerU 精准解析 API（切片 → 预签名上传 → 远端轮询 → 下载校验 → 封存 → 规范化）。
-- `mineru_local`：仅预留接入点，本版本**不安装、不内置**本地 MinerU 模型与依赖，明确标记 `available=false` 与原因，不提供可点击的伪功能。
+- `mineru_remote`：默认的云端解析方式，走 MinerU 精准解析 API（切片 → 预签名上传 → 远端轮询 → 下载校验 → 封存 → 规范化）。
+- `mineru_local`：本机解析（2026-10-25 实装），来源三选一：独立安装（managed，客户端内下载）/已有本机安装（external_cli，通用路径探测）/已有 HTTP 服务（http_service，官方 mineru-api /v1 协议）；能力按来源真实探测动态返回，验证不通过即明确不可用。
 
-后端能力描述区分远端与本地差异（是否切片、是否轮询、是否需要上传 URL、能否真正取消、能否断点续跑）。远端实际执行经 `RemoteMinerUBackend`（`mineru_workflow.py`）的 `prepare/execute/status/result` 边界：`run_or_resume` 先按任务持久化的 `backend_id` 校验可用性，local/未知任务在入口即被拒（不创建远端 client、不读 Token）。适配器统一产出「可封存 raw 结果 + source_pages 映射」，再走 `literature/mineru.py` 的同一 normalize/merge；旧任务缺 `backend_id` 时按 remote 读取。接入口径、部署/日志/隔离与未来验收见 `docs/LOCAL_MINERU_BACKEND.md`。
+后端能力描述区分远端与本地差异（是否切片、是否轮询、是否需要上传 URL、能否真正取消、能否断点续跑）。远端实际执行经 `RemoteMinerUBackend`（`mineru_workflow.py`）的 `prepare/execute/status/result` 边界：`run_or_resume` 先按任务持久化的 `backend_id` 校验可用性，未知任务在入口即被拒（不创建远端 client、不读 Token）；本地经 `LocalMinerUBackend`（`mineru_local.py`），任务创建时冻结来源快照，运行时不得静默切换。适配器统一产出「可封存 raw 结果 + source_pages 映射」，再走 `literature/mineru.py` 的同一 normalize/merge；旧任务缺 `backend_id` 时按 remote 读取。四类来源、资源边界与验收状态见 `docs/LOCAL_MINERU_BACKEND.md`（唯一现状文档）。
 
 ## UI 工作区
 

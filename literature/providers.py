@@ -266,6 +266,40 @@ def normalize_proxy_environment() -> None:
             os.environ[name] = ",".join(hosts)
 
 
+def normalize_tls_environment() -> list[str]:
+    """清理指向不存在文件的 TLS 信任库环境变量（SSL_CERT_FILE / SSL_CERT_DIR 等）。
+
+    httpx/requests 默认 ``trust_env=True``：env 里若有 ``SSL_CERT_FILE``，会用它
+    代替内置 CA 包（certifi）；路径失效（例如指向已删除的临时目录、或另一个
+    应用的私有证书包）时，``ssl.create_default_context`` 在发请求前就抛
+    ``FileNotFoundError``，表现为「所有 HTTPS 请求莫名失败」。这里只剔除**不可用**
+    的路径，保留存在的自定义信任库（企业自签场景），且**绝不关闭证书校验**。
+    返回被清理的变量名（供调用方记日志）。
+    """
+    removed: list[str] = []
+    for name in ("SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE", "SSL_CERT_DIR"):
+        raw = os.environ.get(name)
+        if not raw:
+            continue
+        candidate = os.path.expanduser(raw.strip())
+        usable = os.path.exists(candidate) if name != "SSL_CERT_DIR" else os.path.isdir(candidate)
+        if usable:
+            continue
+        os.environ.pop(name, None)
+        removed.append(name)
+    return removed
+
+
+def tls_context_error(error: BaseException) -> str:
+    """把 TLS 初始化失败翻译成可操作的中文说明（不泄漏任何密钥）。"""
+    detail = str(error) or error.__class__.__name__
+    return (
+        f"无法建立 HTTPS 连接（TLS 证书链不可用：{detail}）。"
+        "通常是运行环境的证书配置（SSL_CERT_FILE/SSL_CERT_DIR 或内置 CA 包）异常；"
+        "证书校验不会被关闭。请重启 Literature 后重试；若仍失败，请把这段错误反馈给开发者。"
+    )
+
+
 PROVIDER_PRESETS: dict[str, dict[str, Any]] = {
     "openai": {"label": "OpenAI", "base_url": "https://api.openai.com/v1", "model": "gpt-5-mini"},
     "deepseek": {"label": "DeepSeek", "base_url": "https://api.deepseek.com", "model": "deepseek-chat"},
@@ -839,10 +873,14 @@ class OpenAICompatibleProvider:
                     self.timeout, connect=min(20.0, self.timeout),
                     write=min(60.0, self.timeout), pool=min(30.0, self.timeout),
                 )
-                self._client = httpx.Client(
-                    timeout=timeouts, follow_redirects=True,
-                    limits=httpx.Limits(max_connections=16, max_keepalive_connections=8),
-                )
+                try:
+                    self._client = httpx.Client(
+                        timeout=timeouts, follow_redirects=True,
+                        limits=httpx.Limits(max_connections=16, max_keepalive_connections=8),
+                    )
+                except (FileNotFoundError, OSError, ValueError) as error:
+                    # TLS 信任库不可用：给出可操作说明，绝不降级为不校验证书。
+                    raise ProviderError(tls_context_error(error)) from error
             return self._client
 
     def _retry_delay(self, response: Any, attempt: int) -> float:

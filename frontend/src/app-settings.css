@@ -34,6 +34,7 @@
   border-bottom: 1px solid var(--separator);
 }
 .settings-v2 .settings-head h2 {
+  margin: 0;
   font-family: var(--font-ui);
   font-size: var(--fs-title3);
   font-weight: var(--fw-semibold);
@@ -81,7 +82,7 @@
   line-height: var(--lh-tight);
 }
 .settings-v2 .settings-nav button:hover:where(:not(:disabled)) { background: var(--fill-3); }
-.settings-v2 .settings-nav button.active { background: var(--accent-tint); color: var(--accent); }
+.settings-v2 .settings-nav button.active { background: var(--accent-tint); color: var(--accent); border-color: #d8ded7; box-shadow: 0 1px 3px #20322b12; }
 .settings-v2 .settings-nav button.active small { color: var(--accent); opacity: 0.8; }
 
 .settings-v2 .settings-content {
@@ -144,6 +145,7 @@
   font-weight: var(--fw-regular);
 }
 .local-resource-actions { display: flex; flex-wrap: wrap; gap: var(--sp-2); }
+.export-result code { margin: 8px 0; }
 .local-resources > button { margin-bottom: var(--sp-2); }
 
 .usage-ledger { display: grid; gap: var(--sp-2); }
@@ -215,12 +217,14 @@
   min-width: 0;
   font-weight: var(--fw-regular);
 }
+.model-role-row select,
+.task-model-picker-row select { border: 1px solid #cbd4cd; border-radius: 7px; padding: 8px; background: #fff; }
 .model-service-form input[type="checkbox"] { width: auto; min-height: 0; }
 
 .model-services-panel .model-services-body {
   min-height: 460px;
   display: grid;
-  grid-template-columns: minmax(180px, 30%) minmax(0, 1fr);
+  grid-template-columns: minmax(170px, 216px) minmax(0, 1fr);
   border: 1px solid var(--separator);
   border-radius: var(--r-card);
   background: var(--bg-elevated);
@@ -265,7 +269,7 @@
   font-weight: var(--fw-regular);
 }
 .model-service-item:hover:where(:not(:disabled)) { background: var(--fill-3); }
-.model-service-item.selected { background: var(--accent-tint); }
+.model-service-item.selected { background: var(--accent-tint); border-color: var(--mineru-accent); }
 .model-service-item > span { display: grid; min-width: 0; }
 .model-service-item strong,
 .model-service-item small {
@@ -320,7 +324,7 @@
   background: var(--tint-orange);
 }
 .model-plaintext-warning p { margin: 0; color: var(--on-orange); font-size: var(--fs-caption1); line-height: var(--lh-normal); }
-.model-plaintext-warning.is-allowed { background: var(--tint-green); }
+.model-plaintext-warning.is-allowed { background: var(--tint-green); border-color: #b6cf9a; }
 .model-plaintext-warning.is-allowed p { color: var(--on-green); }
 .model-service-form .model-plaintext-check {
   display: flex;
@@ -330,21 +334,23 @@
   font-weight: var(--fw-medium);
 }
 .model-plaintext-warning.is-allowed .model-plaintext-check { color: var(--on-green); }
-.model-plaintext-check input { flex: none; margin-top: 0; }
+.model-plaintext-check input { flex: none; margin-top: 0; width: auto !important; accent-color: #b45309; }
 
 /* 可搜索的模型选择器 */
 .model-picker {
   display: grid;
   gap: var(--sp-2);
   min-width: 0;
+  margin-top: 8px;
   padding: var(--sp-3);
+  border: 1px solid #dce2dc;
   border-radius: var(--r-card);
   background: var(--bg-tertiary);
 }
 .model-picker-head { display: flex; align-items: center; gap: var(--sp-2); min-width: 0; }
 .model-picker-head strong { font-size: var(--fs-footnote); font-weight: var(--fw-semibold); }
-.model-picker-head input { flex: 1; min-width: 0; }
-.model-picker-head button { flex: none; white-space: nowrap; }
+.model-picker-head input { flex: 1; min-width: 0; padding: 6px 8px; border: 1px solid #cbd4cd; border-radius: 7px; background: #fff; }
+.model-picker-head button { flex: none; white-space: nowrap; padding: 6px 10px; color: #526159; font-size: 11px; font-weight: 650; }
 .model-picker-count { margin-left: auto; color: var(--label-2); font-size: var(--fs-caption1); }
 .model-picker-list {
   display: grid;
@@ -368,9 +374,11 @@
   font-weight: var(--fw-regular);
 }
 .model-picker-item:hover:where(:not(:disabled)) { background: var(--fill-3); }
-.model-picker-item.selected { background: var(--accent-tint); }
+.model-picker-item.selected { background: var(--accent-tint); border-color: var(--mineru-accent); }
 .model-picker-item.exists { opacity: 0.6; }
 .model-picker-check {
+  width: 16px;
+  flex: none;
   min-width: 16px;
   height: 16px;
   display: grid;
@@ -417,12 +425,29 @@
   overflow: hidden;
 }
 .model-entry.expanded { border-color: var(--accent); }
+/* 模型行分层：上行 名称+删除，下行 徽章，再下行 思考选择——窄容器不再互相挤压 */
 .model-entry-row {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto auto;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: var(--sp-1) var(--sp-2);
+  padding: var(--sp-2) var(--sp-3);
+}
+.model-entry-row .model-entry-main { flex: 1 1 200px; }
+.model-entry-row .model-entry-thinking {
+  flex: 0 0 auto;
+  flex-direction: row;
   align-items: center;
   gap: var(--sp-2);
-  padding: var(--sp-2) var(--sp-3);
+  color: var(--label-2);
+}
+.model-entry-row .danger-text { flex: 0 0 auto; }
+.model-entry-id {
+  font-size: var(--fs-caption2);
+  color: var(--label-3);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .model-entry-main {
   display: grid;
@@ -435,8 +460,8 @@
   text-align: left;
 }
 .model-entry-main:hover:where(:not(:disabled)) { background: transparent; }
-.model-entry-thinking { display: grid; gap: var(--sp-1); font-size: var(--fs-caption2); }
-.model-entry-thinking select { max-width: 170px; min-height: 26px; font-size: var(--fs-caption1); }
+.model-entry-thinking { display: grid; gap: var(--sp-1); font-size: var(--fs-caption2); color: var(--label-2); }
+.model-entry-thinking select { max-width: 170px; min-height: 26px; font-size: var(--fs-caption1); border: 1px solid #cbd4cd; border-radius: 7px; padding: 5px 6px; background: #fff; }
 .model-entry-editor {
   display: grid;
   gap: var(--sp-3);
@@ -574,6 +599,7 @@ progress::-moz-progress-bar { background: var(--accent); border-radius: var(--r-
   align-items: center;
   gap: var(--sp-2);
   width: min(520px, 100%);
+  height: 42px;
   min-height: 40px;
   padding: 0 var(--sp-3);
   border: 1px solid var(--separator-strong);
@@ -581,9 +607,9 @@ progress::-moz-progress-bar { background: var(--accent); border-radius: var(--r-
   background: var(--bg-elevated);
 }
 .task-picker-search:focus-within { border-color: var(--accent); box-shadow: var(--focus-ring); }
-.task-picker-search input { flex: 1; min-width: 0; min-height: 0; padding: 0; border: 0; border-radius: 0; background: transparent; box-shadow: none; }
+.task-picker-search input { flex: 1; min-width: 0; min-height: 0; padding: 0; border: 0; outline: 0; border-radius: 0; background: transparent; box-shadow: none; }
 .task-picker-search input:focus { box-shadow: none; }
-.task-picker-search span { color: var(--label-3); font-size: var(--fs-title3); }
+.task-picker-search span { color: var(--label-3); font-size: var(--fs-title3); transform: rotate(-18deg); }
 .task-picker-list {
   /* 必须用 flex 而不是 grid：grid 在 max-height 限高、条目超出时会把每条压到 min-height，
    * 内部文字行被挤成 1px 而看不见（已在 Chrome 复现）。flex + overflow 滚动才能保住条目高度。 */
@@ -715,7 +741,7 @@ progress::-moz-progress-bar { background: var(--accent); border-radius: var(--r-
 .history-main small { color: var(--label-2); font-size: var(--fs-caption1); overflow-wrap: anywhere; }
 .history-main .history-coverage { color: var(--on-green); }
 .history-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: var(--sp-2); min-width: 0; }
-.history-actions button { min-height: 26px; padding: 0 var(--sp-2); font-size: var(--fs-caption1); }
+.history-actions button { min-height: 26px; padding: 0 var(--sp-2); font-size: var(--fs-caption1); background: #fbfdf8; border: 1px solid #d3dcd3; border-radius: 7px; cursor: pointer; color: #46534b; }
 .history-empty {
   display: grid;
   place-items: center;
@@ -731,7 +757,7 @@ progress::-moz-progress-bar { background: var(--accent); border-radius: var(--r-
 .history-detail-title { font-size: var(--fs-title3); }
 .history-detail-body { padding: var(--sp-4) var(--sp-5); }
 .history-pager { display: flex; align-items: center; justify-content: center; gap: var(--sp-4); color: var(--label-2); font-size: var(--fs-caption1); }
-.history-pager button { min-height: 26px; padding: 0 var(--sp-3); font-size: var(--fs-caption1); }
+.history-pager button { min-height: 26px; padding: 0 var(--sp-3); font-size: var(--fs-caption1); background: #fbfdf8; border: 1px solid #d3dcd3; border-radius: 7px; cursor: pointer; }
 .history-slices { display: grid; gap: var(--sp-1); margin-top: var(--sp-2); }
 .history-slice {
   display: flex;
@@ -776,4 +802,31 @@ progress::-moz-progress-bar { background: var(--accent); border-radius: var(--r-
   .history-row { grid-template-columns: minmax(0, 1fr); gap: var(--sp-2); }
   .history-state { justify-self: start; }
   .history-actions { justify-content: flex-start; }
+}
+
+/* 设置弹窗响应式：窄窗单列（导航横排），模型服务列表与表单纵向堆叠 */
+@media (max-width: 900px) {
+  .settings.settings-v2 { width: 100%; height: 100%; max-height: none; border-radius: 0; }
+  .settings-v2 .settings-body { grid-template-columns: minmax(0, 1fr); }
+  .settings-v2 .settings-nav {
+    flex-direction: row;
+    overflow-x: auto;
+    border-right: 0;
+    border-bottom: 1px solid var(--separator);
+    padding: var(--sp-2) var(--sp-3);
+  }
+  .settings-v2 .settings-nav button { white-space: nowrap; }
+  .settings-v2 .settings-nav button small { display: none; }
+  .model-services-panel .model-services-body {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .model-service-list {
+    border-right: 0;
+    border-bottom: 1px solid var(--separator);
+    max-height: 168px;
+  }
+}
+@media (max-width: 620px) {
+  .settings-v2 .settings-content { padding: var(--sp-3); }
+  .model-form-row { grid-template-columns: minmax(0, 1fr); }
 }

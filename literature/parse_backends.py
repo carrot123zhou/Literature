@@ -2,10 +2,11 @@
 
 现状与边界：
 
-- ``mineru_remote``：当前唯一已实现、默认使用的解析方式，走 MinerU 精准解析 API
+- ``mineru_remote``：当前默认使用的解析方式，走 MinerU 精准解析 API
   （切片 → 预签名上传 → 远端轮询 → 下载校验 → 封存 → 规范化）。
-- ``mineru_local``：仅预留接入点。本版本**不安装、不内置**本地 MinerU 模型与依赖，
-  因此明确标记 ``available=False`` 并给出原因；不得伪装成可点击的本地功能。
+- ``mineru_local``：本地 MinerU 引擎（``literature/mineru_local.py``）。能力
+  按引擎真实安装状态动态计算：引擎就绪时可用（真取消、断点续跑），未安装
+  时明确不可用并给出安装引导，不伪装成可点击功能。
 
 未来本地解析应作为独立进程/服务接入：它在自己的环境里准备输入、执行解析、报告状态、
 产出结果目录；Literature 通过同一 ``prepare/execute/status/result`` 边界拿到
@@ -70,7 +71,7 @@ _REMOTE = ParseBackendCapabilities(
 
 _LOCAL = ParseBackendCapabilities(
     backend_id=LOCAL_BACKEND_ID,
-    display_name="本地 MinerU 执行（预留）",
+    display_name="本地 MinerU 引擎",
     version="unavailable",
     execution="local",
     supported_formats=_BACKEND_FORMATS,
@@ -79,12 +80,10 @@ _LOCAL = ParseBackendCapabilities(
     polling=False,
     upload_url=False,
     remote_job_control=True,
-    resumable=False,
+    resumable=True,
     available=False,
     unavailable_reason=(
-        "本版本未内置本地 MinerU 执行环境：没有安装模型、推理依赖或运行时，"
-        "因此本地解析不可用。它只作为未来的独立进程/服务接入点预留，"
-        "不会在界面中显示为可点击功能。"
+        "本地 MinerU 引擎尚未就绪；可在设置 → 文档解析里下载安装。"
     ),
 )
 
@@ -114,13 +113,28 @@ class ParseResult:
     source_pages: Mapping[str, tuple[int, ...]]
 
 
+def _local_capabilities() -> ParseBackendCapabilities:
+    """本地后端能力动态读取引擎真实安装状态；引擎模块缺失时保持预留不可用。"""
+    try:
+        from .mineru_local import local_capabilities
+    except Exception:  # 引擎模块不可用（异常构建）：保持预留边界，不伪装可用。
+        return _LOCAL
+    try:
+        return local_capabilities()
+    except Exception:
+        return _LOCAL
+
+
 def describe_backends() -> list[dict[str, Any]]:
     """返回全部解析后端的描述，供 API/前端只读展示与能力探测。"""
-    return [asdict(capabilities) for capabilities in _BACKENDS.values()]
+    return [asdict(_local_capabilities() if backend_id == LOCAL_BACKEND_ID else capabilities_map)
+            for backend_id, capabilities_map in _BACKENDS.items()]
 
 
 def capabilities(backend_id: str) -> ParseBackendCapabilities:
     key = (backend_id or REMOTE_BACKEND_ID).strip() or REMOTE_BACKEND_ID
+    if key == LOCAL_BACKEND_ID:
+        return _local_capabilities()
     try:
         return _BACKENDS[key]
     except KeyError as error:

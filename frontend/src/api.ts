@@ -41,9 +41,33 @@ export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
   const response = await fetch(`${base}${path}`, { ...init, headers });
   if (!response.ok) {
     const value = await response.json().catch(() => ({ detail: response.statusText }));
-    throw new Error(typeof value.detail === "string" ? value.detail : `请求失败：${response.status}`);
+    throw new Error(errorMessage(value?.detail, response.status));
   }
   return response.json();
 }
+/**
+ * 把后端错误变成人能读的一句话。
+ *
+ * FastAPI 的校验错误 `detail` 是数组（422），旧实现会退化成「请求失败：422」，
+ * 用户看不到哪个字段错了——这类错误正是字段漂移最需要的提示。
+ */
+function errorMessage(detail: unknown, status: number): string {
+  if (typeof detail === "string" && detail.trim()) return detail;
+  if (Array.isArray(detail)) {
+    const parts = detail.slice(0, 3).map(item => {
+      const record = item as { loc?: unknown[]; msg?: string };
+      const where = Array.isArray(record.loc) ? record.loc.filter(part => part !== "body").join(".") : "";
+      return [where, record.msg].filter(Boolean).join("：");
+    }).filter(Boolean);
+    if (parts.length) return `请求参数不合法（${parts.join("；")}）`;
+  }
+  if (detail && typeof detail === "object") {
+    const record = detail as { msg?: string; message?: string; detail?: string };
+    const text = record.msg || record.message || record.detail;
+    if (typeof text === "string" && text.trim()) return text;
+  }
+  return `请求失败：${status}`;
+}
+
 export function apiUrl(path: string) { return `${base}${path}`; }
 export function apiHeaders() { return { "x-literature-token": token }; }

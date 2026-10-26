@@ -126,7 +126,7 @@ input[type="radio"] { accent-color: var(--accent); }
   letter-spacing: 0.08em;
   color: var(--label-2);
 }
-.empty-note { color: var(--label-2); font-size: var(--fs-caption1); line-height: var(--lh-normal); }
+.empty-note { margin: 6px 0; color: var(--label-2); font-size: var(--fs-caption1); line-height: var(--lh-normal); }
 .grow { flex: 1; min-width: 0; }
 
 /* ============================ 2. 应用外壳 ============================ */
@@ -177,6 +177,7 @@ input[type="radio"] { accent-color: var(--accent); }
   min-width: 0;
 }
 .intake-topbar.home-topbar .intake-brand {
+  justify-self: start;
   display: inline-flex;
   align-items: center;
   gap: var(--sp-2);
@@ -275,17 +276,19 @@ input[type="radio"] { accent-color: var(--accent); }
 .intake-topbar.home-topbar nav button.is-hint { color: var(--label-3); }
 .intake-topbar.home-topbar nav button.is-hint:hover:where(:not(:disabled)) { color: var(--label-2); }
 .intake-topbar.home-topbar nav button.active.is-hint { color: var(--accent); }
-.intake-topbar.home-topbar nav button:disabled { opacity: 0.42; }
+.intake-topbar.home-topbar nav button:disabled { opacity: 0.42; cursor: default; }
 
 .project-topbar-right {
   display: flex;
   align-items: center;
   justify-content: flex-end;
+  justify-self: end;
   gap: var(--sp-3);
   min-width: 0;
 }
 .settings-button {
   flex: none;
+  justify-self: end;
   white-space: nowrap;
 }
 /* 用量徽标：可收缩 + 省略，永远不把顶栏撑破 */
@@ -344,6 +347,7 @@ input[type="radio"] { accent-color: var(--accent); }
   overflow-y: auto;
 }
 .workspace-state h2 {
+  margin: 0;
   font-family: var(--font-ui);
   font-size: var(--fs-title2);
   font-weight: var(--fw-semibold);
@@ -366,8 +370,16 @@ input[type="radio"] { accent-color: var(--accent); }
 .client-startup h1 { font-size: var(--fs-large); }
 
 /* --- 可拖拽分栏手柄：发丝线，悬停 / 拖动时加粗为强调色 --- */
+.split-handle { position: relative; z-index: 3; cursor: col-resize; touch-action: none; background: transparent; }
 .split-handle:focus-visible { box-shadow: none; outline: none; }
 .split-handle::before {
+  content: "";
+  position: absolute;
+  top: 10px;
+  bottom: 10px;
+  left: 50%;
+  border-radius: 2px;
+  transform: translateX(-50%);
   width: 1px;
   background: var(--separator);
   transition: background-color var(--dur-fast) var(--ease), width var(--dur-fast) var(--ease);
@@ -387,7 +399,7 @@ body.is-resizing .split-handle::before { width: 3px; background: var(--accent); 
   display: grid;
   place-items: center;
   padding: var(--sp-6);
-  background: rgba(0, 0, 0, 0.32);
+  background: var(--scrim);
   -webkit-backdrop-filter: blur(2px);
   backdrop-filter: blur(2px);
   animation: u-fade var(--dur) var(--ease);
@@ -446,11 +458,48 @@ body.is-resizing .split-handle::before { width: 3px; background: var(--accent); 
   .statusbar { padding: 0 var(--sp-4); }
 }
 
-/* < 900：单列。项目副标题与分隔线收起，导航保留全部四个标签（不再隐藏）。 */
+/* < 900：顶栏改为两行（品牌/操作 + 完整导航），不做 body 裁剪。
+ *
+ * 之前是「单行三列 + 导航 nowrap」：中列是 auto 宽度，320/390/768 下 min-content 到 860px，
+ * 整页横向溢出（首页/文件资源/结构校对/对照翻译/阅读全部受影响，阅读子树本身不溢出）。
+ * 修法：窄屏把导航放到第二行并允许其内部横向滚动；品牌与项目名可收缩省略；用量徽标窄屏收起
+ * （完整明细在「设置 → 用量与预算」）。桌面 ≥1024 的视觉完全不变。
+ */
 @media (max-width: 899px) {
-  .intake-topbar.home-topbar { gap: var(--sp-2); padding: 0 var(--sp-3); }
-  .project-topbar-title { padding-left: 0; border-left: 0; }
+  .intake-topbar.home-topbar {
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-areas: "brand actions" "nav nav";
+    height: auto;
+    min-height: var(--topbar-h);
+    padding: var(--sp-2) var(--sp-3);
+    gap: var(--sp-1) var(--sp-2);
+  }
+  .intake-brand-group { grid-area: brand; gap: var(--sp-2); min-width: 0; }
+  .intake-topbar.home-topbar .intake-brand { min-width: 0; flex: 0 1 auto; }
+  .intake-topbar.home-topbar .brand-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .project-topbar-right { grid-area: actions; }
+  .intake-topbar.home-topbar nav {
+    grid-area: nav;
+    justify-content: flex-start;
+    width: 100%;
+    min-width: 0;
+    /* 导航是自己的滚动容器：标签都可达，且不把页面撑宽。 */
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+  .intake-topbar.home-topbar nav::-webkit-scrollbar { display: none; }
+  .intake-topbar.home-topbar nav button { flex: none; padding: 0 var(--sp-3); min-height: 32px; }
+  .project-topbar-title { padding-left: var(--sp-2); border-left: 0; }
   .project-topbar-title small { display: none; }
-  .usage { max-width: 120px; }
+  .usage { display: none; }
+  .statusbar { flex-wrap: wrap; height: auto; min-height: var(--statusbar-h); padding: 2px var(--sp-3); }
   .modal-backdrop { padding: var(--sp-3); }
+}
+
+/* < 560：极窄（手机竖屏）。品牌只留图标，项目名占剩余宽度并省略。 */
+@media (max-width: 559px) {
+  .intake-topbar.home-topbar .brand-text { display: none; }
+  .intake-topbar.home-topbar { padding: var(--sp-2) var(--sp-2); }
+  .intake-topbar.home-topbar nav button { padding: 0 var(--sp-2); font-size: var(--fs-caption1); }
+  .project-topbar-title strong { font-size: var(--fs-footnote); }
 }

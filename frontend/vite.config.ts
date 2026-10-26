@@ -7,6 +7,12 @@ import { createRequire } from "node:module";
 // PDF resources follow the locked dependency, rather than a second checked-in copy.
 const require = createRequire(import.meta.url);
 const pdfRoot = dirname(require.resolve("pdfjs-dist/package.json"));
+// CSP（script-src 'self'）下小 JS 若被内联成 data: URI 会被阻断：textfold-engine 外链脚本强制落盘。
+const inlineLimit = { include: [/[\\/]textfold-engine[\\/](bridge|after|bootstrap)\.js$/] };
+function assetsInlineLimit(filePath: string, _content: Buffer): boolean | undefined {
+  if (inlineLimit.include.some(pattern => pattern.test(filePath))) return false;
+  return undefined;   // 其余资产走 Vite 默认
+}
 const resourceFolders = ["wasm", "iccs", "cmaps", "standard_fonts"];
 function pdfResources(): Plugin {
   let output = "";
@@ -31,9 +37,10 @@ function pdfResources(): Plugin {
   };
 }
 export default defineConfig({
+
   plugins: [react(), pdfResources()],
   clearScreen: false,
   server: { strictPort: true, host: "127.0.0.1", port: 1420 },
   envPrefix: ["VITE_", "TAURI_ENV_"],
-  build: { target: "safari15", minify: process.env.TAURI_ENV_DEBUG ? false : "esbuild", sourcemap: !!process.env.TAURI_ENV_DEBUG },
+  build: { target: "safari15", minify: process.env.TAURI_ENV_DEBUG ? false : "esbuild", sourcemap: !!process.env.TAURI_ENV_DEBUG, assetsInlineLimit },
 });

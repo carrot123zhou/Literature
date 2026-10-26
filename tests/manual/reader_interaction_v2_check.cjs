@@ -1,0 +1,92 @@
+const {chromium}=require(process.env.PW_PACKAGE_PATH);
+(async()=>{
+ const browser=await chromium.launch({headless:true}); const checks=[];
+ const ok=(name,pass,detail)=>checks.push({name,pass:!!pass,detail});
+ try{
+  const page=await browser.newPage({viewport:{width:1440,height:920}});page.setDefaultTimeout(10000);
+  const errors=[];page.on('pageerror',e=>errors.push(String(e)));
+  const api=`http://127.0.0.1:${process.argv[3]}`,pid=process.argv[4];
+  const posts=[];page.on('request',r=>{if(r.method()==='POST'&&r.url().endsWith('/reader/layers'))posts.push(r.postDataJSON());});
+  await page.goto(`http://127.0.0.1:${process.argv[2]}/#/p/${pid}/reader`);
+  await page.waitForSelector('#lvlbar'); await page.waitForTimeout(700);
+  const freshParagraph=page.locator('#rdrr-pane-source p[data-block-id="b-p-1"]').first();
+  await freshParagraph.click({button:'right'});await page.waitForTimeout(100);
+  ok('已有三栏配置首开正文后右键监听生效',await page.locator('#selPop').isVisible());
+  await page.keyboard.press('Escape');
+  const sourceBody=page.locator('#rdrr-pane-source .rdrr-pane-body');
+  await sourceBody.evaluate(el=>{el.style.maxHeight='120px';el.scrollTop=el.scrollHeight;});
+  await page.getByRole('button',{name:/目录/}).first().click();
+  await page.locator('.rdrr-toc-row').first().click();await page.waitForTimeout(500);
+  ok('目录跳转同时定位原文栏',await sourceBody.evaluate(el=>el.scrollTop<10));
+  await sourceBody.evaluate(el=>{el.style.maxHeight='';});
+  await page.waitForSelector('#rdrr-pane-origin .pdf-page[data-rendered="true"]',{timeout:15000});
+  const origin=page.locator('#rdrr-pane-origin .rdrr-pane-body');
+  await origin.evaluate(el=>{el.scrollTop=el.scrollHeight*.55;});
+  await page.waitForTimeout(1000);
+  const pdfPixels=await origin.evaluate(el=>{
+   const rect=el.getBoundingClientRect();
+   return [...el.querySelectorAll('.pdf-page')].filter(p=>{const r=p.getBoundingClientRect();return r.bottom>rect.top&&r.top<rect.bottom;}).map(p=>{
+    const canvas=p.querySelector('canvas');let ink=0;
+    if(canvas){const d=canvas.getContext('2d').getImageData(0,0,canvas.width,canvas.height).data;for(let i=0;i<d.length;i+=16)if(d[i+3]>0&&d[i]<150&&d[i+1]<150&&d[i+2]<150)ink++;}
+    return {page:p.dataset.pageIndex,rendered:p.dataset.rendered,ink};
+   });
+  });
+  ok('滚动后的可见原件页有真实文字像素',pdfPixels.length>0&&pdfPixels.every(p=>p.rendered==='true'&&p.ink>10),pdfPixels);
+  await origin.evaluate(el=>{el.scrollTop=0;});await page.waitForTimeout(300);
+  ok('首开不发模型生成请求',posts.length===0);
+  ok('没有章节范围选择',await page.locator('select[data-action="scope"]').count()===0);
+  await page.locator('#lvlbar [data-l="2"]').click();
+  await page.waitForFunction(async({api,pid})=>{
+   const r=await fetch(`${api}/projects/${pid}/reader/layers?locale=zh-CN`,{headers:{'x-literature-token':''}});const d=await r.json();return d.ai_generated;
+  },{api,pid},{timeout:25000});
+  await page.waitForTimeout(2500);
+  ok('点击简述直接完成AI折叠',posts.some(p=>p.mode==='auto'),posts);
+  ok('后台按节请求且不强制重复生成',posts.filter(p=>p.mode==='auto').every(p=>Array.isArray(p.section_ids)&&p.section_ids.length===1&&!p.force));
+  const before=posts.length;
+  await page.locator('#lvlbar [data-l="3"]').click();await page.waitForTimeout(500);
+  await page.locator('#lvlbar [data-l="2"]').click();await page.waitForTimeout(1200);
+  ok('切层复用已有折叠',posts.length===before,{before,after:posts.length});
+  await page.locator('#lvlbar [data-l="1"]').click();
+  const p=page.locator('#rdrr-pane-source p[data-block-id="b-p-1"]').first();await p.scrollIntoViewIfNeeded();
+  await p.click();await page.waitForTimeout(100);
+  ok('左键不打开批注菜单',await page.locator('#selPop,.rdrr-blockbar').count()===0);
+  await p.hover();
+  const hover=await p.evaluate(el=>({bg:getComputedStyle(el).backgroundColor,shadow:getComputedStyle(el).boxShadow}));
+  ok('hover不填充整段背景',/rgba\(0, 0, 0, 0\)|transparent/.test(hover.bg)&&hover.shadow==='none',hover);
+  const original=await p.innerText();await p.click({button:'right'});await page.waitForSelector('#selPop');
+  ok('右键整段使用唯一划词菜单',await page.locator('#selPop').count()===1&&await page.locator('.rdrr-blockbar').count()===0);
+  const actionStyles=await page.locator('#selPop .rdrr-act').evaluateAll(nodes=>nodes.map(el=>({text:el.textContent,color:getComputedStyle(el).color,bg:getComputedStyle(el).backgroundColor})));
+  ok('墨色菜单按钮文字清晰且背景透明',actionStyles.length===2&&actionStyles.every(s=>s.text&&s.color==='rgba(255, 255, 255, 0.85)'&&s.bg==='rgba(0, 0, 0, 0)'),actionStyles);
+  const selected=await page.evaluate(()=>getSelection().toString());ok('右键确实选中整段',selected===original,{selected,original});
+  await page.locator('#selPop .rdrr-swatch').first().click();await page.waitForTimeout(200);
+  ok('整段高亮覆盖完整正文',await p.locator('mark.hl').innerText()===original);
+  await p.locator('mark.hl').click();await page.waitForTimeout(100);
+  ok('已有高亮左键也不弹编辑条',await page.locator('#selPop,#hlPop').count()===0);
+  await p.locator('mark.hl').click({button:'right'});await page.waitForSelector('#hlPop');
+  ok('已有高亮右键仅进入一个编辑态',await page.locator('#hlPop').count()===1&&await page.locator('#selPop').count()===0);
+  await page.locator('#hlPop textarea').fill('独立验收笔记');
+  await page.locator('#hlPop').getByRole('button',{name:'保存',exact:true}).click();await page.waitForTimeout(900);
+  const overlay=await page.request.get(`${api}/projects/${pid}/reader/state`,{headers:{'x-literature-token':''}}).then(r=>r.json());
+  ok('统一菜单笔记实际保存',overlay.overlay.annotations.some(a=>a.block_id==='b-p-1'&&a.note==='独立验收笔记'));
+  await page.keyboard.press('Escape');
+  const unmarked=page.locator('#rdrr-pane-source p[data-block-id="b-p-2"]').first();await unmarked.scrollIntoViewIfNeeded();
+  const rect=await unmarked.boundingBox();
+  await page.mouse.move(rect.x+2,rect.y+12);await page.mouse.down();await page.mouse.move(rect.x+160,rect.y+12,{steps:15});await page.mouse.up();
+  await page.waitForTimeout(250);
+  ok('鼠标划词复用同一套菜单且无重复条',await page.locator('#selPop').count()===1&&await page.locator('.rdrr-blockbar').count()===0);
+  await page.locator('#selPop').getByRole('button',{name:/笔记/}).click();
+  await page.waitForSelector('#hlPop textarea');
+  ok('划词菜单笔记直接打开同一编辑器',await page.locator('#selPop').count()===0&&await page.locator('#hlPop textarea').isVisible());
+  await page.screenshot({path:process.cwd()+'/tmp/reader-new-interactions.png'});
+  await page.route('**/reader/layers?locale=zh-CN',async route=>{
+   const response=await route.fetch();const data=await response.json();
+   data.failed=[{id:'',error:'已停止：未完成的章节保留原状。'}];
+   await route.fulfill({response,json:data});
+  });
+  await page.reload();await page.waitForSelector('#lvlbar');
+  await page.getByText('已停止 · 已生成的内容已保留',{exact:true}).waitFor();
+  ok('主动停止显示状态且不提供无效章节重试',await page.locator('.rdrr-lvlnote[data-action="retry"],.rdrr-lvlnote [data-action="retry"]').count()===0);
+  ok('无脚本异常',errors.length===0,errors);
+  console.log(JSON.stringify({checks},null,2));process.exitCode=checks.every(c=>c.pass)?0:1;
+ }finally{await browser.close();}
+})().catch(e=>{console.error(e);process.exitCode=1;});

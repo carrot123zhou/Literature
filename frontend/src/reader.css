@@ -1,0 +1,4 @@
+
+/* 设置 → 阅读：生效绑定来源说明 */
+.rdrr-settings-effective{font-size:11px; color:var(--rdrr-text3, var(--label-2)); line-height:1.6; margin-top:2px;}
+.rdrr-settings .rdrr-mpick-btn{max-width:260px;}

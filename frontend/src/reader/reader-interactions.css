@@ -1,0 +1,129 @@
+/* =============================================================================
+ * 阅读器交互增强（hover 联动 / 点击定位 / 块级标记 bar）
+ * -----------------------------------------------------------------------------
+ * 归 developer 维护；不覆盖 designer 的 reader.css。
+ * 由 ReaderWorkspace.tsx 导入，加载顺序在 reader.css 之后（令牌来自 theme.css）。
+ * ========================================================================== */
+
+/* ---- hover：文本栏不做整块高亮（段前小点动效在 reader.css）；仅保留跨栏原件 bbox 轻描边 ---- */
+/* 原件 bbox：轻描边，与「当前选择」的实心高亮区分 */
+.rdrr-origin .pdf-overlay .bbox.rdrr-bbox-hover {
+  outline: 2px solid var(--accent-ring, rgba(0, 122, 255, 0.45));
+  outline-offset: 1px;
+}
+/* 选中（点击/定位而来）保持更实的描边；hover 不能覆盖它 */
+.rdrr-origin .pdf-overlay .bbox.selected {
+  outline: 2px solid var(--accent, #007aff);
+  outline-offset: 1px;
+}
+
+/* ---- 块级标记：整段/整节被标记时在段首显示一条细色条 ---- */
+.rdrr-blockmark {
+  position: relative;
+  padding-left: 10px;
+}
+.rdrr-blockmark::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0.2em;
+  bottom: 0.2em;
+  width: 3px;
+  border-radius: 2px;
+  background: var(--rdrr-blockmark-color, var(--accent, #007aff));
+}
+
+/* ---- 折叠状态小字（仅生成中/失败/未配置时出现）与 ⓘ 详情面板 ---- */
+.rdrr-lvlnote {
+  pointer-events: auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: min(640px, 92%);
+  padding: 4px 10px;
+  border-radius: var(--r-pill, 999px);
+  background: var(--bg-elevated, #fff);
+  border: 1px solid var(--separator, rgba(60, 60, 67, 0.16));
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.10);
+  font-size: var(--fs-caption1, 12px);
+  color: var(--label-2, rgba(60, 60, 67, 0.6));
+}
+.rdrr-lvlnote span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rdrr-lvlnote .rdrr-layerfail { color: #c0392b; }
+.rdrr-lvlnote button {
+  min-height: 22px;
+  padding: 0 9px;
+  border-radius: var(--r-pill, 999px);
+  font-size: var(--fs-caption1, 12px);
+  white-space: nowrap;
+}
+.rdrr-lvldetail {
+  pointer-events: auto;
+  width: min(420px, 92vw);
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  padding: 12px 14px;
+  border-radius: var(--r-card, 12px);
+  background: var(--bg-elevated, #fff);
+  border: 1px solid var(--separator, rgba(60, 60, 67, 0.16));
+  box-shadow: 0 14px 40px rgba(0, 0, 0, 0.16);
+  font-size: var(--fs-caption1, 12px);
+  color: var(--label, rgba(0, 0, 0, 0.92));
+}
+.rdrr-lvldetail .rdrr-ld-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; line-height: 1.5; }
+.rdrr-lvldetail .rdrr-ld-dim { color: var(--label-3, rgba(60, 60, 67, 0.32)); }
+.rdrr-lvldetail .rdrr-ld-row button { min-height: 24px; }
+.rdrr-lvldetail .rdrr-layerfail { color: #c0392b; }
+
+/* ---- 页图不可用时的「版面框」降级视图说明 ---- */
+.rdrr-origin-note {
+  margin: 8px 12px 4px;
+  padding: 8px 10px;
+  border: 1px solid var(--tint-orange, rgba(255, 149, 0, 0.14));
+  border-radius: var(--r-card, 10px);
+  background: var(--tint-orange, rgba(255, 149, 0, 0.14));
+  color: var(--on-orange, #96560a);
+  font-size: var(--fs-caption1, 12px);
+  line-height: var(--lh-normal, 1.45);
+}
+
+/* ---- 折叠详情面板引用的状态色 ---- */
+.rdrr-layerfail{color:#C0392B;}
+
+/* 译层派生短句标记：说明它不是已有译文的逐字摘录 */
+.rdrr-derivedtag {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 0 6px;
+  border-radius: var(--r-pill, 999px);
+  background: var(--tint-purple, rgba(175, 82, 222, 0.12));
+  color: var(--on-purple, #7a2fa8);
+  font-size: var(--fs-caption1, 12px);
+  white-space: nowrap;
+  vertical-align: 1px;
+}
+
+/* 逐 unit 来源徽章：本地译文摘句 / 本地摘取 不能被当成模型产物 */
+.rdrr-localtag {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 0 6px;
+  border-radius: var(--r-pill, 999px);
+  background: var(--fill-tertiary, rgba(118, 118, 128, 0.12));
+  color: var(--label-2, rgba(60, 60, 67, 0.6));
+  font-size: var(--fs-caption1, 12px);
+  white-space: nowrap;
+  vertical-align: 1px;
+}
+.rdrr-modeltag {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 0 6px;
+  border-radius: var(--r-pill, 999px);
+  background: var(--tint-blue, rgba(0, 122, 255, 0.12));
+  color: var(--on-blue, #0060df);
+  font-size: var(--fs-caption1, 12px);
+  white-space: nowrap;
+  vertical-align: 1px;
+}

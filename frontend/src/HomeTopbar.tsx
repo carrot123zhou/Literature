@@ -1,7 +1,7 @@
 import type { ReactNode } from "react";
 
-export type TopbarView = "home" | "resources" | "history" | "review" | "read";
-export type WorkView = "review" | "read";
+export type TopbarView = "home" | "resources" | "history" | "review" | "read" | "reader";
+export type WorkView = "review" | "read" | "reader";
 
 type ProjectInfo = {
   title: string;
@@ -28,14 +28,15 @@ type Props = {
 const WORK_TABS: { view: WorkView; label: string }[] = [
   { view: "review", label: "结构校对" },
   { view: "read", label: "对照翻译" },
+  { view: "reader", label: "阅读" },
 ];
 
-// 主导航是全部页面共用的唯一外壳：首页 → 文件资源 → 结构校对 → 对照翻译。
+// 主导航是全部页面共用的唯一外壳：首页 → 文件资源 → 结构校对 → 对照翻译 → 阅读。
 // 打开项目后两个工作区标签激活；未打开项目时点击会得到“先去文件资源打开任务”的引导。
 export default function HomeTopbar({ active, openHome, openResources, openWork, project, closeProject, openSettings }: Props) {
   return <header className={`intake-topbar home-topbar${project ? " project-topbar" : ""}`}>
     <div className="intake-brand-group">
-      <button className="intake-brand" onClick={openHome}><img className="topbar-appicon" src="/favicon-32x32.png" alt="" aria-hidden="true"/>Literature</button>
+      <button className="intake-brand" onClick={openHome} aria-label="回到首页"><img className="topbar-appicon" src="/favicon-32x32.png" alt="" aria-hidden="true"/><span className="brand-text">Literature</span></button>
       {project && <span className="project-topbar-title"><strong>{project.title}</strong>{project.subtitle && <small>{project.subtitle}</small>}</span>}
       {project && <button className="project-close-button" title="关闭当前任务" aria-label="关闭当前任务" onClick={closeProject}>✕</button>}
     </div>

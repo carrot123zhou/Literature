@@ -42,10 +42,17 @@ export default function PdfPageCanvas({ pdf, pageIndex, renderWidth, active, pag
   const taskRef = useRef<{ cancel: () => void; promise: Promise<unknown> } | null>(null);
   const [size, setSize] = useState({ width: 0, height: 0 });
   const [failed, setFailed] = useState(false);
+  const [painted, setPainted] = useState(false);
+  const [attempt, setAttempt] = useState(0);
 
   useEffect(() => {
-    if (!active || renderWidth <= 0) return;
+    if (!active || renderWidth <= 0) {
+      setPainted(false);
+      return;
+    }
     let cancelled = false;
+    setFailed(false);
+    setPainted(false);
     const run = async () => {
       // 等待上一次渲染真正结束（取消也是异步的），否则 pdfjs 会因同一 canvas
       // 并发渲染直接抛错，导致页面永久显示“渲染失败”。
@@ -71,17 +78,29 @@ export default function PdfPageCanvas({ pdf, pageIndex, renderWidth, active, pag
         const cssViewport = page.getViewport({ scale });
         const ratio = Math.min(window.devicePixelRatio || 1, 2);
         const outputViewport = page.getViewport({ scale: scale * ratio });
-        canvas.width = Math.max(1, Math.floor(outputViewport.width));
-        canvas.height = Math.max(1, Math.floor(outputViewport.height));
-        canvas.style.width = `${cssViewport.width}px`;
-        canvas.style.height = `${cssViewport.height}px`;
+        // Decode into a private canvas, then publish the completed page in one
+        // paint. Cancelling/resizing must not erase the visible page mid-render.
+        const scratch = document.createElement("canvas");
+        scratch.width = Math.max(1, Math.floor(outputViewport.width));
+        scratch.height = Math.max(1, Math.floor(outputViewport.height));
         setSize({ width: cssViewport.width, height: cssViewport.height });
-        const context = canvas.getContext("2d");
+        const context = scratch.getContext("2d");
         if (!context) throw new Error("无法获取 canvas 2d 上下文");
-        const task = page.render({ canvas, canvasContext: context, viewport: outputViewport });
+        const task = page.render({ canvas: scratch, canvasContext: context, viewport: outputViewport });
         taskRef.current = task;
         await task.promise;
-        if (!cancelled) setFailed(false);
+        if (!cancelled && canvasRef.current === canvas) {
+          canvas.width = scratch.width;
+          canvas.height = scratch.height;
+          canvas.style.width = `${cssViewport.width}px`;
+          canvas.style.height = `${cssViewport.height}px`;
+          const visible = canvas.getContext("2d");
+          if (!visible) throw new Error("无法获取 canvas 2d 上下文");
+          visible.drawImage(scratch, 0, 0);
+          setPainted(true);
+          setFailed(false);
+        }
+        scratch.width = scratch.height = 0;
       } catch (error) {
         if (!cancelled) {
           console.error(`[PDF] 第 ${pageIndex + 1} 页渲染失败`, error);
@@ -91,7 +110,7 @@ export default function PdfPageCanvas({ pdf, pageIndex, renderWidth, active, pag
     };
     run();
     return () => { cancelled = true; taskRef.current?.cancel(); };
-  }, [pdf, pageIndex, renderWidth, active]);
+  }, [pdf, pageIndex, renderWidth, active, attempt]);
 
   const height = active && size.height > 0 ? size.height : estimatedPageHeight(undefined, renderWidth, pageRatio);
   const width = active && size.width > 0 ? size.width : renderWidth;
@@ -103,9 +122,10 @@ export default function PdfPageCanvas({ pdf, pageIndex, renderWidth, active, pag
   );
 
   return (
-    <div className="pdf-page" data-page-index={pageIndex} style={{ width, height }}>
+    <div className="pdf-page" data-page-index={pageIndex} data-rendered={active && painted ? "true" : "false"} style={{ width, height }}>
       {active && <canvas ref={canvasRef} />}
-      {active && failed && <div className="pdf-page-error" style={{ position: "absolute", inset: 0 }}>第 {pageIndex + 1} 页渲染失败</div>}
+      {active && !painted && !failed && <div role="status" style={{ position: "absolute", top: 12, left: 12 }}>正在渲染第 {pageIndex + 1} 页…</div>}
+      {active && failed && <div className="pdf-page-error" style={{ position: "absolute", inset: 0, zIndex: 3 }}>第 {pageIndex + 1} 页渲染失败 <button onClick={() => setAttempt(value => value + 1)}>重试</button></div>}
       {!active && <div className="pdf-page-placeholder">{pageIndex + 1}</div>}
       <div className={`pdf-overlay${showBoxes ? "" : " hide-boxes"}`}>
         {blocks.filter(hasBBox).map(block => {

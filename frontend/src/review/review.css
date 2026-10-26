@@ -1,5 +1,6 @@
 /* Structure review — UI v3 review workspace overrides. */
 .review-grid {
+  display: grid;
   min-width: 0;
   font-family: var(--font-ui);
   font-size: var(--fs-footnote);
@@ -238,17 +239,17 @@
 .source-preview-body .viewer-toolbar button { min-height: var(--sp-7); padding: 0 var(--sp-2); border: 0; border-radius: var(--r-control); background: var(--fill-2); color: var(--label); font-size: var(--fs-caption1); }
 .review-viewer-controls button:hover { background: var(--fill-1); }
 .review-viewer-controls .is-active { background: var(--accent-tint); color: var(--accent); }
-.pdf-scroll { min-width: 0; min-height: 0; overflow: auto; padding: var(--sp-5); background: var(--bg-sunken); overscroll-behavior: contain; }
+.pdf-scroll { min-width: 0; min-height: 0; overflow: auto; padding: var(--sp-5); background: var(--bg-sunken); overscroll-behavior: contain; display: block; }
 .review-grid .pdf-stack { display: flex; align-items: center; width: 100%; min-width: 0; gap: var(--sp-5); }
 .review-grid .pdf-stack { position: relative; }
-.pdf-page { max-width: 100%; background: var(--bg-elevated); box-shadow: var(--shadow-card); }
+.pdf-page { position: relative; max-width: 100%; background: var(--bg-elevated); box-shadow: var(--shadow-card); }
 .pdf-page canvas { display: block; max-width: 100%; }
-.pdf-page-placeholder { color: var(--label-3); font-size: var(--fs-caption1); }
-.pdf-page-error { color: var(--on-red); font-size: var(--fs-footnote); background: var(--tint-red); }
-.pdf-overlay { min-width: 0; min-height: 0; }
+.pdf-page-placeholder { display: grid; place-items: center; background: #fff; color: var(--label-3); font-size: var(--fs-caption1); }
+.pdf-page-error { display: grid; place-items: center; height: 100%; color: var(--on-red); font-size: var(--fs-footnote); background: var(--tint-red); }
+.pdf-overlay { position: absolute; inset: 0; pointer-events: none; min-width: 0; min-height: 0; }
 /* 覆盖 shell.css 的全局 button{min-height:32px}：bbox 高度必须完全由 bbox 决定，
    否则目录/脚注这类矮行会被撑到 32px，相邻框互相堆叠。 */
-.pdf-overlay .bbox { min-height: 0; padding: 0; transform: none; border: 1px solid var(--separator-strong); border-radius: 0; background: var(--fill-3); transition: background-color var(--dur-fast) var(--ease), border-color var(--dur-fast) var(--ease), box-shadow var(--dur-fast) var(--ease); }
+.pdf-overlay .bbox { position: absolute; pointer-events: auto; min-height: 0; padding: 0; transform: none; border: 1px solid var(--separator-strong); border-radius: 0; background: var(--fill-3); transition: background-color var(--dur-fast) var(--ease), border-color var(--dur-fast) var(--ease), box-shadow var(--dur-fast) var(--ease); }
 .bbox-title { border-color: var(--accent); background: var(--tint-blue); }
 .bbox-table { border-color: var(--system-teal); background: var(--tint-teal); }
 .bbox-equation { border-color: var(--system-purple); background: var(--tint-purple); }
@@ -313,24 +314,28 @@
 .legend-equation i { border-color: var(--system-purple); background: var(--tint-purple); }
 .legend-footnote i { border-color: var(--system-orange); background: var(--tint-orange); }
 .legend-flow i { border-style: dashed; border-color: var(--accent); background: transparent; }
-.source-preview-body { min-width: 0; min-height: 0; overflow: auto; padding: var(--sp-4); color: var(--label); }
+.source-preview-body { display: grid; gap: 14px; align-content: start; min-width: 0; min-height: 0; overflow: auto; padding: var(--sp-4); color: var(--label); }
 .source-preview-placeholder,
 .preview-notice,
 .raw-preview { min-width: 0; margin: var(--sp-4) auto; padding: var(--sp-4); border: 1px solid var(--separator); border-radius: var(--r-card); background: var(--bg-secondary); color: var(--label-2); }
-.source-preview-placeholder { max-width: 520px; text-align: center; }
+.source-preview-placeholder { width: min(520px, calc(100% - 40px)); max-width: 520px; text-align: center; }
 .source-preview-placeholder strong,
 .source-preview-placeholder span { display: block; overflow-wrap: anywhere; }
 .source-preview-placeholder span { margin: var(--sp-2) auto; color: var(--accent); font-size: var(--fs-subhead); font-weight: var(--fw-semibold); }
 .source-preview-placeholder p,
 .preview-notice p { margin-top: var(--sp-2); font-size: var(--fs-footnote); line-height: var(--lh-normal); overflow-wrap: anywhere; }
+.source-preview-placeholder p { color: #6b7280; }
+.preview-notice p { margin-bottom: 0; color: #7c4a17; }
 .source-image,
 .source-frame { display: block; width: 100%; max-width: 100%; min-height: 0; border: 1px solid var(--separator); border-radius: var(--r-control); }
-.raw-files { min-width: 0; margin-top: var(--sp-4); }
+.source-image { justify-self: center; box-shadow: 0 8px 28px #20322b20; background: #fff; }
+.source-frame { height: 62vh; background: #fff; }
+.raw-files { min-width: 0; margin-top: var(--sp-4); border: 1px solid var(--mineru-border); border-radius: 8px; background: #fff; padding: 10px 12px; }
 .raw-files summary { color: var(--label-2); font-size: var(--fs-footnote); font-weight: var(--fw-semibold); cursor: pointer; }
-.raw-file-row { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: var(--sp-2); padding: var(--sp-2) 0; border-bottom: 1px solid var(--separator); }
+.raw-file-row { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: var(--sp-2); padding: var(--sp-2) 0; border-bottom: 1px solid var(--separator); font-size: 11px; }
 .raw-file-row span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .raw-file-row small { color: var(--label-2); font-size: var(--fs-caption2); }
-.raw-preview pre { max-width: 100%; overflow: auto; color: var(--label); font: var(--fs-caption1)/var(--lh-normal) var(--font-mono); white-space: pre-wrap; overflow-wrap: anywhere; }
+.raw-preview pre { max-width: 100%; max-height: 40vh; margin: 0; padding: 12px; overflow: auto; color: var(--label); font: var(--fs-caption1)/var(--lh-normal) var(--font-mono); white-space: pre-wrap; overflow-wrap: anywhere; }
 
 /* Result projection */
 .review-grid .inspector { display: flex; flex-direction: column; }
@@ -343,7 +348,7 @@
 .review-grid .batch-actions { display: flex; align-items: center; min-width: 0; gap: var(--sp-2); flex-wrap: wrap; }
 .review-grid .batch-actions strong { color: var(--accent); font-size: var(--fs-caption1); }
 .review-grid .batch-actions button { min-height: var(--sp-6); padding: 0 var(--sp-2); border: 0; border-radius: var(--r-control); background: var(--accent-tint); color: var(--accent); font-size: var(--fs-caption1); }
-.block-list { min-width: 0; min-height: 0; overflow: auto; background: var(--bg); overscroll-behavior: contain; }
+.block-list { flex: 1; min-width: 0; min-height: 0; overflow: auto; background: var(--bg); overscroll-behavior: contain; }
 .review-grid .block-card { min-width: 0; margin: var(--sp-2); padding: var(--sp-3); border: 1px solid var(--separator); border-radius: var(--r-card); background: var(--bg-elevated); color: var(--label); cursor: pointer; transition: background-color var(--dur-fast) var(--ease), border-color var(--dur-fast) var(--ease), box-shadow var(--dur-fast) var(--ease); }
 .review-grid .block-card:hover { border-color: var(--separator-strong); }
 .review-grid .block-card.selected { border-color: var(--accent); background: var(--accent-tint); box-shadow: var(--focus-ring-inset); }

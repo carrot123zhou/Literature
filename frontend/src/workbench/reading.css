@@ -152,6 +152,7 @@
 .rdg-root .kv b.is-failed { color: var(--on-red); }
 .rdg-root .chip,
 .rdg-root .bstate { display: inline-flex; align-items: center; gap: var(--sp-1); min-width: 0; padding: var(--sp-1) var(--sp-2); border-radius: var(--r-pill); background: var(--tint-gray); color: var(--on-gray); font-size: var(--fs-caption2); font-weight: var(--fw-semibold); white-space: nowrap; }
+.rdg-root .bstate { border: 1px solid #d6ddd6; }
 .rdg-root .chip .dot,
 .rdg-root .bstate .dot { width: var(--sp-1); height: var(--sp-1); flex: none; border-radius: var(--r-pill); background: currentColor; }
 .rdg-root .chip.done,
@@ -218,10 +219,11 @@
 .rdg-root .fe-row { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr); gap: var(--sp-2); }
 
 /* 旧 TranslationBlock 仍可被路由/遗留入口渲染：用同一张卡片语言覆盖 styles.css。 */
-.reader-block.translation-edit { display: grid; gap: var(--sp-2); min-width: 0; padding: var(--sp-3); border: 1px solid var(--separator); border-radius: var(--r-card); background: var(--bg-elevated); box-shadow: var(--shadow-card); color: var(--label); font-family: var(--font-ui); }
+.reader-block.translation-edit { display: grid; gap: var(--sp-2); min-width: 0; min-height: 52px; padding: var(--sp-3); border: 1px solid var(--separator); border-radius: var(--r-card); background: var(--bg-elevated); box-shadow: var(--shadow-card); color: var(--label); font-family: var(--font-ui); font-size: 16px; line-height: 1.78; font-weight: 400; font-style: normal; }
 .reader-block.translation-edit.selected { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent), var(--shadow-card); }
 .reader-block.translation-edit .translation-text { min-width: 0; color: var(--label); font-family: var(--font-text); font-size: var(--fs-body); line-height: var(--lh-relaxed); overflow-wrap: anywhere; }
 .reader-block.translation-edit textarea { width: 100%; min-height: calc(var(--sp-9) * 2); padding: var(--sp-2) var(--sp-3); border: 1px solid var(--separator-strong); border-radius: var(--r-control); background: var(--bg-elevated); font-size: var(--fs-footnote); }
+.rdg-root .stalenote { border: 1px solid #cddde4; }
 .reader-block.translation-edit .translation-meta { display: flex; align-items: center; gap: var(--sp-2); min-width: 0; color: var(--label-2); font-size: var(--fs-caption1); }
 .reader-block.translation-edit .translation-meta button { min-height: calc(var(--sp-7) - var(--sp-1)); padding: 0 var(--sp-2); border: 1px solid var(--separator-strong); border-radius: var(--r-control); background: var(--bg-elevated); color: var(--accent); font-size: var(--fs-caption1); }
 .reader-block.translation-edit .translation-meta .grow { flex: 1; }
@@ -275,7 +277,7 @@
 .glossary-editor p,
 .glossary-editor small,
 .glossary-editor li { color: var(--label-2); font-size: var(--fs-footnote); }
-.glossary-editor textarea { width: 100%; min-height: calc(var(--sp-9) * 4); padding: var(--sp-3); border: 1px solid var(--separator-strong); border-radius: var(--r-control); font-size: var(--fs-footnote); }
+.glossary-editor textarea { width: 100%; min-height: calc(var(--sp-9) * 4); padding: var(--sp-3); border: 1px solid var(--separator-strong); border-radius: var(--r-control); font-size: var(--fs-footnote); resize: vertical; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-weight: 400; font-style: normal; line-height: 1.6; }
 .glossary-editor button { min-height: calc(var(--sp-8) - var(--sp-2)); padding: 0 var(--sp-3); border: 1px solid var(--separator-strong); border-radius: var(--r-control); background: var(--bg-elevated); color: var(--label); font-size: var(--fs-footnote); }
 .glossary-editor button.primary { border-color: var(--accent); background: var(--accent); color: var(--on-accent); }
 .glossary-editor .glossary-versions { display: grid; gap: var(--sp-2); padding: 0; margin: 0; list-style: none; }
@@ -295,9 +297,9 @@
 .rdg-root button.instant-float { position: fixed; z-index: 30; max-width: min(calc(var(--sp-9) * 7), calc(100vw - var(--sp-8))); transform: translate(-50%, calc(-100% - var(--sp-2))); border-color: var(--accent); border-radius: var(--r-card); background: var(--accent); color: var(--on-accent); box-shadow: var(--shadow-overlay); }
 .rdg-root button.instant-float:hover { background: var(--accent-hover); }
 .instant-card { position: fixed; right: max(var(--sp-4), env(safe-area-inset-right)); bottom: max(calc(var(--statusbar-h) + var(--sp-4)), env(safe-area-inset-bottom)); z-index: 35; display: grid; gap: var(--sp-3); width: min(calc(var(--sp-9) * 8), calc(100vw - var(--sp-8))); max-height: min(calc(100vh - var(--statusbar-h) - var(--sp-8)), 100%); padding: var(--sp-4); border: 1px solid var(--separator); border-radius: var(--r-card); background: var(--bg-elevated); box-shadow: var(--shadow-overlay); overflow: auto; color: var(--label); }
-.instant-card .panel-title { display: flex; align-items: center; gap: var(--sp-2); }
+.instant-card .panel-title { display: flex; align-items: center; gap: var(--sp-2); margin: 0 -16px; padding: 10px 16px; border-radius: 12px 12px 0 0; }
 .instant-card .panel-title button { margin-left: auto; }
-.instant-card small { color: var(--label-2); font-size: var(--fs-caption1); overflow-wrap: anywhere; }
+.instant-card small { display: block; margin-top: 12px; line-height: 1.5; color: var(--label-2); font-size: var(--fs-caption1); overflow-wrap: anywhere; }
 .instant-card p { color: var(--label); font-family: var(--font-text); font-size: var(--fs-body); line-height: var(--lh-relaxed); overflow-wrap: anywhere; }
 .instant-card button { min-height: calc(var(--sp-8) - var(--sp-2)); padding: 0 var(--sp-3); border: 1px solid var(--separator-strong); border-radius: var(--r-control); background: var(--bg-elevated); color: var(--label); font-size: var(--fs-footnote); }
 .instant-card button.primary { border-color: var(--accent); background: var(--accent); color: var(--on-accent); }
