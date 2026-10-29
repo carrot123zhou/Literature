@@ -16,7 +16,7 @@
 - 产物事实：sidecar SHA256 `944443b5b706ad164a40699bdbde0fc191f5c9f43e459bd6b9e54319fd186688`、49,261,696 B、runtime_revision `cb87926a4f118048b8b3`；前端 `index-09OtD-a8.js`；main SHA256 `d70ab031e49345af46468e08945ca35c63f0cbc683b768031b0cee92dc721c2f`；`.app` 61.19 MiB，adhoc 深签名 `codesign --verify --deep --strict` 通过。
 - 安装与运行：`launcher/Literature.app` 已替换，旧包备份 `launcher/.rollback-Literature-20261028-v0.1.0.app`（main `b032cd45…`）。启动后 `/health` → `version=0.1.1`、`runtime_revision=cb87926a4f118048b8b3`，29 项能力含 `reader_fold_batches_v1`；本次启动段 `sidecar.log` 无 ERROR/Traceback。
 - 自动化证据：`pytest tests -o addopts= -q` → 999 passed（6 条既有弃用警告）；前端 `tsc --noEmit` + Vite 生产构建通过；冻结 sidecar `tests/manual/reader_frozen_contract_check.py --binary` → 23/23（含 `mode=local` → 422、未绑模型 fold-run → 400、事实哈希不变）。
-- 发布物：`dist/release/Literature-0.1.1-macos-arm64.zip`（53 MB，`ditto --keepParent`，解压得到 `Literature.app`）附到 GitHub Release [v0.1.1](https://github.com/carrot123zhou/Literature/releases/tag/v0.1.1)；Windows 安装包由 `.github/workflows/windows.yml` 在标签推送后构建并附到同一 Release。
+- 发布物：`dist/release/Literature-0.1.1-macos-arm64.zip`（53 MB，`ditto --keepParent`，解压得到 `Literature.app`，本地 SHA256 `d58e4a772db816d9…` 与 Release 资产 digest 一致）附到 GitHub Release [v0.1.1](https://github.com/carrot123zhou/Literature/releases/tag/v0.1.1)；标签 CI run `40922844241` 成功（8m11s），`Literature_0.1.1_x64-setup.exe`（49.9 MB）已自动附到同一 Release，未在真机 Windows 运行验收。
 - 未验收：本轮新功能（AIFold 部分失败可读、结构块编辑、目录面板、原译连续滚动）未在 macOS 原生窗口逐项点击；未调用真实模型与真实书；未做 Developer ID 签名、公证、跨机器安装，本 adhoc 包不能等同正式对外发行包。
 
 ## 2026-10-28 · 目录面板布局与信息架构校准（本轮）
