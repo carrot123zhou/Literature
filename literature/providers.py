@@ -48,9 +48,13 @@ class ProviderError(RuntimeError):
 class ProviderTimeoutError(ProviderError):
     def __init__(self, kind: str, seconds: float) -> None:
         self.kind, self.seconds = kind, seconds
-        # 读/写超时可能已经产生费用；连接/连接池超时不可能计费。
-        self.possible_charge = kind in {"read", "write"}
-        action = {"read": "等待模型响应", "connect": "连接模型服务", "write": "发送模型输入", "pool": "等待模型连接"}[kind]
+        # 读/写超时、总时限越线都可能已经产生费用（流里已收到数据）；
+        # 连接/连接池超时不可能计费。
+        self.possible_charge = kind in {"read", "write", "total"}
+        action = {
+            "read": "等待模型响应", "connect": "连接模型服务", "write": "发送模型输入",
+            "pool": "等待模型连接", "total": "模型请求总时限",
+        }[kind]
         hint = (
             "若本任务用量里 reasoning 占比很高，可在模型服务里关闭思考模式或换用非思考模型。"
             if kind == "read" else ""
@@ -60,6 +64,31 @@ class ProviderTimeoutError(ProviderError):
 
 class _StreamUnsupported(Exception):
     """流式请求没有得到可用输出（空事件流），应回退非流式重试。"""
+
+
+class _TotalDeadlineExceeded(Exception):
+    """单请求总时限（with_request_limits 的 total_seconds）越线。
+
+    与 socket 层空闲超时（ProviderTimeoutError kind="read"）分开：total 只在流里
+    已收到数据后才可能触发（空闲等待先被 read 超时兜住），因此按「可能已计费」处理。
+    """
+
+    def __init__(self, seconds: float) -> None:
+        super().__init__(f"总时限 {seconds:g} 秒")
+        self.seconds = seconds
+
+
+class _OutputCapExceeded(Exception):
+    """传输途中输出字节数已超单请求上限（服务端忽略 max_tokens 的失控输出）。
+
+    在收到数据时就中止读取，不能等整份响应读完才复核——48k token 的失控输出
+    会白白拉满总时限并产生大额费用。费用未知（按 possible_charge=True 上报）。
+    """
+
+    def __init__(self, bytes_seen: int, cap_bytes: int) -> None:
+        super().__init__(f"已收 {bytes_seen} 字节 ≥ 上限 {cap_bytes} 字节")
+        self.bytes_seen = bytes_seen
+        self.cap_bytes = cap_bytes
 
 
 class _StreamInterrupted(ProviderError):
@@ -120,11 +149,16 @@ def redact_error_text(value: Any) -> str:
     return text
 
 
-def _aggregate_sse_events(lines: Iterable[Any]) -> dict[str, Any] | None:
+def _aggregate_sse_events(lines: Iterable[Any], on_output: Any = None) -> dict[str, Any] | None:
     """把 SSE 行流聚合成与非流式一致的响应 JSON；无任何有效事件时返回 None。
 
     思考增量（delta.reasoning_content）只参与保活，不计入译文内容；
     usage/finish_reason/model/id 以事件流为准（include_usage 时 usage 在末尾事件）。
+
+    ``on_output(piece)``：每个语义输出增量（delta.content / delta.reasoning_content）
+    回调一次，供 with_request_limits 的输出上限按**解码后文本字节数**计量
+    （SSE/JSON 框架字节不计入语义上限，只计入宽松的原始封套安全上限）。回调抛出
+    的异常原样上抛（上限越界即中止读取）。
     """
     content_parts: list[str] = []
     finish_reason = ""
@@ -161,10 +195,16 @@ def _aggregate_sse_events(lines: Iterable[Any]) -> dict[str, Any] | None:
         piece = delta.get("content")
         if isinstance(piece, str):
             content_parts.append(piece)
+            if on_output is not None and piece:
+                on_output(piece)
         elif isinstance(piece, list):
-            content_parts.extend(
-                str(item.get("text", "")) for item in piece if isinstance(item, dict)
-            )
+            for item in (str(x.get("text", "")) for x in piece if isinstance(x, dict)):
+                content_parts.append(item)
+                if on_output is not None and item:
+                    on_output(item)
+        reasoning_piece = delta.get("reasoning_content")
+        if on_output is not None and isinstance(reasoning_piece, str) and reasoning_piece:
+            on_output(reasoning_piece)   # 思考增量也是真实输出，计入输出上限
         reason = choice.get("finish_reason")
         if reason:
             finish_reason = str(reason)
@@ -783,6 +823,13 @@ class OpenAICompatibleProvider:
         self._drop_reasoning_fields = False
         # 明文 HTTP 放行的日志只打一次（按用户显式配置放行，仍要留痕）。
         self._plaintext_warned = False
+        # 单请求传输时限 + 输出上限 + 活动回调（仅 with_request_limits 副本非 None）。
+        # 默认 None：其余请求方（翻译/结构/探测等）的默认行为与限额完全不变。
+        self._request_limits: dict[str, float] | None = None
+        self._on_activity: Any = None
+        # 可自动重试的状态码（with_request_limits 副本收窄为 {429}：
+        # 5xx/408 等可能已计费，不能隐藏重发）。
+        self._retry_status_codes: frozenset[int] = frozenset(RETRY_STATUS_CODES)
         # 可选：每次真实 HTTP attempt 进入公共协调层（预算预留/并发/退避）。
         # begin(prompt_chars) 在发请求前调用并返回句柄；end(handle, response, error, final) 在 attempt 后处理。
         # final=True 时预算预留不在 end 释放，而是留在线程本地，由调用方写账后原子 reconcile。
@@ -855,6 +902,175 @@ class OpenAICompatibleProvider:
         provider.config.max_output_tokens = max(1, int(value))
         return provider
 
+    def with_request_limits(
+        self, *, idle_seconds: float = 90.0, total_seconds: float = 180.0,
+        max_output_tokens: int = 4000, on_activity: Any = None,
+    ) -> "OpenAICompatibleProvider":
+        """返回一个**单请求专用**的 provider 副本：传输时限 + 输出上限 + 活动回调。
+
+        时限语义（SSE 与非流式回退都覆盖）：
+        - connect ≤ 20s（与全库一致的上限，不随 total 拉长）。
+        - idle_seconds：空闲上限。SSE 下 = 两个数据块之间的最大间隔（httpx read 超时，
+          思考增量也保活）；非流式回退下 = 等待响应字节的读超时（服务端整段静默时同样
+          受它约束）。超时抛 ``ProviderTimeoutError(kind="read")``，按「可能已计费」。
+        - total_seconds：单请求总时限。SSE 在逐事件处检查绝对 deadline（连续吐 token
+          的流不会绕过它）；非流式回退同样在逐字节读取处检查。越线抛
+          ``ProviderTimeoutError(kind="total")``，按「可能已计费」。
+        - 全程只用 socket 超时、读取循环内的 deadline 检查，以及一个到点 close 流、
+          事后必被 cancel 的看门狗 Timer（兑住「阻塞在 read 上」的越线）；请求结束
+          （成功/失败/回退）后看门狗已 cancel，无悬挂定时器。
+        - 总时限按**整个 complete**（含 400 协议回退后的重发）计：deadline 在进入
+          循环前起算，不因回退重发而重新拉满；每次真实传输的等待也被看门狗兑在
+          剩余时限内。
+        - 重试口径：副本对 5xx/408 等可能已计费的状态**不自动重发**，只允许
+          明确未计费的 429 与连接失败重试，以及显式 400 协议回退。
+
+        隔离：副本有独立连接池与独立配置（max_output_tokens 取 max_output_tokens），
+        调用方用完应 ``close()`` 副本；原 provider 与其他请求方的默认行为完全不变。
+        流式/思考字段回退状态（``_stream_disabled``/``_drop_reasoning_fields``）**从原
+        provider 继承**：那是能力探测结论（服务不支持流式/不认思考字段），继承可避免
+        每个请求副本都重复一次已被拒绝的请求；副本内新学到的回退不写回原对象。
+
+        输出上限：**传输途中**按已收字节数复核（上限 ≈ max_output_tokens×12 字节 +
+        响应封套余量）：服务端若忽略 max_tokens 参数持续生成，读取在越界当下即中止
+        （``ProviderError``、``possible_charge=True``，费用未知、不自动重发）；响应完整
+        拿到后再按真实 usage（缺失时按内容保守估算）复核一次。两种路径都不改写上游
+        ``finish_reason``（原样保留），超限信号只体现在错误本身与 ``error.response``
+        上供调用方记账。
+
+        活动回调：``on_activity(dict)``，请求发出时收到一次
+        ``{"state"/"stage": "waiting", ...}``，收到数据后收到
+        ``{"state"/"stage": "generating", ...}``（每 0.5s 节流），字段：
+        ``request_started_at`` / ``last_response_at``（ISO 8601 UTC 字符串，另附
+        ``*_epoch`` Unix 秒浮点）、``elapsed_seconds``。回调异常只记 debug，不影响请求。"""
+        provider = copy(self)
+        provider.config = copy(self.config)
+        cap = max(1, int(max_output_tokens))
+        provider.config.max_output_tokens = cap
+        provider.timeout = float(total_seconds)
+        # 完全隔离：独立连接池，本请求内的连接不与共享实例共用。
+        # _stream_disabled/_drop_reasoning_fields（能力回退结论）随 copy() 从原 provider
+        # 继承——不重置，避免每个副本都重复一次已被服务拒绝的请求。
+        provider._client = None
+        provider._client_lock = threading.Lock()
+        # 限流/网关类 5xx 的自动重发可能已计费：副本只重试明确未计费的 429。
+        provider._retry_status_codes = frozenset({429})
+        provider._request_limits = {
+            "idle_seconds": max(0.05, float(idle_seconds)),
+            "total_seconds": max(0.1, float(total_seconds)),
+            "max_output_tokens": float(cap),
+        }
+        provider._on_activity = on_activity
+        return provider
+
+    # 语义输出上限（传输中，按解码后的 delta 文本字节计）：token×4 字节 + 余量。
+    # 英文 token ≈4 字符、CJK ≈3 UTF-8 字节；4 字节/token + 事件余量对合法输出宽松，
+    # 对真正的失控输出（数万 token）能及早中止。
+    OUTPUT_SEMANTIC_BYTE_PER_TOKEN = 4
+    OUTPUT_SEMANTIC_ENVELOPE = 8192
+    # 原始封套安全上限（宽松）：SSE/JSON 框架、usage、role 等不计入语义上限，
+    # 但整条流也不能无限吃内存/带宽——取 max(1 MiB, 语义上限×64)。
+    OUTPUT_RAW_MIN_BYTES = 1024 * 1024
+    OUTPUT_RAW_MULTIPLE = 64
+
+    @staticmethod
+    def _estimate_output_tokens(text: str) -> int:
+        """无 usage 时的输出 token 保守估算：CJK 按字计，其余按 4 字符/token。
+
+        只用于 with_request_limits 的输出上限复核；宁严勿漏（高估最多让一个确实
+        超限界的请求被判失败，低估会让截断内容混成完成结果）。"""
+        value = str(text or "")
+        cjk = sum(
+            1 for ch in value
+            if "\u2e80" <= ch <= "\u9fff" or "\u3000" <= ch <= "\u303f" or "\uff00" <= ch <= "\uffef"
+        )
+        return cjk + (len(value) - cjk + 3) // 4
+
+    def _activity_emitters(self) -> tuple[Any, Any]:
+        """构造 (on_waiting, on_data) 活动发射器；未挂 on_activity 时返回 (None, None)。"""
+        callback = self._on_activity
+        if callback is None:
+            return None, None
+        started = time.time()
+        state = {"waiting_sent": False, "generating": False, "last_emit": 0.0}
+
+        def send(kind: str) -> None:
+            now = time.time()
+            try:
+                callback({
+                    "state": kind,
+                    "stage": kind,
+                    "request_started_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(started)),
+                    "last_response_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now)),
+                    "request_started_at_epoch": started,
+                    "last_response_at_epoch": now,
+                    "elapsed_seconds": round(now - started, 3),
+                })
+            except Exception:  # noqa: BLE001 - 活动回调失败不影响请求
+                logger.debug("on_activity 回调失败", exc_info=True)
+
+        def on_waiting() -> None:
+            if not state["waiting_sent"]:
+                state["waiting_sent"] = True
+                send("waiting")
+
+        def on_data() -> None:
+            now = time.monotonic()
+            if not state["generating"]:
+                state["generating"] = True
+                state["last_emit"] = now
+                send("generating")
+            elif now - state["last_emit"] >= 0.5:
+                state["last_emit"] = now
+                send("generating")
+
+        return on_waiting, on_data
+
+    @staticmethod
+    def _guarded_lines(lines: Iterable[Any], *, deadline: float | None, total: float, on_data: Any,
+                       byte_cap: int = 0) -> Any:
+        """逐行包一层总时限检查 + 活动发射（仅 with_request_limits 副本启用）。
+
+        总时限在每行 SSE 事件处检查绝对 deadline：只要流还在持续吐事件，任何时刻越线
+        都立刻中止，连续 SSE 不会绕过 total_seconds；两块之间的空闲由 socket 层 read
+        超时（idle_seconds）兑住，阻塞中的读取由看门狗（_read_stream 内）到点 close。
+        byte_cap > 0 时按已收字节数（含 SSE 框架）拦截失控输出。"""
+        next_emit = 0.0
+        seen = 0
+        for line in lines:
+            if deadline is not None and time.monotonic() > deadline:
+                raise _TotalDeadlineExceeded(total)
+            if byte_cap > 0:
+                seen += len(line.encode("utf-8", errors="replace")) + 1
+                if seen > byte_cap:
+                    raise _OutputCapExceeded(seen, byte_cap)
+            if on_data is not None:
+                now = time.monotonic()
+                if now >= next_emit:
+                    next_emit = now + 0.5
+                    on_data()
+            yield line
+
+    @staticmethod
+    def _guarded_bytes(chunks: Iterable[Any], *, deadline: float | None, total: float, on_data: Any,
+                       byte_cap: int = 0) -> Any:
+        """逐字节块包一层总时限检查 + 输出上限 + 活动发射（非流式回退的等价护栏）。"""
+        next_emit = 0.0
+        seen = 0
+        for chunk in chunks:
+            if deadline is not None and time.monotonic() > deadline:
+                raise _TotalDeadlineExceeded(total)
+            if byte_cap > 0:
+                seen += len(chunk)
+                if seen > byte_cap:
+                    raise _OutputCapExceeded(seen, byte_cap)
+            if on_data is not None:
+                now = time.monotonic()
+                if now >= next_emit:
+                    next_emit = now + 0.5
+                    on_data()
+            yield chunk
+
     def close(self) -> None:
         client, self._client = self._client, None
         if client is not None:
@@ -899,20 +1115,97 @@ class OpenAICompatibleProvider:
             content.append({"type": "image_url", "image_url": {"url": item["image_url"], "detail": "high"}})
         return self._complete(system=system, content=content)
 
-    def _read_stream(self, client: Any, url: str, headers: dict[str, str], body: dict[str, Any], timeouts: Any, progress: dict[str, bool] | None = None) -> tuple[Any, dict[str, Any]]:
+    def _read_stream(
+        self, client: Any, url: str, headers: dict[str, str], body: dict[str, Any], timeouts: Any,
+        progress: dict[str, bool] | None = None,
+        *, deadline: float | None = None, total: float = 0.0, on_data: Any = None,
+        raw_cap: int = 0, semantic_cap: int = 0,
+    ) -> tuple[Any, dict[str, Any]]:
         """发起一次 SSE 流式请求，聚合成与非流式一致的响应 JSON 后返回。
 
         流式把「读超时」的语义从「等待整份响应的总时限」变成「两个数据块之间的
         空闲时限」：只要模型还在持续吐 token（包括思考型模型的 reasoning 增量），
         长时间生成不会再在总时限处整单超时作废——这是降低翻译失败率的关键。
         思考增量（delta.reasoning_content）只参与保活，不计入译文内容。
+
+        ``deadline``/``total``/``on_data``/``byte_cap`` 仅由 with_request_limits 副本传入：
+        逐事件/逐字节检查单请求总时限与输出字节上限，并对每次收到数据发射活动回调。
+        另挂一个到点 close 流的看门狗 Timer：兑住「阻塞在 read 上、等不到下一个事件」
+        的越线（否则总时限最多会被拉长一个 idle）；Timer 在 finally 中必被 cancel。
         """
+        guarded = deadline is not None or on_data is not None
+        watchdog_fired = threading.Event()
         with client.stream("POST", url, headers=headers, json=body, timeout=timeouts) as response:
-            if response.status_code >= 400:
-                response.read()
-                raise _HTTPStatusError(response, redact_error_text(response.text))
-            content_type = str(response.headers.get("content-type") or "").lower()
-            if "text/event-stream" not in content_type:
+            watchdog: threading.Timer | None = None
+            try:
+                if deadline is not None:
+                    # 看门狗：到点强关流，让阻塞在 read 上的本线程立刻醒来报总时限越线。
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise _TotalDeadlineExceeded(total)
+                    watchdog = threading.Timer(remaining, self._fire_watchdog, args=(watchdog_fired, response))
+                    watchdog.daemon = True
+                    watchdog.start()
+                return self._consume_response(
+                    response, progress, deadline=deadline, total=total,
+                    on_data=on_data, raw_cap=raw_cap, semantic_cap=semantic_cap, guarded=guarded,
+                )
+            except BaseException as error:
+                # 看门狗已开火时，任何从被强关的流里冒出来的异常都归因为总时限越线。
+                if watchdog_fired.is_set() and not isinstance(
+                        error, (_TotalDeadlineExceeded, _HTTPStatusError, _StreamUnsupported, _OutputCapExceeded)):
+                    raise _TotalDeadlineExceeded(total) from error
+                raise
+            finally:
+                if watchdog is not None:
+                    watchdog.cancel()   # 无悬挂定时器：成功/失败/回退都立即撤销
+                    watchdog.join(timeout=1.0)   # 已开火的回调若有阻塞也只在有限时间内等
+
+    @staticmethod
+    def _fire_watchdog(fired: threading.Event, response: Any) -> None:
+        """到点中止传输：先 best-effort shutdown socket 再 close 流。
+
+        macOS 上另一线程的 close 不一定唤醒阻塞中的 recv（要等 socket 级 read 超时）；
+        显式 shutdown(SHUT_RDWR) 能让 recv 立刻返回错误。全程 best effort：
+        任何失败都由读取层的逐块 deadline 检查兑底。
+        """
+        fired.set()
+        try:
+            network_stream = (response.extensions or {}).get("network_stream")
+            sock = network_stream.get_extra_info("socket") if network_stream is not None else None
+            if sock is not None:
+                import socket as _socket
+                try:
+                    sock.shutdown(_socket.SHUT_RDWR)
+                except OSError:
+                    pass  # 可能已被对端/连接池关闭
+        except Exception:  # noqa: BLE001 - shutdown 失败不影响 close 兑底
+            logger.debug("看门狗 shutdown socket 失败", exc_info=True)
+        try:
+            response.close()
+        except Exception:  # noqa: BLE001 - 关流失败时读取层仍有逐块 deadline 检查兑底
+            logger.debug("看门狗关闭流失败", exc_info=True)
+
+    def _consume_response(
+        self, response: Any, progress: dict[str, bool] | None = None,
+        *, deadline: float | None = None, total: float = 0.0, on_data: Any = None,
+        raw_cap: int = 0, semantic_cap: int = 0, guarded: bool,
+    ) -> tuple[Any, dict[str, Any]]:
+        # 语义输出计数器：只计解码后的 delta.content / reasoning_content 字节数
+        # （SSE/JSON 框架字节不算语义输出，只受宽松的 raw_cap 封套安全上限约束）。
+        semantic = {"bytes": 0}
+
+        def on_output(piece: str) -> None:
+            semantic["bytes"] += len(piece.encode("utf-8", errors="replace"))
+            if semantic_cap > 0 and semantic["bytes"] > semantic_cap:
+                raise _OutputCapExceeded(semantic["bytes"], semantic_cap)
+
+        if response.status_code >= 400:
+            response.read()
+            raise _HTTPStatusError(response, redact_error_text(response.text))
+        content_type = str(response.headers.get("content-type") or "").lower()
+        if "text/event-stream" not in content_type:
+            if not guarded:
                 # 必须先 read()：真实流式响应未读取前访问 .json()/.text 会抛
                 # httpx.ResponseNotRead（它不是 ValueError/HTTPError，不会被下捕）。
                 response.read()
@@ -929,19 +1222,43 @@ class OpenAICompatibleProvider:
                         if value is not None:
                             return response, value
                     raise _HTTPStatusError(response, f"响应不是有效 JSON：{redact_error_text(error)}") from error
-            value = self._aggregate_stream_lines(response.iter_lines(), progress)
-            if value is None:
-                # 连一个有效事件都没有：视为协议不兼容，回退非流式，而不是伪造成空译文。
-                raise _StreamUnsupported("空事件流")
-            return response, value
+            # 限额副本：非流式回退同样逐字节受总时限/活动护栏约束（不整块 read）。
+            pieces = [chunk for chunk in self._guarded_bytes(
+                response.iter_bytes(), deadline=deadline, total=total, on_data=on_data,
+                byte_cap=raw_cap,
+            )]
+            raw = b"".join(pieces)
+            try:
+                text = raw.decode(response.encoding or "utf-8")
+            except (UnicodeDecodeError, LookupError):
+                text = raw.decode("utf-8", errors="replace")
+            try:
+                return response, json.loads(text)
+            except ValueError as error:
+                if "data:" in text:
+                    value = _aggregate_sse_events(text.splitlines())
+                    if value is not None:
+                        return response, value
+                raise _HTTPStatusError(response, f"响应不是有效 JSON：{redact_error_text(error)}") from error
+        lines: Iterable[Any] = response.iter_lines()
+        if guarded:
+            lines = self._guarded_lines(lines, deadline=deadline, total=total, on_data=on_data,
+                                        byte_cap=raw_cap)
+        value = self._aggregate_stream_lines(lines, progress, on_output=on_output if semantic_cap > 0 else None)
+        if value is None:
+            # 连一个有效事件都没有：视为协议不兼容，回退非流式，而不是伪造成空译文。
+            raise _StreamUnsupported("空事件流")
+        return response, value
 
     @staticmethod
-    def _aggregate_stream_lines(lines: Iterable[Any], progress: dict[str, bool] | None = None) -> dict[str, Any] | None:
+    def _aggregate_stream_lines(lines: Iterable[Any], progress: dict[str, bool] | None = None,
+                                on_output: Any = None) -> dict[str, Any] | None:
         """聚合 SSE 行，并区分“接收到数据后才断开”与“一个字节都没拿到”。
 
         已读到内容的断流会抛 _StreamInterrupted：内容可能已经被服务端生成并计费，
         不能按“本次无实际费用”自动重发（会双重扣费且漏账）。
-        ``progress`` 为调用方提供的可变标记（用于异常兜底判断是否可能已计费）。
+        ``progress`` 为调用方提供的可变标记（用于异常兜底判断是否可能已计费）；
+        ``on_output`` 为语义输出增量回调（见 _aggregate_sse_events）。
         """
         try:
             import httpx
@@ -958,7 +1275,7 @@ class OpenAICompatibleProvider:
                 yield line
 
         try:
-            return _aggregate_sse_events(marked())
+            return _aggregate_sse_events(marked(), on_output=on_output)
         except httpx.TimeoutException:
             # 读超时保持原类型：外层会映射成 ProviderTimeoutError 并已按“可能已计费”处理。
             raise
@@ -998,10 +1315,24 @@ class OpenAICompatibleProvider:
             "temperature": self.config.temperature,
             "max_tokens": self.config.max_output_tokens,
         }
+        limits = self._request_limits
+        # 默认超时（无限额时用）；限额副本在循环内按剩余时限动态收窄（见下）。
         timeouts = httpx.Timeout(self.timeout, connect=min(20.0, self.timeout),
                                  write=min(60.0, self.timeout), pool=min(30.0, self.timeout))
         client = self._client_instance(httpx)
         prompt_chars = len(system) + (len(content) if isinstance(content, str) else 0)
+        on_waiting, on_data = self._activity_emitters()
+        # 总时限按整个 complete（含 400 协议回退后的重发）计：deadline 进入循环前起算，
+        # 回退重发不重新拉满；每次 attempt 的 connect/read/write/pool 都按剩余时限收窄，
+        # 看门狗再兑住阻塞中的读取（见 _read_stream）。
+        complete_deadline = time.monotonic() + float(limits["total_seconds"]) if limits else None
+        # 语义输出上限（解码后 delta 文本字节）与宽松的原始封套安全上限。
+        semantic_cap = 0
+        raw_cap = 0
+        if limits:
+            cap_tokens = float(limits["max_output_tokens"])
+            semantic_cap = int(cap_tokens * self.OUTPUT_SEMANTIC_BYTE_PER_TOKEN) + self.OUTPUT_SEMANTIC_ENVELOPE
+            raw_cap = max(self.OUTPUT_RAW_MIN_BYTES, int(semantic_cap * self.OUTPUT_RAW_MULTIPLE))
         response = None
         value: dict[str, Any] = {}
         attempt = 0
@@ -1015,13 +1346,39 @@ class OpenAICompatibleProvider:
             if use_stream:
                 body["stream"] = True
                 body["stream_options"] = {"include_usage": True}
+            if on_waiting is not None:
+                on_waiting()
             handle = self.attempt_hooks[0](prompt_chars) if self.attempt_hooks else None
             # 本次 attempt 是否已经读到流式数据：决定异常时是否按“可能已计费”对账，
             # 而不是一律当成“没花钱”释放。
             stream_progress = {"received": False}
+            if limits:
+                # 本 attempt 的传输超时按**剩余总时限**收窄：兼容回退之间的间隙不豁免，
+                # total_seconds 不会被 400 回退逐次拉满。
+                remaining = (complete_deadline or 0.0) - time.monotonic()
+                if remaining < 0.05:
+                    # 预算名额归还（未发出任何请求，无费用）；不再发起新 attempt。
+                    if self.attempt_hooks:
+                        self.attempt_hooks[1](handle, None, None, False)
+                    raise ProviderTimeoutError("total", float(limits["total_seconds"]))
+                total_seconds = float(limits["total_seconds"])
+                timeouts = httpx.Timeout(
+                    total_seconds,
+                    connect=min(20.0, total_seconds, remaining),
+                    read=min(float(limits["idle_seconds"]), total_seconds, remaining),
+                    write=min(60.0, total_seconds, remaining),
+                    pool=min(30.0, total_seconds, remaining),
+                )
             try:
-                if use_stream:
-                    response, value = self._read_stream(client, url, headers, body, timeouts, stream_progress)
+                if use_stream or limits:
+                    # 限额副本统一走流式读取函数：非流式回退（body 无 stream 字段）也
+                    # 受剩余时限/输出上限/活动护栏约束，而不是无护栏的 client.post。
+                    response, value = self._read_stream(
+                        client, url, headers, body, timeouts, stream_progress,
+                        deadline=complete_deadline,
+                        total=float(limits["total_seconds"]) if limits else 0.0,
+                        on_data=on_data, raw_cap=raw_cap, semantic_cap=semantic_cap,
+                    )
                 else:
                     response = client.post(url, headers=headers, json=body, timeout=timeouts)
                     if response.status_code >= 400:
@@ -1032,6 +1389,27 @@ class OpenAICompatibleProvider:
                         value = response.json()
                     except ValueError as error:
                         raise _HTTPStatusError(response, f"响应不是有效 JSON：{redact_error_text(error)}") from error
+            except _TotalDeadlineExceeded as error:
+                # 单请求总时限越线：可能已计费，不自动重发；按超时上报（kind="total"）。
+                if self.attempt_hooks:
+                    self.attempt_hooks[1](handle, None, error, True)
+                raise ProviderTimeoutError("total", error.seconds) from error
+            except _OutputCapExceeded as error:
+                # 传输途中已收字节超输出上限（服务端忽略 max_tokens 的失控输出）：
+                # 立即中止读取，不再收完 48k token；可能已计费，不自动重发。
+                if self.attempt_hooks:
+                    self.attempt_hooks[1](handle, None, error, True)
+                partial = ProviderResponse(
+                    content="", provider=self.config.provider, model=self.config.model,
+                    request_id="", finish_reason="",   # 上游未结束，不伪造 finish_reason
+                    raw={"output_cap_exceeded": {"bytes_seen": error.bytes_seen, "cap_bytes": error.cap_bytes}},
+                )
+                raise ProviderError(
+                    f"模型输出在传输中超过单请求上限（已收 {error.bytes_seen} 字节 ≥ 约 "
+                    f"{error.cap_bytes} 字节；服务端可能忽略了 max_tokens 参数）。已中止读取，"
+                    "费用按未知口径记账，不自动重发；请缩小输入范围或降低输出预算。",
+                    response=partial, possible_charge=True,
+                ) from error
             except (_StreamInterrupted, _SSEErrorEvent) as error:
                 # 已读到内容后才断开 / 服务端在流里回了 error：可能已经计费，也不应自动重发。
                 # final=True 把预留交给调用方按“费用未知”对账（而不是释放成零成本）。
@@ -1042,6 +1420,11 @@ class OpenAICompatibleProvider:
                 if self.attempt_hooks:
                     self.attempt_hooks[1](handle, None, error, True)
                 kind = "connect" if isinstance(error, httpx.ConnectTimeout) else "write" if isinstance(error, httpx.WriteTimeout) else "pool" if isinstance(error, httpx.PoolTimeout) else "read"
+                # 限额副本：read 超时按剩余总时限收窄，若在总时限处触发，应按总时限越线
+                # 上报（kind="total"），不冒充空闲超时（空闲超时的语义是“两块间隔超 idle”）。
+                if (complete_deadline is not None and kind == "read" and limits
+                        and time.monotonic() >= complete_deadline - 0.05):
+                    raise ProviderTimeoutError("total", float(limits["total_seconds"])) from error
                 # 超时可能已经产生费用，不自动重发；由上层按分块重试。
                 raise ProviderTimeoutError(kind, getattr(timeouts, kind)) from error
             except httpx.HTTPError as error:
@@ -1101,7 +1484,7 @@ class OpenAICompatibleProvider:
                             self.attempt_hooks[1](handle, error.response, None, False)
                         self._drop_reasoning_fields = True
                         continue
-                if error.status_code in RETRY_STATUS_CODES and attempt < self.max_retries:
+                if error.status_code in self._retry_status_codes and attempt < self.max_retries:
                     # 429/5xx 且还会重试：释放本次 attempt 的预留并记退避冷却。
                     if self.attempt_hooks:
                         self.attempt_hooks[1](handle, error.response, None, False)
@@ -1150,6 +1533,23 @@ class OpenAICompatibleProvider:
             reasoning_tokens=int(completion_details.get("reasoning_tokens") or usage.get("reasoning_tokens") or 0),
             estimated_cost=cost, finish_reason=finish_reason, raw=value,
         )
+        if limits:
+            # 输出上限复核：服务端若忽略 max_tokens 参数继续生成，这里按真实 usage
+            # （缺失时按内容保守估算）强制收口。超限不重发（重发会重复计费）：把
+            # 含真实 usage 的响应挂在 error.response 上交调用方记账后按失败处理。
+            cap = int(limits.get("max_output_tokens") or 0)
+            if cap > 0:
+                reported = result.output_tokens
+                estimate = self._estimate_output_tokens(result.content)
+                tokens = max(reported, estimate)
+                if tokens > cap:
+                    # 上游 finish_reason 原样保留（不伪造 length）；超限信号只在本错误上。
+                    raise ProviderError(
+                        f"模型输出超过本请求上限（约 {tokens} > {cap} tokens；"
+                        "服务端可能忽略了 max_tokens 参数）。本次真实用量已保留，不自动重发"
+                        "（避免重复计费）；请缩小输入范围或降低输出预算。",
+                        response=result,
+                    )
         if not str(content or "").strip():
             reasoning = message.get("reasoning_content") if isinstance(message, dict) else None
             if reasoning:

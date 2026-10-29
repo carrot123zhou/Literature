@@ -10,10 +10,10 @@ import ModelPicker from "./ModelPicker";
 import { readerApi } from "./readerApi";
 import { useReaderChat, type ReaderChatWireQuote } from "../readerChatClient";
 import { useTextFoldEngine, type EngineEvent, type PaperData, type TextFoldPaneHandle } from "./TextFoldPane";
-import { foldJobApi, type FoldJobState } from "./foldApi";
+import { foldJobApi, type FoldJobState, type FoldRunStatus } from "./foldApi";
 import { buildTokenMap, toksTextLike, tokenSpaceDigest } from "./tokenMap";
 import type {
-  ReaderAnnotation, ReaderFoldSection, ReaderFoldUnit, ReaderLayers,
+  ReaderAnnotation, ReaderFoldActivity, ReaderFoldSection, ReaderFoldUnit, ReaderLayers,
   ReaderModelBinding, ReaderOverlay, ReaderPane, ReaderState,
 } from "./types";
 
@@ -47,6 +47,65 @@ function provenanceLabel(layers: ReaderLayers | null, contentHint = "", partialH
   return "本地摘句（本次未调模型；要点/主线/主题为程序摘取，非 AI 概括）" + partial;
 }
 
+/** 回答里的引用标记形如 [#blk-00000005]；按首次出现顺序编号，同一块不重复编号。 */
+type AnswerPart = string | { blockId: string };
+const CITE_MARKER_RE = /\[#([A-Za-z0-9_-]+)\]/g;
+function splitAnswerCitations(answer: string): AnswerPart[] {
+  const parts: AnswerPart[] = [];
+  let last = 0;
+  let m: RegExpExecArray | null;
+  CITE_MARKER_RE.lastIndex = 0;
+  while ((m = CITE_MARKER_RE.exec(answer))) {
+    if (m.index > last) parts.push(answer.slice(last, m.index));
+    parts.push({ blockId: m[1] });
+    last = m.index + m[0].length;
+  }
+  if (last < answer.length) parts.push(answer.slice(last));
+  return parts;
+}
+
+/**
+ * 回答 + 圈号引用（NotebookLM 风格）：正文中的 [#块ID] 渲染为带序号的小圆点（可点击回跳），
+ * 底部索引按答案中首次出现顺序排 1..n（同一块只出现一次；未在正文出现的引用排在最后）。
+ */
+function AnswerCitations({ answer, citations, onJump }: {
+  answer: string;
+  citations?: { block_id: string; section: string }[];
+  onJump: (blockId: string) => void;
+}) {
+  const parts = useMemo(() => splitAnswerCitations(answer), [answer]);
+  const order = useMemo(() => {
+    const seen: string[] = [];
+    for (const part of parts) {
+      if (typeof part !== "string" && !seen.includes(part.blockId)) seen.push(part.blockId);
+    }
+    for (const c of citations ?? []) if (!seen.includes(c.block_id)) seen.push(c.block_id);
+    return seen;
+  }, [parts, citations]);
+  const numOf = useMemo(() => new Map(order.map((id, index) => [id, index + 1])), [order]);
+  const secOf = (id: string) => citations?.find(c => c.block_id === id)?.section ?? "";
+  return (
+    <>
+      <div className="rdrr-msg-a">{parts.map((part, i) => typeof part === "string"
+        ? <span key={i}>{part}</span>
+        : <button key={i} className="rdrr-cnum" title={secOf(part.blockId) || part.blockId}
+            onClick={() => onJump(part.blockId)}>{numOf.get(part.blockId)}</button>
+      )}</div>
+      {order.length > 0 && (
+        <div className="rdrr-cites">
+          {order.map(id => (
+            <button key={id} className="rdrr-cite" title={`回跳原文 · ${secOf(id) || id}`}
+              onClick={() => onJump(id)}>
+              <span className="rdrr-cite-num" aria-hidden="true">{numOf.get(id)}</span>
+              <span className="rdrr-cite-sec">{secOf(id) || id}</span>
+            </button>
+          ))}
+        </div>
+      )}
+    </>
+  );
+}
+
 const DEFAULT_PREFS = (): ReaderOverlay["prefs"] => ({
   panes: { origin: true, source: true, trans: true },
   weights: [340, 460, 460],
@@ -65,6 +124,155 @@ function textOffset(root: HTMLElement, node: Node, off: number): number {
   return r.toString().length;
 }
 function clamp(n: number, lo: number, hi: number): number { return Math.max(lo, Math.min(hi, n)); }
+
+/* ========================= 整篇折叠的活动证据（可选） ========================= */
+
+/**
+ * `GET /reader/fold-run` 的 `activity` 是**可选**证据：后端在请求/阶段边界写它，
+ * 旧 run/旧后端/刚启动/已结束时没有该字段。缺失只代表「没有可显示的证据」，
+ * 不能当成 0 秒、0 待补或「已进入某阶段」。
+ *
+ * stage 公开值（后端契约）：waiting / generating / validating / saving / source / derive / apparatus。
+ * 内部别名（plan/source_fold/target_derive/section_summary/finalize）由后端归一，不再会出现；
+ * 保留映射只作旧数据/回退兼容，认不出的阶段按原样显示，不猜、不吞。
+ */
+const FOLD_STAGE_LABELS: Record<string, string> = {
+  waiting: "等待响应", generating: "生成中", validating: "校验中",
+  saving: "保存中", source: "折叠原文", derive: "派生译文", apparatus: "识别书后材料",
+  plan: "规划批次", source_fold: "折叠原文", target_derive: "派生译文",
+  section_summary: "章节摘要", finalize: "收尾",
+};
+
+type FoldActivityPart = { key: string; text: string; kind?: "warn"; title?: string };
+
+/** 后端可能写 epoch 秒/毫秒或 ISO 字符串；解析不出来就返回 null（不拿 0 顶替时间）。 */
+export function foldTimeMs(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value) && value > 0) {
+    return value > 1e11 ? value : value * 1000;   // >1e11 视为毫秒
+  }
+  if (typeof value === "string" && value.trim()) {
+    const parsed = Date.parse(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  return null;
+}
+
+/** M:SS / H:MM:SS（紧凑、等宽数字，便于每秒跳动时不抖动）。 */
+export function foldClockText(seconds: number): string {
+  const total = Math.max(0, Math.round(seconds));
+  const pad = (n: number) => String(n).padStart(2, "0");
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = total % 60;
+  return h > 0 ? `${h}:${pad(m)}:${pad(s)}` : `${m}:${pad(s)}`;
+}
+
+/**
+ * 紧凑活动摘要：阶段 / 当前节 / 批次 / 实时计时 / 本节待补 / 失败 / 重试记录。
+ *
+ * 计时用**后端时间戳 + 本地时钟**：`request_started_at` 晚于 `last_response_at` 时显示「已 X」
+ * （确认有新请求在途），否则用 `last_response_at` 显示「等 X」（距上次模型响应）——两者都是
+ * 绝对时刻，等待期间也真实推进；只有时间戳都缺时才回退后端 `elapsed_seconds`（静态数值，
+ * 不假装逐秒）。暂停/暂停中不显示计时（时间停在暂停时刻会误导），失败数取自 run progress。
+ */
+export function foldActivityParts(args: {
+  activity: ReaderFoldActivity | null;
+  status: FoldRunStatus;
+  failed: number;
+  errors: string[];
+  nowMs: number;
+}): { parts: FoldActivityPart[]; title: string } {
+  const { activity, status, errors, nowMs } = args;
+  const failed = Number.isFinite(args.failed) ? args.failed : 0;
+  const paused = status === "paused" || status === "pausing";
+  const parts: FoldActivityPart[] = [];
+  const title: string[] = [];
+
+  if (paused) {
+    parts.push({
+      key: "stage", text: status === "pausing" ? "暂停中" : "已暂停",
+      title: "在模型请求边界暂停：在途请求跑完后挂起，继续只补未完成节",
+    });
+    title.push("暂停在模型请求边界生效；继续只补未完成节。");
+  } else if (activity?.stage || activity?.state) {
+    // 公开契约用 stage；provider 层事件用 state。两处都接受，但只显示一个阶段。
+    const stage = activity?.stage || activity?.state || "";
+    parts.push({ key: "stage", text: FOLD_STAGE_LABELS[stage] ?? stage.slice(0, 12), title: `阶段：${stage}` });
+    title.push(`阶段：${stage}`);
+  }
+
+  if (!paused && activity?.section_id) {
+    parts.push({ key: "section", text: activity.section_id.slice(0, 16), title: `当前节：${activity.section_id}` });
+    title.push(`当前节：${activity.section_id}`);
+  }
+
+  const index = activity?.batch_index;
+  const total = activity?.batch_total;
+  if (!paused && index !== undefined && total !== undefined && total > 0) {
+    // 后端契约：batch_index 0 起。界面按人看的「第 1 批」呈现，原始值进 tooltip 可对账。
+    const rank = index + 1;
+    parts.push({ key: "batch", text: `批 ${rank}/${total}`, title: `batch_index=${index}（0 起） · batch_total=${total}` });
+    title.push(`批次：${rank}/${total}（batch_index=${index}，0 起）`);
+  }
+
+  if (!paused) {
+    // 暂停时 activity 是暂停前最后一次在途快照：阶段/批次/本节待补可能已过期，故不显示，
+    // 只留「已暂停」。重开页面时后端会把僵尸 running 纠偏为 paused，这里同理不编造进度。
+    //
+    // 计时锚点分两种（都用后端给的**绝对时刻**，所以等待期间也真实推进）：
+    // 1) 流式阶段 `waiting` / `generating` 且拿得到 `request_started_at` → 就是「本请求在途」：
+    //    显示「已 X」。必须**不依赖**与 `last_response_at` 的大小：流式 delta 每来一块就把
+    //    last_response_at 推新（t1 > t0），按时间戳比较会把已用时间重置成「等 0」，
+    //    而这正是用户最需要看到的「已经在等/在生成多久」。
+    // 2) 其他（已完成/本地）阶段回退时间戳比较：`request_started_at` 晚于 `last_response_at`
+    //    才是新请求在途，否则显示「等 X」= 距最近一次模型响应的等待（后端只在结束时记时间时，
+    //    request_started_at 是上一请求起点，无条件用会算成累积值）。
+    const startedMs = foldTimeMs(activity?.request_started_at);
+    const respondedMs = foldTimeMs(activity?.last_response_at);
+    const stageName = String(activity?.stage || activity?.state || "");
+    const streaming = stageName === "waiting" || stageName === "generating";
+    const inFlight = startedMs !== null && (streaming || respondedMs === null || startedMs > respondedMs);
+    if (inFlight && startedMs !== null) {
+      parts.push({
+        key: "elapsed", text: `已 ${foldClockText((nowMs - startedMs) / 1000)}`,
+        title: streaming
+          ? "本次请求已用时间（流式阶段：后端 request_started_at 起算，逐秒刷新；delta 不会重置计时）"
+          : "本次请求已用时间（后端 request_started_at 起算，逐秒刷新）",
+      });
+    } else if (respondedMs !== null) {
+      parts.push({ key: "elapsed", text: `等 ${foldClockText((nowMs - respondedMs) / 1000)}`, title: "距最近一次模型活动/响应的时间（后端 last_response_at 起算，逐秒刷新）" });
+    } else if (activity?.elapsed_seconds !== undefined) {
+      parts.push({ key: "elapsed", text: `已 ${foldClockText(activity.elapsed_seconds)}`, title: "后端上报的已用秒数（无时间戳，随轮询刷新）" });
+    }
+    if (activity?.pending_units !== undefined) {
+      // 后端契约：pending_units = **当前节/当前语言 lane 仍待补**的 unit 数（不是批大小）。
+      // 只声称「本节」：全书剩余量不在这个字段里，不冒充全局剩余。
+      parts.push({
+        key: "pending", text: `本节待补 ${activity.pending_units}`,
+        title: `当前节（lane）仍待补单元：${activity.pending_units}\n后端字段：pending_units\n不代表全书剩余量`,
+      });
+      title.push(`本节待补单元：${activity.pending_units}`);
+    }
+  }
+
+  if (failed > 0) {
+    parts.push({
+      key: "failed", text: `失败 ${failed}`, kind: "warn",
+      title: errors.length ? `已完成内容保留，可继续补齐：${errors.join("；")}` : "部分节失败，已完成内容保留，可继续补齐",
+    });
+    title.push(`失败节：${failed}${errors.length ? `（${errors.join("；")}）` : ""}`);
+  }
+  if (!paused && activity?.retry_reason) {
+    // 后端 activity 是累加合并的：retry_reason 成功后可能仍保留，所以写成「曾重试」而不是「重试中」。
+    parts.push({
+      key: "retry", text: `曾重试：${activity.retry_reason}`, kind: "warn",
+      title: `本 run 发生过的重试原因：${activity.retry_reason}（成功后仍保留记录，不代表当前请求在重试）`,
+    });
+    title.push(`重试原因：${activity.retry_reason}`);
+  }
+
+  return { parts, title: title.join("；") };
+}
 
 /** 把段落纯文本按批注偏移切段渲染（重叠区间跳过，越界时按 quote 重定位）。
  *  左键不响应（阅读态）；已有标记的唯一编辑入口是右键（见 contextmenu → data-ann-id）。 */
@@ -108,6 +316,10 @@ export default function ReaderWorkspace({ projectId, document: doc, translation,
   /* ---------- 远端数据 ---------- */
   const [state, setState] = useState<ReaderState | null>(null);
   const [overlay, setOverlay] = useState<ReaderOverlay | null>(null);
+  const activeSaveProject = useRef(projectId);
+  activeSaveProject.current = projectId;
+  const savedRevision = useRef<{project: string; revision: number | null}>({project:projectId, revision:null});
+  if (savedRevision.current.project !== projectId) savedRevision.current = {project:projectId, revision:null};
   const [layersSrc, setLayersSrc] = useState<ReaderLayers | null>(null);
   const [layersDst, setLayersDst] = useState<ReaderLayers | null>(null);
   const [layersError, setLayersError] = useState("");
@@ -127,6 +339,7 @@ export default function ReaderWorkspace({ projectId, document: doc, translation,
     try {
       const value = await readerApi.state(projectId, targetLocale || "source");
       setState(value);
+      if (value.overlay && activeSaveProject.current === projectId) savedRevision.current = {project:projectId, revision:value.overlay.revision};
       // 合并而非覆盖：轮询/刷新期间用户改过的本地偏好（层级/布局/外观）不能被服务端旧值打回；
       // 批注与 revision 以服务端为准（本地未保存的批注由 scheduleSave 的防抖队列负责）。
       setOverlay(prev => value.overlay
@@ -150,22 +363,88 @@ export default function ReaderWorkspace({ projectId, document: doc, translation,
    * progress={ratio}、errors[]、无 paused 布尔）。统一会话代次：所有异步在发起前捕获
    * {project, locale, gen}，返回核验；cleanup/切 project/切 locale 均使代次失效。
    * 单飞轮询；恢复 running/pausing 接续轮询；paused 不自动恢复生成，resume 后轮询至 ready；
-   * ready 且 ready=true 才可「启动」；失败/网络错误保留可恢复状态。
+   * readable 控制阅读入口，ready 仅表示全部完成；失败/网络错误保留可恢复状态。
    */
   const foldLocale = hasTrans ? (targetLocale || "source") : "source";
-  const [foldStage, setFoldStage] = useState<"off" | "processing" | "ready" | "on">("off");
+  /**
+   * 视图轴 ⊥ 作业轴（精简 UI，2026-10-27）：
+   * - foldOn（视图）只由主按钮「进入折叠/关闭折叠」驱动；重试/暂停/继续只改作业，绝不改视图。
+   * - foldJob（fold-run 轮询）只驱动状态入口与主按钮可用性。
+   * - 折叠视图偏好按项目存 localStorage（阅读层 prefs 走后端 sanitize，前端本地视图状态不进后端契约）。
+   * - 作业结束后已有成果在展示时不自动重载 iframe（防丢选区/滚动）：状态入口出现「载入新成果」，
+   *   由用户主动点击；载入后尽量恢复到之前的单元。
+   */
+  const foldPrefKey = (pid: string) => `rdrr-fold-on:${pid}`;
+  const readFoldPref = (pid: string) => { try { return localStorage.getItem(foldPrefKey(pid)) === "1"; } catch { return false; } };
+  const writeFoldPref = (pid: string, on: boolean) => {
+    try { if (on) localStorage.setItem(foldPrefKey(pid), "1"); else localStorage.removeItem(foldPrefKey(pid)); } catch { /* 私密窗口 */ }
+  };
+  const [foldOn, setFoldOn] = useState(() => readFoldPref(projectId));
+  /** 状态入口 popover 开关（生成/暂停/继续/补齐/载入新成果与错误的唯一去处）。 */
+  const [foldMenuOpen, setFoldMenuOpen] = useState(false);
   const [foldJob, setFoldJob] = useState<FoldJobState | null>(null);
+  /** 最近一次轮询到的 activity（可选证据；缺失=没有可显示的阶段，不是 0）。 */
+  const [foldActivity, setFoldActivity] = useState<ReaderFoldActivity | null>(null);
   const [foldError, setFoldError] = useState("");
   const [foldData, setFoldData] = useState<PaperData | null>(null);
+  /** 作业刚结束时已有成果在展示 → 状态入口提示「载入新成果」（用户主动刷新，不自动重挂）。 */
+  const [newerResults, setNewerResults] = useState(false);
+  const foldRefreshPending = useRef(false);
   /** 会话代次：projectId/locale 变化或 cleanup 时 ++；旧异步返回一律丢弃。 */
   const foldGen = useRef(0);
-  const foldSession = useRef("");
   const foldPolling = useRef(0);   // 持有当前轮询的会话代次（0=空闲；旧晚归响应不得翻转新会话锁）
   const foldTimerRef = useRef(0);
-  const foldApplyState = useCallback((value: FoldJobState) => {
+  const foldDataRef = useRef<PaperData | null>(null);
+  foldDataRef.current = foldData;
+  const foldOnRef = useRef(foldOn);
+  foldOnRef.current = foldOn;
+  const foldJobRef = useRef<FoldJobState | null>(null);
+  /** 当前 foldData 对应的 run（用于判断成果是否比正在展示的更新）。 */
+  const foldDataRunRef = useRef("");
+  /** 两栏各自就绪后恢复单元和段内比例，不能让先就绪的一栏消耗另一栏的位置。 */
+  type FoldPosition = { uid: string; ratio: number };
+  const foldPositions = useRef<{ src?: FoldPosition; dst?: FoldPosition }>({});
+  const pendingGotoRef = useRef<{ src?: FoldPosition; dst?: FoldPosition }>({});
+  /**
+   * 单次读取 fold-run：解析统一在 `foldApi.parseFoldRun`（含可选 `activity`，不丢字段）。
+   * 不额外发请求（仍是一次 GET），旧后端没有 activity 时 `activity` 为 null。
+   */
+  const readFoldRun = useCallback(async (projectIdAt: string) => {
+    const job = await foldJobApi.state(projectIdAt);
+    return { job, activity: job.activity };
+  }, []);
+  /**
+   * 生成/暂停/继续/载入的同一 in-flight 守卫：同一会话内任一折叠作业请求在途时互斥，
+   * 防连点多次 ++gen / 旧轮询锁挡新轮询；切项目时会话 effect 释放，旧 finally 按 seq 不匹配即 no-op。
+   */
+  const actionSeq = useRef(0);
+  const foldActionRef = useRef<{ seq: number; kind: string } | null>(null);
+  const [foldAction, setFoldAction] = useState("");
+  const beginAction = (kind: string): number => {
+    if (foldActionRef.current) return 0;
+    const seq = ++actionSeq.current;
+    foldActionRef.current = { seq, kind };
+    setFoldAction(kind);
+    return seq;
+  };
+  const endAction = (seq: number) => {
+    if (foldActionRef.current?.seq === seq) { foldActionRef.current = null; setFoldAction(""); }
+  };
+  /** 轮询回包只写作业轴；视图轴（foldOn）永远不在这里改。 */
+  const foldApplyState = useCallback((value: FoldJobState, activity: ReaderFoldActivity | null = null) => {
+    const prevStatus = foldJobRef.current?.status ?? "idle";
+    foldJobRef.current = value;
     setFoldJob(value);
-    if (value.status === "ready" && value.ready) setFoldStage("ready");
-    else if (value.status === "failed") { setFoldStage("off"); setFoldError(value.errors.join("；") || "整篇折叠失败"); }
+    setFoldActivity(activity);
+    setFoldError("");   // 轮询/状态读取成功=传输恢复；作业错误在 errors 字段如实显示，不混入传输错误
+    // 作业刚结束（running/pausing → 其它）且已有成果在展示：不自动重载（防丢选区/滚动），
+    // 状态入口出「载入新成果」。首次载入前/普通视图不提示（进入时本就取最新）。
+    const busyBefore = prevStatus === "running" || prevStatus === "pausing";
+    const busyNow = value.status === "running" || value.status === "pausing";
+    if (!busyNow && (busyBefore || foldRefreshPending.current)) {
+      foldRefreshPending.current = false;
+      if (foldOnRef.current && foldDataRef.current && value.readable) setNewerResults(true);
+    }
   }, []);
   /** 单飞轮询：running/pausing 期间持续；paused/ready/failed 停轮询（paused 不自动恢复）。 */
   const foldPoll = useCallback((projectIdAt: string, localeAt: string) => {
@@ -177,12 +456,12 @@ export default function ReaderWorkspace({ projectId, document: doc, translation,
       if (gen !== foldGen.current || projectIdAt !== projectId || localeAt !== foldLocale) {
         if (foldPolling.current === gen) foldPolling.current = 0; return;
       }
-      void foldJobApi.state(projectIdAt).then(value => {
+      void readFoldRun(projectIdAt).then(({ job, activity }) => {
         if (gen !== foldGen.current || projectIdAt !== projectId) { if (foldPolling.current === gen) foldPolling.current = 0; return; }
-        foldApplyState(value);
+        foldApplyState(job, activity);
         if (foldPolling.current === gen) foldPolling.current = 0;
         // 800ms 间隔轮询（不能紧递归：立即重入会把 running 瞬间轮成 ready，进度环与暂停都失去意义）
-        if (value.status === "running" || value.status === "pausing") {
+        if (job.status === "running" || job.status === "pausing") {
           window.clearTimeout(foldTimerRef.current);
           foldTimerRef.current = window.setTimeout(() => foldPoll(projectIdAt, localeAt), 800);
         }
@@ -194,76 +473,166 @@ export default function ReaderWorkspace({ projectId, document: doc, translation,
       });
     };
     tick();
-  }, [foldApplyState, foldLocale, projectId]);   // eslint-disable-line react-hooks/exhaustive-deps
-  /** 打开/切项目/切 locale：代次失效 + 恢复现有 run 状态（done/ready→ready，running/pausing 接续轮询）。 */
+  }, [foldApplyState, foldLocale, projectId, readFoldRun]);   // eslint-disable-line react-hooks/exhaustive-deps
+  /** 载入 native 产物（readable 时才调；后端 200 即使未生成——此时按普通全文处理，不进空折叠）。 */
+  const loadFoldNative = (projectIdAt: string, localeAt: string, genAt: number) => {
+    const seq = beginAction("load");
+    if (!seq) return;
+    setFoldError("");
+    void (async () => {
+      try {
+        const data = await foldJobApi.native<PaperData>(projectIdAt, localeAt);
+        if (genAt !== foldGen.current || projectIdAt !== projectId || localeAt !== foldLocale) return;
+        // 产物自带事实（lit.readable）：状态 GET 之后事实可能已变——lit.readable=false 时
+        // 退普通全文并刷新作业状态，不进空折叠；旧后端无 lit 时兼容按 job.readable（其缺省回退 ready）。
+        const lit = (data as { lit?: { readable?: unknown } | null } | null)?.lit;
+        const litReadable = lit && typeof lit.readable === "boolean" ? lit.readable === true : null;
+        if (litReadable === false) {
+          setFoldOn(false); foldOnRef.current = false; writeFoldPref(projectIdAt, false);
+          setFoldData(null); foldDataRunRef.current = "";
+          void readFoldRun(projectIdAt).then(({ job, activity }) => {
+            if (genAt !== foldGen.current || projectIdAt !== projectId) return;
+            foldApplyState(job, activity);
+          }).catch(() => undefined);
+          return;
+        }
+        setFoldData(data);
+        foldDataRunRef.current = foldJobRef.current?.runId ?? "";
+      } catch (error) {
+        if (genAt !== foldGen.current || projectIdAt !== projectId) return;
+        // 载入失败：回普通阅读并如实报错（不留在空折叠视图）
+        setFoldOn(false); foldOnRef.current = false; writeFoldPref(projectIdAt, false);
+        setFoldError(error instanceof Error ? error.message : String(error));
+      } finally {
+        endAction(seq);   // 旧会话的 finally 不会释放新会话的守卫（seq 不匹配即 no-op）
+      }
+    })();
+  };
+  /** 读取/重读作业状态（不调用模型）：会话恢复与状态入口「重读状态」共用。 */
+  const recoverRunState = (projectIdAt: string, genAt: number) => {
+    void readFoldRun(projectIdAt).then(({ job, activity }) => {
+      if (genAt !== foldGen.current || projectIdAt !== projectId) return;
+      // 首次恢复的旧 idle 回包不能覆盖用户刚启动的新 run。
+      if (job.status === "idle" && foldJobRef.current?.runId) return;
+      setFoldError("");
+      foldJobRef.current = job;
+      setFoldJob(job);
+      setFoldActivity(activity);
+      if (job.status === "running" || job.status === "pausing") foldPoll(projectIdAt, foldLocale);
+      const wantOn = readFoldPref(projectIdAt);
+      if (wantOn && job.readable) loadFoldNative(projectIdAt, foldLocale, genAt);
+      else if (!job.readable && foldOnRef.current) {
+        setFoldOn(false); foldOnRef.current = false; writeFoldPref(projectIdAt, false);
+      }
+    }).catch((error) => {
+      if (genAt !== foldGen.current || projectIdAt !== projectId) return;
+      // 首次/重读状态失败不静默：状态入口可见可重读（不调模型），主按钮不再无解释地无反应
+      setFoldError(error instanceof Error ? error.message : String(error));
+    });
+  };
+  /** 打开/切项目/切 locale：代次失效 + 恢复现有 run 状态与视图偏好（running/pausing 接续轮询；
+   *  视图偏好为 on 且 readable 时直接载入成果进入折叠）。 */
   useEffect(() => {
     const gen = ++foldGen.current;
     foldPolling.current = 0; window.clearTimeout(foldTimerRef.current);   // 新会话：清旧轮询锁与定时器
-    setFoldStage("off"); setFoldData(null); setFoldJob(null); setFoldError("");
-    void foldJobApi.state(projectId).then(value => {
-      if (gen !== foldGen.current) return;
-      setFoldJob(value);
-      if (value.status === "ready" && value.ready) setFoldStage("ready");
-      else if (value.status === "running" || value.status === "pausing") { setFoldStage("processing"); foldPoll(projectId, foldLocale); }
-      else if (value.status === "paused") setFoldStage("processing");   // 暂停态：显示「继续」，不自动恢复生成
-      else setFoldStage("off");
-    }).catch((error) => { console.error("[fold-recovery] state GET 失败", String(error).slice(0, 160)); });
+    setFoldData(null); foldDataRunRef.current = ""; setFoldJob(null); foldJobRef.current = null;
+    setFoldActivity(null); setFoldError(""); setNewerResults(false); foldRefreshPending.current = false; pendingGotoRef.current = {}; foldPositions.current = {};
+    foldActionRef.current = null; setFoldAction("");   // 切项目释放 in-flight 守卫
+    setFoldMenuOpen(false);   // 浮层不跨项目残留
+    const wantOn = readFoldPref(projectId);
+    setFoldOn(wantOn); foldOnRef.current = wantOn;
+    recoverRunState(projectId, gen);
     return () => { foldGen.current++; window.clearTimeout(foldTimerRef.current); };
   }, [projectId, foldLocale, foldPoll]);   // eslint-disable-line react-hooks/exhaustive-deps
-  const startAIFold = () => {
-    const gen = ++foldGen.current;
+  /** 首次生成/补齐重试（同一入口：POST start，后端缓存复用，不重复调用模型）。 */
+  const startGeneration = () => {
+    const seq = beginAction("start");
+    if (!seq) return;
+    const gen = foldGen.current;
     const projectIdAt = projectId, localeAt = foldLocale;
     setFoldError("");
-    setFoldStage("processing");
+    setFoldActivity(null);
+    setNewerResults(false);
     void (async () => {
       try {
         await foldJobApi.start(projectIdAt, localeAt);
         if (gen !== foldGen.current || projectIdAt !== projectId) return;
+        foldRefreshPending.current = Boolean(foldOnRef.current && foldDataRef.current);
         foldPoll(projectIdAt, localeAt);
       } catch (error) {
         if (gen !== foldGen.current) return;
-        setFoldStage("off");
         setFoldError(error instanceof Error ? error.message : String(error));
+      } finally {
+        endAction(seq);
       }
     })();
   };
   const foldPauseResume = () => {
-    const gen = foldGen.current;
-    const projectIdAt = projectId, localeAt = foldLocale;
     const runId = foldJob?.runId;
     if (!runId) { setFoldError("没有可暂停/继续的折叠作业"); return; }
+    const seq = beginAction(foldJob?.status === "paused" ? "resume" : "pause");
+    if (!seq) return;
+    const gen = foldGen.current;
+    const projectIdAt = projectId, localeAt = foldLocale;
     const wasPaused = foldJob?.status === "paused";
     const action = wasPaused ? foldJobApi.resume : foldJobApi.pause;
     void action(projectIdAt, runId).then(() => {
       if (gen !== foldGen.current || projectIdAt !== projectId) return;   // 旧会话/旧项目的响应不写当前状态
-      if (wasPaused) { setFoldStage("processing"); foldPoll(projectIdAt, localeAt); }
-      else return foldJobApi.state(projectIdAt).then(value => { if (gen === foldGen.current && projectIdAt === projectId) foldApplyState(value); });
+      if (wasPaused) {
+        foldRefreshPending.current = Boolean(foldOnRef.current && foldDataRef.current);
+        foldPoll(projectIdAt, localeAt);
+      }
+      else return readFoldRun(projectIdAt).then(({ job, activity }) => {
+        if (gen === foldGen.current && projectIdAt === projectId) foldApplyState(job, activity);
+      });
     }).catch(error => {
       if (gen !== foldGen.current || projectIdAt !== projectId) return;
       setFoldError(error instanceof Error ? error.message : String(error));
-    });
+    }).finally(() => endAction(seq));
   };
-  const launchFold = () => {
+  /** 状态入口「重读状态」：仅 GET fold-run，不调用模型。 */
+  const refreshRunState = () => {
+    if (foldActionRef.current) return;
+    recoverRunState(projectId, foldGen.current);
+  };
+  /** 进入折叠视图：readable 才可用；载入失败回普通阅读。 */
+  const enterFold = () => {
+    if (!foldJob?.readable || foldActionRef.current) return;
     const gen = foldGen.current;
-    const projectIdAt = projectId, localeAt = foldLocale;
-    setFoldError("");
-    setFoldStage("on");   // 乐观进入 fold 视图；产物未到前按钮禁用（防双击误退），载入失败回 ready
-    void (async () => {
-      try {
-        const data = await foldJobApi.native<PaperData>(projectIdAt, localeAt);
-        if (gen !== foldGen.current || projectIdAt !== projectId || localeAt !== foldLocale) return;
-        setFoldData(data);
-      } catch (error) {
-        if (gen !== foldGen.current || projectIdAt !== projectId) return;
-        setFoldError(error instanceof Error ? error.message : String(error));
-        setFoldStage("ready");
-      }
-    })();
+    setFoldData(null);   // 重新进入前取当前安全投影，不短暂展示上次退出时的旧快照。
+    setFoldOn(true); foldOnRef.current = true; writeFoldPref(projectId, true);
+    setNewerResults(false);
+    loadFoldNative(projectId, foldLocale, gen);
   };
-  /** 退出 fold 回普通阅读：保留 ready 可再启动，不重新生成。 */
-  const exitFold = () => { setFoldStage(foldJob?.status === "ready" && foldJob.ready ? "ready" : "off"); setFoldData(null); };
-  const foldStageRef = useRef(foldStage);
-  foldStageRef.current = foldStage;
+  /** 退出 fold 回普通阅读：作业与成果保留，可随时再进入（不重新生成）。 */
+  const exitFold = () => {
+    setFoldOn(false); foldOnRef.current = false; writeFoldPref(projectId, false);
+    setNewerResults(false); pendingGotoRef.current = {};
+  };
+  /** 用户主动载入更新后的成果（不自动重挂，防丢选区/滚动）；尽量恢复到之前的单元。 */
+  const loadNewResults = () => {
+    if (foldActionRef.current) return;
+    setNewerResults(false);
+    const fallback = { uid: currentBlock || selected, ratio: 0 };
+    pendingGotoRef.current = { src: foldPositions.current.src || fallback, dst: foldPositions.current.dst || fallback };
+    setSelectionPop(null); setHlPop(null); foldAnchorRef.current = null;
+    setFoldMenuOpen(false);
+    toast("正在载入新成果，选区已关闭；将恢复阅读位置");
+    loadFoldNative(projectId, foldLocale, foldGen.current);
+  };
+  /**
+   * 活动计时：只在处理中（且非暂停）逐秒刷新本地时钟。用固定 interval 而不是依赖 activity 对象：
+   * 轮询每次都会返回新对象，把 activity 放进依赖会让 interval 永远重置、秒数原地不动。
+   * 暂停/暂停中停表——把停住的时间继续递增会让人以为还在跑。
+   */
+  const foldActivityLive = foldJob?.status === "running";
+  const [foldClockMs, setFoldClockMs] = useState(() => Date.now());
+  useEffect(() => {
+    if (!foldActivityLive) return;
+    setFoldClockMs(Date.now());
+    const timer = window.setInterval(() => setFoldClockMs(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, [foldActivityLive]);
 
 
   /* ---------- overlay 保存（防抖 + 乐观并发） ---------- */
@@ -279,7 +648,7 @@ export default function ReaderWorkspace({ projectId, document: doc, translation,
       void persistOverlayNow(payload).catch(error => {
         const message = error instanceof Error ? error.message : String(error);
         if (message.includes("已被其他窗口更新")) toast("阅读层已在其他窗口更新，已重新加载");
-        else toast(`${message}（草稿保留，可重试）`);
+        else { pendingOverlay.current = payload; toast(`${message}（修改尚未保存，请重试）`); }
       });
     }, 600);
   }, [projectId, targetLocale, toast]);
@@ -383,6 +752,7 @@ export default function ReaderWorkspace({ projectId, document: doc, translation,
    * 因为平滑滚动是异步的（几十到几百毫秒），布尔锁会在滚动结束前就释放并产生回弹。
    */
   const suppressUntil = useRef(0);
+  const originScrollMuteUntil = useRef(0);
   const suppress = (ms = 300) => { suppressUntil.current = Date.now() + ms; };
   const suppressed = () => Date.now() < suppressUntil.current;
 
@@ -428,18 +798,21 @@ export default function ReaderWorkspace({ projectId, document: doc, translation,
   }, []);
 
   /** 把某块的原件 bbox 居中到原件滚动容器；返回是否命中了真实 bbox。 */
-  const centerOriginOn = useCallback(async (blockId: string): Promise<boolean> => {
+  const centerOriginOn = useCallback(async (blockId: string, textFollow = false): Promise<boolean> => {
     const body = originBody();
     // 原件栏被关闭（窄屏切到原文/译文、或用户取消勾选）时不做任何定位，也不弹「无 bbox」提示。
     if (!body || !isPdf || !paneMounted("origin")) return false;
     const anchor = anchorOf(blockId);
     if (!anchor) return false;
-    suppress(420);
+    // 连续文本跟随只静默 PDF 的回传，不能暂停正在操作的文本栏。
+    if (!textFollow) suppress(420);
+    if (textFollow) originScrollMuteUntil.current = Date.now() + 1200;
     setVisiblePage(anchor.page);
     // 目标页不在活动窗口内时，先切页再等一帧，让 PdfPageCanvas 真正渲染。
     const el = await waitForOriginBox(blockId);
     const container = originBody();
     if (!container) return false;
+    if (textFollow) originScrollMuteUntil.current = Date.now() + 420;
     if (!el) {
       // 明确降级：没有 bbox（或该页渲染失败）时只滚到页首，并如实提示。
       const pageEl = container.querySelector(`.pdf-page[data-page-index="${anchor.page}"]`) as HTMLElement | null;
@@ -493,7 +866,7 @@ export default function ReaderWorkspace({ projectId, document: doc, translation,
     suppress(420);
     void centerOriginOn(blockId);
     // fold 模式：原件/目录/对侧点击 → 双栏内核定位到同 unit（id=稳定 block_id）
-    if (foldStageRef.current === "on") {
+    if (foldOnRef.current) {
       srcEngineRef.current?.gotoUnit(blockId);
       dstEngineRef.current?.gotoUnit(blockId);
     }
@@ -518,27 +891,71 @@ export default function ReaderWorkspace({ projectId, document: doc, translation,
   }, [isNarrow, narrowPane, prefs.panes]);
 
   /* ---------- 层级（仅 fold 模式；普通阅读恒为全文，五档 bar 仅在 fold 内出现） ---------- */
-  const level = foldStage === "on" ? prefs.level : 1;
+  const level = foldOn ? prefs.level : 1;
   const [openBlocks, setOpenBlocks] = useState<Set<string>>(new Set());
   const [openSections, setOpenSections] = useState<Set<string>>(new Set());
   /** 跨栏小蓝点：译文栏 hover uid → 原文栏对应 unit 同亮；反之亦然（同 unit id = 同一阅读对象）。 */
   const [litForSrc, setLitForSrc] = useState("");
   const [litForDst, setLitForDst] = useState("");
-  const makeEngineOnEvent = useCallback((from: "src" | "dst") => (ev: EngineEvent) => {
+  const foldScrollLock = useRef<"src" | "dst" | null>(null);
+  const foldScrollTimer = useRef(0);
+  const foldFrame = (pane: ReaderPane) => document.querySelector<HTMLIFrameElement>(`#rdrr-pane-${pane} .rdrr-tfhost iframe`);
+  const sendFold = (pane: ReaderPane, message: Record<string, unknown>) => {
+    const frame = foldFrame(pane);
+    frame?.contentWindow?.postMessage({ ...message, inst: frame.dataset.tfInst }, "*");
+  };
+  const makeEngineOnEvent = (from: "src" | "dst") => (ev: EngineEvent) => {
+    const pane: ReaderPane = from === "src" ? "source" : "trans";
     if (ev.type === "hover") {
       if (from === "src") setLitForDst(ev.uid || ""); else setLitForSrc(ev.uid || "");
-      return;
+    } else if (ev.type === "operation-error") {
+      toast(ev.message);
+    } else if (ev.type === "level") {
+      const product = clamp(5 - ev.level, 1, 5);
+      if (product !== prefs.level) {
+        patchPrefs({ level: product });
+        (from === "src" ? dstEngineRef : srcEngineRef).current?.setLevel(ev.level);
+      }
+    } else if (ev.type === "edit-note") {
+      const annotation = overlayLive.current?.annotations.find(a => a.id === ev.id && a.pane === pane);
+      const rect = foldFrame(pane)?.getBoundingClientRect();
+      if (annotation && rect) openHighlightPop(annotation, new DOMRect(rect.left + ev.rect.left, rect.top + ev.rect.top, ev.rect.width, ev.rect.height));
+    } else if (ev.type === "selection") {
+      const frame = foldFrame(pane), rect = frame?.getBoundingClientRect(), anchor = ev.anchor;
+      if (!frame || !rect || !anchor) return;
+      const blockId = String(anchor.unit || sectionTitleBlock(String(anchor.section || "")) || "");
+      if (!blockId) return;
+      setHlPop(null);
+      setSelectionPop({
+        x: clamp(rect.left + ev.rect.left + ev.rect.width / 2 - 140, 6, Math.max(6, window.innerWidth - 380)),
+        y: clamp(rect.top + ev.rect.top - 52, 6, Math.max(6, window.innerHeight - 90)),
+        blockId, pane, mode: "range", text: ev.text, start: 0, end: 0, engineAnchor: anchor,
+      });
+      foldAnchorRef.current = anchor;
+      const space = makeEngineAnchor({anchor}, pane)?.space;
+      setLastColor(space === "brief" || space === "derived" || space === "summary" ? (Number(anchor.level) === 1 ? "b" : "p") : "y");
+    } else if (ev.type === "sel-clear") {
+      setSelectionPop(null); foldAnchorRef.current = null;
+    } else if (ev.type === "open-change") {
+      const update = (prev: Set<string>) => { const next = new Set(prev); if (ev.open) next.add(ev.id); else next.delete(ev.id); return next; };
+      if (ev.kind === "section") setOpenSections(update); else setOpenBlocks(update);
+      sendFold(pane === "source" ? "trans" : "source", {__lit:"set-open", kind:ev.kind, id:ev.id, open:ev.open});
+    } else if (ev.type === "scroll" && ev.uid) {
+      foldPositions.current[from] = { uid: ev.uid, ratio: ev.ratio };
+      if (!prefs.follow) return;
+      if (foldScrollLock.current && foldScrollLock.current !== from) return;
+      foldScrollLock.current = from;
+      clearTimeout(foldScrollTimer.current);
+      foldScrollTimer.current = window.setTimeout(() => { foldScrollLock.current = null; }, 220);
+      sendFold(pane === "source" ? "trans" : "source", {__lit:"scroll-to", uid:ev.uid, ratio:ev.ratio});
+      const blockId = doc.blocks.some(b => b.block_id === ev.uid) ? ev.uid : sectionTitleBlock(ev.uid);
+      if (blockId) { setCurrentBlock(blockId); suppress(250); void centerOriginOn(blockId); }
     }
-    if (ev.type === "level") {
-      // 引擎内部层变化（⌘/Ctrl+滚轮等）回同步宿主状态与滑块
-      const product = clamp(5 - ev.level, 1, 5);   // 上游 0..4(Topic..Full) → 产品 1..5
-      if (product !== prefs.level) patchPrefs({ level: product });
-    }
-  }, [patchPrefs, prefs.level]);   // eslint-disable-line react-hooks/exhaustive-deps
+  };
+  /** fold 模式内核原生锚暂存：selPop 操作时用它构造 engine_anchor（不做字符↔token二次转换）。 */
+  const foldAnchorRef = useRef<Record<string, unknown> | null>(null);
   /** 上游内核实例：原文栏 en（或原文语）、译文栏 zh（setLang 由数据驱动，内核原生支持）。 */
   /** 内核 RPC：notes 读写映射到阅读层 overlay（CAS 持久化/刷新恢复），ask 路由到统一问答面板。 */
-  const foldDataRef = useRef<PaperData | null>(null);
-  foldDataRef.current = foldData;
   type NotesHandler = (a: ReaderAnnotation) => Record<string, unknown>;
   const toEngineNoteRef = useRef<NotesHandler | null>(null);
   const putEngineNoteRef = useRef<((note: Record<string, unknown>, pane: ReaderPane) => { ok: boolean; persisted: Promise<void> }) | null>(null);
@@ -552,12 +969,12 @@ export default function ReaderWorkspace({ projectId, document: doc, translation,
     if (path.startsWith("/api/notes/") && method === "POST") {
       const note = payload.note as Record<string, unknown> | undefined;
       if (payload.op === "put" && note) {
-        const result = putEngineNote(note, pane) as { ok: boolean; persisted?: Promise<void> };
+        const result = putEngineNoteRef.current!(note, pane) as { ok: boolean; persisted?: Promise<void> };
         await result.persisted;   // 真实 CAS 落盘后才 200；失败如实回执内核
         return { ok: true };
       }
       if (payload.op === "delete" && typeof payload.id === "string") {
-        const result = deleteEngineNote(payload.id) as { ok: boolean; persisted?: Promise<void> };
+        const result = deleteEngineNoteRef.current!(payload.id) as { ok: boolean; persisted?: Promise<void> };
         await result.persisted;
         return { ok: true };
       }
@@ -626,7 +1043,7 @@ export default function ReaderWorkspace({ projectId, document: doc, translation,
     pane === "trans" ? (targetLocale || "source") : (String((foldData?.meta as { lang?: string } | undefined)?.lang) || "source"), [targetLocale, foldData]);
   /** 保存内核原生锚快照：{version, locale, space, digest, thread, anchor}；空间 token 流不存在则不保存（回退确定性映射）。
    *  brief/derived 空间剥离 anchor.sents（那是全文句下标，backend 契约禁止随短层空间保存）；其余字段逐字保留。 */
-  const makeEngineAnchor = (note: Record<string, unknown>, pane: ReaderPane) => {
+  const makeEngineAnchor = (note: Record<string, unknown>, pane: ReaderPane): ReaderAnnotation["engine_anchor"] => {
     const anchor = note.anchor as Record<string, unknown> | undefined;
     if (!anchor) return undefined;
     const locale = laneLocale(pane);
@@ -640,7 +1057,7 @@ export default function ReaderWorkspace({ projectId, document: doc, translation,
         c => (c as { id?: string }).id === sectionId) as
         { id: string; title?: string; lad?: { take?: unknown[] }; tr?: Record<string, { title?: string; lad?: { take?: unknown[] } }> } | undefined;
       if (!chunk) return undefined;
-      const trLane = anchorOn === "summary" && locale !== "source" ? (chunk.tr?.[locale] ?? null) : null;
+      const trLane = pane === "trans" ? (chunk.tr?.[locale] ?? null) : null;
       const atoms = (foldData?.atoms ?? {}) as Record<string, { kind?: string; alt?: string; text?: string }>;
       let digest: string | null;
       if (anchorOn === "summary") {
@@ -741,7 +1158,7 @@ export default function ReaderWorkspace({ projectId, document: doc, translation,
       const [x, y] = nAnchor.tokens;
       const claimed = (nAnchor.quote?.exact ?? a.quote?.exact ?? "").trim();
       // backend 存储上限 500 截断：严格一致 = rangeText === claimed（backend 已截，前端不补）
-      intervalOk = !claimed || rangeText(x, y) === claimed;
+      intervalOk = !claimed || rangeText(x, y).slice(0,500) === claimed;
     } else {
       intervalOk = false;
     }
@@ -842,19 +1259,23 @@ export default function ReaderWorkspace({ projectId, document: doc, translation,
   const saveSeqRef = useRef(0);
   const enqueueOverlaySave = useCallback((next: ReaderOverlay, seq: number) => {
     const entry = { seq, promise: Promise.resolve() };
-    entry.promise = saveQueueRef.current.promise.then(async () => {
-      if (seq < saveQueueRef.current.seq) return;   // 已有更新 payload 排队：跳过旧者
-      const saved = await readerApi.saveOverlay(projectId, next, next.revision);
-      if (seq < saveQueueRef.current.seq) return;
-      overlayLive.current = saved;
-      setOverlay(saved);
-      pendingOverlay.current = null;
-    }).catch((error) => {
+    entry.promise = saveQueueRef.current.promise.catch(() => undefined).then(async () => {
+      if (activeSaveProject.current !== projectId) throw new Error("阅读项目已切换，本次修改未保存");
+      const baseRevision = savedRevision.current.revision ?? next.revision;
+      const saved = await readerApi.saveOverlay(projectId, {...next, revision:baseRevision}, baseRevision);
+      if (activeSaveProject.current !== projectId) return;
+      savedRevision.current = {project:projectId, revision:saved.revision};
+      if (seq === saveQueueRef.current.seq) {
+        overlayLive.current = saved; setOverlay(saved); pendingOverlay.current = null;
+      }
+    }).catch(async (error) => {
       const message = error instanceof Error ? error.message : String(error);
-      if (message.includes("已被另一个窗口更新")) {
-        void readerApi.state(projectId, targetLocale || "source").then(value => {
-          if (value) { overlayLive.current = value.overlay; setOverlay(value.overlay); setState(value); }
-        });
+      if (message.includes("已被另一个窗口更新") || message.includes("CAS")) {
+        const value = await readerApi.state(projectId, targetLocale || "source").catch(() => null);
+        if (value && activeSaveProject.current === projectId) {
+          savedRevision.current = {project:projectId, revision:value.overlay.revision};
+          overlayLive.current = value.overlay; setOverlay(value.overlay); setState(value);
+        }
         throw new Error("阅读层已被其他窗口更新（CAS），本次批注未保存，请重试");
       }
       throw new Error(`阅读层保存失败：${message}`);
@@ -864,22 +1285,6 @@ export default function ReaderWorkspace({ projectId, document: doc, translation,
   }, [projectId, targetLocale]);   // eslint-disable-line react-hooks/exhaustive-deps
   const persistOverlayNow = (next: ReaderOverlay): Promise<void> => {
     return enqueueOverlaySave(next, ++saveSeqRef.current);
-  };
-  const persistOverlayNowImpl = async (next: ReaderOverlay): Promise<void> => {
-    try {
-      const saved = await readerApi.saveOverlay(projectId, next, next.revision);
-      overlayLive.current = saved;
-      setOverlay(saved);
-      pendingOverlay.current = null;
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      if (message.includes("已被另一个窗口更新")) {
-        const value = await readerApi.state(projectId, targetLocale || "source").catch(() => null);
-        if (value) { setOverlay(value.overlay); setState(value); }
-        throw new Error("阅读层已被其他窗口更新（CAS），本次批注未保存，请重试");
-      }
-      throw new Error(`阅读层保存失败：${message}`);
-    }
   };
   const deleteEngineNote = (noteId: string) => {
     const overlay = overlayLive.current;
@@ -896,16 +1301,19 @@ export default function ReaderWorkspace({ projectId, document: doc, translation,
   putEngineNoteRef.current = putEngineNote;
   deleteEngineNoteRef.current = deleteEngineNote;
   const srcEngine = useTextFoldEngine({
-    data: foldStage === "on" ? foldData : null,
+    data: foldOn ? foldData : null,
     initialLevel: 5 - clamp(prefs.level, 1, 5),   // 产品 1..5(全文..主题) → 上游 4..0(Topic..Full)
     onEvent: makeEngineOnEvent("src"),
     litUid: litForSrc,
     theme: prefs.appearance,
+    // Both panes share a bilingual native document. Pin the source pane explicitly:
+    // the engine's saved reader language may otherwise select the target in both.
+    locale: String((foldData?.meta as { lang?: string } | undefined)?.lang || "en"),
     rpc: makeRpc("source"),
     onActivate: uid => activateBlock(uid, "source"),
   });
   const dstEngine = useTextFoldEngine({
-    data: foldStage === "on" && hasTrans ? foldData : null,
+    data: foldOn && hasTrans ? foldData : null,
     initialLevel: 5 - clamp(prefs.level, 1, 5),   // 产品 1..5(全文..主题) → 上游 4..0(Topic..Full)
     onEvent: makeEngineOnEvent("dst"),
     litUid: litForDst,
@@ -928,6 +1336,22 @@ export default function ReaderWorkspace({ projectId, document: doc, translation,
   const dstEngineRef = useRef<TextFoldPaneHandle | null>(null);
   dstEngineRef.current = dstEngine.handle.current;
   useEffect(() => { dstEngineRef.current = dstEngine.handle.current; }, [dstEngine.ready]);
+
+  // 仅在各自 ready 变化时恢复，避免 data 替换的那帧误用旧 iframe 的 ready/handle。
+  useEffect(() => {
+    if (!srcEngine.ready) return;
+    const position = pendingGotoRef.current.src;
+    if (!position) return;
+    delete pendingGotoRef.current.src;
+    if (foldData) srcEngineRef.current?.gotoUnit(position.uid, position.ratio);
+  }, [srcEngine.ready]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    if (!dstEngine.ready) return;
+    const position = pendingGotoRef.current.dst;
+    if (!position) return;
+    delete pendingGotoRef.current.dst;
+    if (foldData) dstEngineRef.current?.gotoUnit(position.uid, position.ratio);
+  }, [dstEngine.ready]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // 分层重折/重载后，openSections 里可能残留已不存在的 section id：过滤掉，避免「展开」渲染成空壳。
   useEffect(() => {
@@ -1007,20 +1431,38 @@ export default function ReaderWorkspace({ projectId, document: doc, translation,
 
   /* ---------- 跟随滚动：文本栏驱动对侧文本 + 原件 bbox ---------- */
   const followFrame = useRef(0);
+  const pendingTextPane = useRef<ReaderPane>("source");
+  // 只忽略与写入位置相同的回传；用户一旦滚到其他位置即可立即接管。
+  const textScrollEcho = useRef<Partial<Record<ReaderPane, number>>>({});
+  const lastTextOriginBlock = useRef("");
+  useEffect(() => { lastTextOriginBlock.current = ""; textScrollEcho.current = {}; }, [prefs.follow, foldOn, projectId]);
   const onTextScroll = (srcKey: ReaderPane) => () => {
-    if (!prefs.follow || suppressed()) return;
+    const sourceBody = (srcKey === "source" ? bodyRefs.source : bodyRefs.trans).current;
+    const echo = textScrollEcho.current[srcKey];
+    if (sourceBody && echo !== undefined && Math.abs(sourceBody.scrollTop - echo) < 1) return;
+    delete textScrollEcho.current[srcKey];
+    if (!prefs.follow || suppressed() || foldOn) return;
+    pendingTextPane.current = srcKey;
     if (followFrame.current) return;            // 每帧只处理一次，避免长列表滚动时逐块触发
     followFrame.current = window.requestAnimationFrame(() => {
       followFrame.current = 0;
+      const srcKey = pendingTextPane.current;
       const body = (srcKey === "source" ? bodyRefs.source : bodyRefs.trans).current;
       if (!body) return;
-      const top = body.scrollTop + 110;
-      const seen: HTMLElement[] = [];
+      const referenceY = body.getBoundingClientRect().top + body.clientHeight * 0.3;
+      let anchor: HTMLElement | null = null;
+      let nearest = Infinity;
       body.querySelectorAll<HTMLElement>("[data-block-id]").forEach(el => {
-        if (el.getClientRects().length && blkTop(body, el) <= top) seen.push(el);
+        const rect = el.getBoundingClientRect();
+        if (!el.getClientRects().length || rect.height <= 0) return;
+        const distance = Math.max(rect.top - referenceY, referenceY - rect.bottom, 0);
+        if (distance < nearest) { anchor = el; nearest = distance; }
       });
-      const id = seen.length ? (seen[seen.length - 1].dataset.blockId || "") : "";
-      if (!id) return;
+      const chosen = anchor as HTMLElement | null;
+      const id = chosen?.dataset.blockId || "";
+      if (!chosen || !id) return;
+      const rect = chosen.getBoundingClientRect();
+      const ratio = clamp((referenceY - rect.top) / rect.height, 0, 1);
       setCurrentBlock(id);
       // 对侧文本栏同步（与「同步定位」开关无关：跟随滚动就是对侧跟随）
       const other: ReaderPane = srcKey === "source" ? "trans" : "source";
@@ -1028,12 +1470,19 @@ export default function ReaderWorkspace({ projectId, document: doc, translation,
         const t = blockEl(other, id);
         const otherBody = other === "source" ? bodyRefs.source.current : bodyRefs.trans.current;
         if (t && otherBody) {
-          suppress(180);
-          otherBody.scrollTop = blkTop(otherBody, t) - 100;
+          let target = blkTop(otherBody, t) + ratio * t.getBoundingClientRect().height - otherBody.clientHeight * 0.3;
+          // 两端明确对齐，避免段落高度不同导致对侧永远到不了开头/结尾。
+          if (body.scrollTop <= 1) target = 0;
+          else if (body.scrollHeight - body.clientHeight - body.scrollTop <= 1) target = otherBody.scrollHeight;
+          otherBody.scrollTop = Math.max(0, target);
+          textScrollEcho.current[other] = otherBody.scrollTop;
         }
       }
       // 原件：按**真实 bbox** 居中（不按页号滚动）
-      void centerOriginOn(id);
+      if (lastTextOriginBlock.current !== id) {
+        lastTextOriginBlock.current = id;
+        void centerOriginOn(id, true);
+      }
     });
   };
   useEffect(() => () => { if (followFrame.current) window.cancelAnimationFrame(followFrame.current); }, []);
@@ -1051,7 +1500,7 @@ export default function ReaderWorkspace({ projectId, document: doc, translation,
   /* ---------- 跟随滚动：原件驱动文本栏（bbox 中心最近的块） ---------- */
   const originFollowFrame = useRef(0);
   const onOriginScroll = useCallback(() => {
-    if (!prefs.follow || suppressed()) return;
+    if (!prefs.follow || suppressed() || Date.now() < originScrollMuteUntil.current) return;
     if (originFollowFrame.current) return;
     originFollowFrame.current = window.requestAnimationFrame(() => {
       originFollowFrame.current = 0;
@@ -1103,9 +1552,10 @@ export default function ReaderWorkspace({ projectId, document: doc, translation,
   type SelectionTarget = {
     x: number; y: number;
     blockId: string; pane: ReaderPane;
-    /** range=真实字符范围（划词/右键整段）；block=无逐字范围块（标题/摘要/图表）的整段锚点标记。 */
     mode: "range" | "block";
     text: string; start: number; end: number;
+    /** fold 模式内核原生锚（selectionAnchors 快照）；普通模式 undefined。 */
+    engineAnchor?: Record<string, unknown>;
   };
   const [selectionPop, setSelectionPop] = useState<SelectionTarget | null>(null);
   /** 上次使用的高亮颜色（上游 lastShade 习惯：点色点直接套用，选择被记住）。 */
@@ -1174,6 +1624,23 @@ export default function ReaderWorkspace({ projectId, document: doc, translation,
   const createAnnotationFromSelection = (color: ReaderColor2): { annotation: ReaderAnnotation; existed: boolean } | null => {
     const target = selectionPop;
     if (!target || !overlay) return null;
+    // fold 模式：内核原生锚 → engine_anchor 持久化 + block 级 React 呈现（不伪造字符偏移）
+    if (target.engineAnchor) {
+      const ea = target.engineAnchor;
+      const engineAnchor = makeEngineAnchor({anchor:ea}, target.pane);
+      if (!engineAnchor) { toast("此选区的折叠产物已变化，请重新选择"); return null; }
+      const tokens = Array.isArray(ea.tokens) ? ea.tokens as number[] : null;
+      const chars = engineAnchor.space === "full" && tokens && Number(ea.level) === 4
+        ? tokenMapForRef.current?.(target.blockId, target.pane)?.tokenToChar(tokens[0], tokens[1]) : null;
+      const quote = ((ea.quote as {exact?:string})?.exact || (ea.shown as {exact?:string})?.exact || target.text).slice(0,500);
+      return { annotation: {
+        id:uid(), block_id:target.blockId, pane:target.pane, anchor:chars ? "range" : "block",
+        start:chars?.[0] ?? 0, end:chars?.[1] ?? 0, quote:{exact:quote,prefix:"",suffix:""},
+        engine_anchor:engineAnchor, color, note:"", detached:false,
+        created_at:new Date().toISOString(), updated_at:new Date().toISOString(),
+      }, existed:false };
+    }
+    // 普通模式（划词/右键整段）
     if (target.mode === "block") {
       const existing = wholeAnnotationOf(target.blockId, target.pane);
       if (existing) return { annotation: existing, existed: true };
@@ -1210,14 +1677,29 @@ export default function ReaderWorkspace({ projectId, document: doc, translation,
     if (!target || !overlay) return;
     const made = createAnnotationFromSelection(lastColor);
     if (!made) return;
-    let working = overlay;
-    if (!made.existed) {
-      working = { ...overlay, annotations: [...overlay.annotations, made.annotation] };
-      setOverlay(working); scheduleSave(working);
-    }
-    const rect = blockEl(target.pane, target.blockId)?.getBoundingClientRect()
-      ?? new DOMRect(target.x, target.y, 0, 0);
-    openHighlightPop(made.annotation, rect);
+    const working: ReaderOverlay = made.existed
+      ? overlay
+      : (() => {
+          const next = { ...overlay, annotations: [...overlay.annotations, made.annotation] };
+          overlayLive.current = next;
+          setOverlay(next);
+          return next;
+        })();
+    // CAS 即时落盘（不 scheduleSave：内核 saveNote 也走 POST /api/notes → CAS 竞态）
+    void persistOverlayNow(working).then(() => {
+      // CAS 成功 → 广播完整 notes 数组（内核纯内存 apply，不 POST）
+      if (foldOnRef.current) {
+        const kernelNotes = (overlayLive.current?.annotations ?? [])
+          .filter(a => !a.detached && a.pane === target.pane)
+          .map(a => toEngineNoteRef.current ? toEngineNoteRef.current(a) : a);
+        const paneSel = target.pane === "source" ? "#rdrr-pane-source" : "#rdrr-pane-trans";
+        const frameEl = document.querySelector(`${paneSel} .rdrr-tfhost iframe`) as HTMLIFrameElement | null;
+        if (frameEl) frameEl.contentWindow?.postMessage({ inst: frameEl.dataset.tfInst, __lit: "apply-notes", notes: kernelNotes }, "*");
+      }
+      const rect = blockEl(target.pane, target.blockId)?.getBoundingClientRect()
+        ?? new DOMRect(target.x, target.y, 0, 0);
+      openHighlightPop(made.annotation, rect);
+    }).catch(error => toast(error instanceof Error ? error.message : String(error)));
   };
 
   const askFromSelection = () => {
@@ -1316,7 +1798,7 @@ export default function ReaderWorkspace({ projectId, document: doc, translation,
   useEffect(() => {
     const onSelChange = () => {
       setSelectionPop(prev => {
-        if (!prev || prev.mode !== "range") return prev;
+        if (!prev || prev.engineAnchor || prev.mode !== "range") return prev;
         const sel = window.getSelection();
         return !sel || sel.isCollapsed ? null : prev;
       });
@@ -1349,10 +1831,21 @@ export default function ReaderWorkspace({ projectId, document: doc, translation,
         ? "已标记（该块没有逐字范围，只标到原文锚点；不写回原始文档）"
         : "已保存到项目阅读层（不写回原始文档）";
     }
-    setOverlay(next); scheduleSave(next);
+    overlayLive.current = next;
+    setOverlay(next);
     setSelectionPop(null);
     window.getSelection()?.removeAllRanges();
-    toast(message);
+    // 单一权威写路径：CAS 即时落盘 → 成功后广播完整 notes 数组（apply-notes，内核纯内存 apply 不 POST）
+    void persistOverlayNow(next).then(() => {
+      toast(message);
+      if (!foldOnRef.current) return;
+      const kernelNotes = (overlayLive.current?.annotations ?? [])
+        .filter(a => !a.detached && a.pane === target.pane)
+        .map(a => toEngineNoteRef.current ? toEngineNoteRef.current(a) : a);
+      const paneSel = target.pane === "source" ? "#rdrr-pane-source" : "#rdrr-pane-trans";
+      const frameEl = document.querySelector(`${paneSel} .rdrr-tfhost iframe`) as HTMLIFrameElement | null;
+      if (frameEl) frameEl.contentWindow?.postMessage({ inst: frameEl.dataset.tfInst, __lit: "apply-notes", notes: kernelNotes }, "*");
+    }).catch(error => toast(error instanceof Error ? error.message : String(error)));
   };
 
   const openHighlightPop = (annotation: ReaderAnnotation, rect: DOMRect) => {
@@ -1363,13 +1856,31 @@ export default function ReaderWorkspace({ projectId, document: doc, translation,
 
   const activeAnnotation = hlPop ? (overlay?.annotations ?? []).find(a => a.id === hlPop.hid) : null;
 
+  /** CAS 即时落盘 + 广播完整 notes 到 fold iframe（统一写路径，不防抖丢数据）。 */
+  const persistAndBroadcast = (next: ReaderOverlay) => {
+    overlayLive.current = next;
+    setOverlay(next);
+    void persistOverlayNow(next).then(() => {
+      if (!foldOnRef.current) return;
+      for (const pane of ["source", "trans"] as const) {
+        const paneSel = pane === "source" ? "#rdrr-pane-source" : "#rdrr-pane-trans";
+        const frameEl = document.querySelector(`${paneSel} .rdrr-tfhost iframe`) as HTMLIFrameElement | null;
+        if (!frameEl) continue;
+        const kernelNotes = (next.annotations ?? [])
+          .filter(a => !a.detached && a.pane === pane)
+          .map(a => toEngineNoteRef.current ? toEngineNoteRef.current(a) : a);
+        frameEl.contentWindow?.postMessage({ inst: frameEl.dataset.tfInst, __lit: "apply-notes", notes: kernelNotes }, "*");
+      }
+    }).catch(error => toast(error instanceof Error ? error.message : String(error)));
+  };
+
   const patchAnnotation = (id: string, patch: Partial<ReaderAnnotation>) => {
     if (!overlay) return;
     const next: ReaderOverlay = {
       ...overlay,
       annotations: overlay.annotations.map(a => a.id === id ? { ...a, ...patch, updated_at: new Date().toISOString() } : a),
     };
-    setOverlay(next); scheduleSave(next);
+    persistAndBroadcast(next);
   };
 
   const removeHighlight = () => {
@@ -1384,7 +1895,7 @@ export default function ReaderWorkspace({ projectId, document: doc, translation,
       next = { ...overlay, annotations: overlay.annotations.filter(x => x.id !== a.id) };
       message = "已移除高亮（原始文档从未被改动）";
     }
-    setOverlay(next); scheduleSave(next);
+    persistAndBroadcast(next);
     setHlPop(null);
     toast(message);
   };
@@ -1392,6 +1903,14 @@ export default function ReaderWorkspace({ projectId, document: doc, translation,
   /* ---------- 统一对话（一次性引用 + 真实问答） ---------- */
   const [chatOpen, setChatOpen] = useState(false);
   const [chatDraft, setChatDraft] = useState("");
+  /** 输入框自适应高度：随内容增高，超过 max-height 后内部滚动（现代输入框样式）。 */
+  const chatInputRef = useRef<HTMLTextAreaElement | null>(null);
+  useEffect(() => {
+    const el = chatInputRef.current;
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = `${Math.min(el.scrollHeight, 132)}px`;
+  }, [chatDraft, chatOpen]);
   const [activeQuote, setActiveQuote] = useState<ReaderChatWireQuote | null>(null);
   const [chatBinding, setChatBinding] = useState<ReaderModelBinding>(defaultChat ?? { service_id: "", model: "" });
   useEffect(() => { if (defaultChat?.service_id) setChatBinding(defaultChat); }, [defaultChat?.service_id, defaultChat?.model]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -1523,6 +2042,8 @@ export default function ReaderWorkspace({ projectId, document: doc, translation,
     const value = (entry?.text || "").trim();
     return value ? { text: value, fallback: false } : { text: block.source_text || "", fallback: true };
   };
+  const sourceChanged = (block: Block, pane: ReaderPane) =>
+    pane === "trans" && translation?.entries[block.block_id]?.stale_reason === "source";
 
   const renderPassthrough = (block: Block, pane: ReaderPane) => {
     if (block.type === "image") {
@@ -1606,13 +2127,28 @@ export default function ReaderWorkspace({ projectId, document: doc, translation,
         {hasMarks ? annotatedSegments(value, anns) : value}
       </p>
     );
-    return missing ? (
+    return missing || sourceChanged(block, pane) ? (
       <div className="rdrr-missing">
-        <span className="rdrr-mflag">未译 · 显示原文回退</span>
+        <span className="rdrr-mflag">{missing ? "未译 · 显示原文回退" : "原文已修改 · 译文待复核"}</span>
         {body}
       </div>
     ) : body;
   };
+
+  /** pending（部分失败）判定：lit_pending 显式为 true，或来源为 pending（AI 未生成）；
+   *  源/派生/摘要独立降级，各层用同一判定，不伪造。 */
+  const unitPending = (unit: ReaderFoldUnit | undefined | null) =>
+    Boolean(unit && (unit.lit_pending === true || unit.source === "pending"));
+  const sectionSummaryPending = (section: ReaderFoldSection | undefined | null) =>
+    Boolean(section && (section.lit_summary_pending === true || section.source === "pending"));
+  /** pending 段的全文呈现（普通阅读层）：全文/已有全文译文照常可读可标，仅加「未生成」徽标。 */
+  const renderPendingFull = (block: Block, pane: ReaderPane, key: string) => (
+    <div className="rdrr-pendwrap" key={key} data-block-id={block.block_id}
+      onClick={event => { if ((event.target as HTMLElement).closest("button, a, mark.hl, input")) return; activateBlock(block.block_id, pane); }}>
+      <span className="rdrr-pendtag" title="AI 分层未生成（部分失败）：本段显示全文/已有全文译文，不代表 AI 概括">未生成</span>
+      {renderAnnotatedText(block, pane, "rdrr-blk rdrr-p")}
+    </div>
+  );
 
   const renderUnitByLevel = (block: Block, sourceUnit: ReaderFoldUnit | undefined, pane: ReaderPane) => {
     // 译文栏必须用 **译文层的 unit**：它的 brief/key 是中文（而不是原文 brief），
@@ -1620,6 +2156,10 @@ export default function ReaderWorkspace({ projectId, document: doc, translation,
     // 之前一律用原文 unit，导致「分层译句」这类来源标注张冠李戴、译文栏显示原文短句。
     const unit = pane === "trans" ? (dstUnitIndex.get(block.block_id) ?? sourceUnit) : sourceUnit;
     const locallyOpen = openBlocks.has(block.block_id);
+    // pending：所有层（含简述/要点/主线/主题）默认显示全文 + 「未生成」徽标，不藏正文
+    if (unitPending(unit) && level > 1 && !locallyOpen) {
+      return renderPendingFull(block, pane, block.block_id + "-pend");
+    }
     if (level === 1 || locallyOpen || !unit) {
       const node = renderAnnotatedText(block, pane, "rdrr-blk rdrr-p");
       if (locallyOpen && level > 1) {
@@ -1741,6 +2281,30 @@ export default function ReaderWorkspace({ projectId, document: doc, translation,
     );
   };
 
+  /** 主线/主题层的降级节呈现：摘要缺失/含 pending 段的节**不整节隐藏、也不要求先展开**——
+   *  有效段用既有要点/主张一行呈现，pending 段默认全文 + 「未生成」徽标。 */
+  const renderSectionFoldedUnits = (sectionId: string, pane: ReaderPane): React.ReactNode[] => {
+    const out: React.ReactNode[] = [];
+    articleItems.forEach(item => {
+      if (item.kind !== "unit") return;
+      if (blockSectionByOrder.get(item.block.block_id) !== sectionId) return;
+      const unit = pane === "trans" ? (dstUnitIndex.get(item.block.block_id) ?? item.unit) : item.unit;
+      if (unitPending(unit)) {
+        out.push(renderPendingFull(item.block, pane, "fu" + item.block.block_id + pane));
+        return;
+      }
+      const line = unit?.takeaway || unit?.key || unit?.brief_text || unit?.sentences?.[0] || "";
+      if (line) out.push(
+        <p key={"fu" + item.block.block_id + pane} className="rdrr-spine-item" data-block-id={item.block.block_id}
+          {...hoverProps(item.block.block_id)}
+          onClick={event => { activateBlock(item.block.block_id, pane); }}>{line}</p>,
+      );
+    });
+    return out;
+  };
+  const sectionHasPendingUnits = (sectionId: string, pane: ReaderPane) =>
+    ((pane === "source" ? layersSrc : layersDst)?.sections.find(s => s.id === sectionId)?.units ?? []).some(u => unitPending(u));
+
   const renderArticle = (pane: ReaderPane) => {
     const items = articleItems;
     const out: React.ReactNode[] = [];
@@ -1769,6 +2333,9 @@ export default function ReaderWorkspace({ projectId, document: doc, translation,
                 <span className="rdrr-mini-ai" title={secSource === "model" ? "由模型生成" : secSource === "mixed" ? "混合来源：部分模型、部分本地摘句" : "本地摘句（未调模型）"}>
                   {secSource === "model" ? "AI" : secSource === "mixed" ? "AI+本地" : "本地"}
                 </span>
+                {sectionSummaryPending(sectionLayers) && (
+                  <span className="rdrr-mini-pend" title="本章摘要未生成（部分失败）：标题保留，段落全文/要点照常可用">摘要未生成</span>
+                )}
                 <button className="rdrr-topen" onClick={event => { event.stopPropagation(); setOpenSections(prev => new Set(prev).add(sec.id)); }}>展开本节 →</button>
               </div>
             </div>,
@@ -1776,6 +2343,15 @@ export default function ReaderWorkspace({ projectId, document: doc, translation,
         }
       });
       out.push(<div key="topicmap" className="rdrr-topicmap">{cards}</div>);
+      // 降级节（摘要缺失/含 pending 段）：未展开也默认呈现——有效段要点行 + pending 段全文，不藏失败内容
+      const seenDegraded = new Set<string>();
+      items.forEach(item => {
+        if (item.kind !== "unit" || seenDegraded.has(item.sectionId)) return;
+        seenDegraded.add(item.sectionId);
+        const sectionLayers = (pane === "source" ? layersSrc : layersDst)?.sections.find(s => s.id === item.sectionId);
+        const degraded = sectionSummaryPending(sectionLayers) || sectionHasPendingUnits(item.sectionId, pane);
+        if (degraded && !openSections.has(item.sectionId)) out.push(...renderSectionFoldedUnits(item.sectionId, pane));
+      });
       // 已展开节：按原文顺序渲染**整节全文**（此前逐段走短层，展开后仍是要点）
       const seenSec = new Set<string>();
       items.forEach(item => {
@@ -1793,7 +2369,7 @@ export default function ReaderWorkspace({ projectId, document: doc, translation,
         if (item.kind === "heading") {
           out.push(<h2 key={item.block.block_id} className="rdrr-blk rdrr-h2" data-block-id={item.block.block_id}
             {...hoverProps(item.block.block_id)}
-            onClick={event => { activateBlock(item.block.block_id, pane); }}>{blockText(item.block, pane).text}</h2>);
+            onClick={event => { activateBlock(item.block.block_id, pane); }}>{blockText(item.block, pane).text}{sourceChanged(item.block, pane) && <span className="rdrr-mflag"> · 译文待复核</span>}</h2>);
           return;
         }
         if (item.kind === "unit") {
@@ -1810,7 +2386,9 @@ export default function ReaderWorkspace({ projectId, document: doc, translation,
                 if ((event.target as HTMLElement).closest(".rdrr-openbtn")) return;
                 activateBlock(anchorId, pane);
               }}>
-              <span className="rdrr-sw">{secLayers?.takeaway || item.unit.takeaway || item.unit.sentences[0]}</span>
+              <span className="rdrr-sw">{secLayers?.takeaway || item.unit.takeaway || item.unit.sentences[0]}
+                {sectionSummaryPending(secLayers) && <span className="rdrr-pendtag" title="本章摘要未生成（部分失败）：标题保留，段落全文/要点照常可用">摘要未生成</span>}
+              </span>
               <button className="rdrr-openbtn" onClick={event => {
                 event.stopPropagation();
                 if (!open) setOpenSections(prev => new Set(prev).add(item.sectionId));
@@ -1818,8 +2396,11 @@ export default function ReaderWorkspace({ projectId, document: doc, translation,
               }}>{open ? "▲ 收起本节" : "展开本节 →"}</button>
             </div>,
           );
-          // 展开的节：按原文顺序渲染整节全文（此前只渲染节内第一个 unit）
+          // 展开的节：按原文顺序渲染整节全文；降级节（摘要缺失/含 pending 段）未展开也默认呈现，不藏失败内容
           if (open) out.push(renderSectionOpen(item.sectionId, pane));
+          else if (sectionSummaryPending(secLayers) || sectionHasPendingUnits(item.sectionId, pane)) {
+            out.push(...renderSectionFoldedUnits(item.sectionId, pane));
+          }
           return;
         }
         // 透传块在主线层隐藏（与原型一致）
@@ -1838,6 +2419,7 @@ export default function ReaderWorkspace({ projectId, document: doc, translation,
               activateBlock(item.block.block_id, pane);
             }}>
             {fallback && pane === "trans" ? `[未译] ${text}` : text}
+            {sourceChanged(item.block, pane) && <span className="rdrr-mflag"> · 译文待复核</span>}
           </Tag>,
         );
         return;
@@ -1936,16 +2518,18 @@ export default function ReaderWorkspace({ projectId, document: doc, translation,
       const target = event.target as HTMLElement | null;
       const typing = Boolean(target?.closest("input, textarea, select, [contenteditable='true']"));
       if (event.key === "Escape") {
-        setSelectionPop(null); setHlPop(null);
+        setSelectionPop(null); setHlPop(null); setFoldMenuOpen(false);
         return;
       }
       if (typing || event.metaKey || event.ctrlKey || event.altKey) return;
-      if (foldStageRef.current === "on" && "12345".includes(event.key)) { event.preventDefault(); setLevel(Number(event.key)); return; }
+      if (foldOnRef.current && "12345".includes(event.key)) { event.preventDefault(); setLevel(Number(event.key)); return; }
       if (event.key === "f" || event.key === "F") { event.preventDefault(); setChatOpen(value => !value); }
     };
     const onDown = (event: MouseEvent) => {
       const target = event.target as HTMLElement | null;
       if (target?.closest("#selPop, #hlPop, .rdrr-lvldetail, .rdrr-lvlnote")) return;
+      // 状态入口 popover：点在自身内部不关（按钮自身 onClick 负责切换），点外面关
+      if (!target?.closest(".rdrr-foldmenu-wrap")) setFoldMenuOpen(false);
       setSelectionPop(null); setHlPop(null);
     };
     window.addEventListener("keydown", onKey);
@@ -1965,8 +2549,35 @@ export default function ReaderWorkspace({ projectId, document: doc, translation,
   const firstSectionId = layersSrc?.sections?.[0]?.id ?? layersDst?.sections?.[0]?.id ?? sectionIndex[0]?.id ?? "";
   /** 目标语短层若由「原文 AI 层派生」，必须标明它不是已有译文的逐字摘录。 */
   const appearance = prefs.appearance;
-  const foldStageLabel = ({ off: "普通阅读（折叠默认关闭）", processing: "整篇折叠处理中…", ready: "折叠就绪 · 点「启动」进入", on: "折叠阅读" } as Record<string, string>)[foldStage];
-  const foldErrorLine = foldError || (foldJob?.errors.length ? foldJob.errors.join("；") : "");
+  /** 作业轴派生量：只驱动状态入口与主按钮可用性，绝不改视图（foldOn）。 */
+  const jobStatus = foldJob?.status ?? "idle";
+  const jobReadable = foldJob?.readable ?? false;
+  const jobBusy = jobStatus === "running" || jobStatus === "pausing";
+  // 状态入口在有作业时出现；首次 POST 失败/无模型被拒时无 runId，foldError 也要有处可看（不静默）
+  const hasRun = Boolean(foldJob?.runId) || jobStatus !== "idle" || Boolean(foldError);
+  const jobRatio = Math.max(0, Math.min(1, Number(foldJob?.progress?.ratio ?? 0)));
+  /** 顶栏副标题：视图优先，其次作业状态。 */
+  const foldStatusLabel = foldOn ? "折叠阅读"
+    : jobBusy ? (jobStatus === "pausing" ? "正在暂停…" : "整篇折叠处理中…")
+    : jobStatus === "paused" ? "折叠已暂停"
+    : jobStatus === "failed" ? "折叠未完成（可补齐）"
+    : jobReadable ? "折叠就绪" : "普通阅读";
+  /** 错误不再有独立横幅：作业错误在状态入口展开，传输/载入错误在状态入口与 toast 如实显示。 */
+  /**
+   * 紧凑活动摘要（阶段 / 当前节 / 批次 / 实时计时 / 本节待补 / 失败 / 重试）。
+   * 窄屏（<900px）不挤顶栏：同一份文本接到已有的「对照阅读 · …」副标题上。
+   *
+   * 活动行不自己算进度分子：节级进度已由后端 `section_states` 去重派生（completed+reused ≤ total，
+   * 闸值不再跨 resume 累加），进度环只用后端 ratio；这里只用 activity 的 batch/本节待补 与
+   * `progress.failed`，避免两套计数在界面上说出不同的数。
+   */
+  const foldActivityView = jobBusy
+    ? foldActivityParts({
+      activity: foldActivity, status: foldJob?.status ?? "idle",
+      failed: Number(foldJob?.progress?.failed ?? 0) || 0, errors: foldJob?.errors ?? [], nowMs: foldClockMs,
+    })
+    : { parts: [] as ReturnType<typeof foldActivityParts>["parts"], title: "" };
+  const foldActivityText = foldActivityView.parts.map(part => part.text).join(" · ");
   const stale = layersSrc?.stale || (hasTrans && layersDst?.stale === true);
 
   return (
@@ -1976,12 +2587,22 @@ export default function ReaderWorkspace({ projectId, document: doc, translation,
     >
       {/* 顶栏：目录 / 书名 / 三选框 / Aa / 笔记 / 问答 */}
       <header className="rdrr-topbar">
-        <button className="rdrr-tbtn" onClick={() => setTocOpen(value => !value)}>☰ 目录</button>
+        <button className="rdrr-tbtn" onClick={() => { setTocOpen(value => !value); setAaOpen(false); setFoldMenuOpen(false); }}>☰ 目录</button>
         <div className="rdrr-book">
           <div className="rdrr-book-title">{state?.title || doc.title}</div>
-          <div className="rdrr-book-sub">对照阅读 · {foldStageLabel}</div>
+          <div className="rdrr-book-sub">对照阅读 · {isNarrow && foldActivityText ? foldActivityText : foldStatusLabel}</div>
         </div>
         <div className="rdrr-spacer" />
+        {/* 紧凑活动行：只在处理/暂停时出现，不是常驻大横幅；缺失 activity 时只剩阶段文本 */}
+        {jobBusy && !isNarrow && foldActivityView.parts.length > 0 && (
+          <div className="rdrr-foldact" id="rdrr-foldact" title={foldActivityView.title || undefined}
+            aria-label={`折叠进程：${foldActivityText}`}>
+            {foldActivityView.parts.map((part, index) => (
+              <span key={part.key} className={"rdrr-foldact-part" + (part.kind ? " " + part.kind : "")}
+                data-part={part.key} title={part.title || undefined}>{index > 0 ? ` · ${part.text}` : part.text}</span>
+            ))}
+          </div>
+        )}
         <div className="rdrr-toggles" role="group" aria-label="显示栏开关">
           {(["origin", "source", "trans"] as const).map(key => (
             <label key={key} className="rdrr-ptoggle">
@@ -2004,42 +2625,96 @@ export default function ReaderWorkspace({ projectId, document: doc, translation,
             ))}
           </div>
         )}
-        <button className="rdrr-tbtn" onClick={() => setAaOpen(value => !value)}>Aa</button>
-        <div className="rdrr-aifoldwrap">
-          <button className="rdrr-tbtn rdrr-aifold" id="btn-aifold" data-stage={foldStage}
-            title={{ off: "处理整篇并生成五层折叠（点击即明确授权，可能调用模型）", processing: "整篇折叠中…可暂停/继续", ready: "启动折叠阅读", on: "退出折叠，回到普通阅读" }[foldStage]}
-            disabled={foldStage === "on" && !foldData}
-            onClick={() => {
-              if (foldStage === "off") startAIFold();
-              else if (foldStage === "ready") launchFold();
-              else if (foldStage === "on" && foldData) exitFold();   // 产物未载入前不响应退出（防双击误退）
-            }}>
-            {foldStage === "processing" && (
-              <svg className="rdrr-ring" viewBox="0 0 36 36" aria-hidden="true">
-                <circle className="rdrr-ring-bg" cx="18" cy="18" r="15.5" />
-                <circle className="rdrr-ring-fg" cx="18" cy="18" r="15.5"
-                  strokeDasharray={`${Math.round(Math.max(0, Math.min(1, Number(foldJob?.progress?.ratio ?? 0))) * 97.4)} 97.4`} />
-              </svg>
-            )}
-            {{ off: "AIFold", processing: "AIFold", ready: "启动", on: foldData ? "退出折叠" : "载入中…" }[foldStage]}
-          </button>
-          {foldStage === "processing" && (
-            <button className="rdrr-tbtn" id="btn-foldpause" data-paused={foldJob?.status === "paused" ? "1" : "0"}
-              disabled={foldJob?.status === "pausing"}
-              title={foldJob?.status === "paused" ? "继续整篇折叠" : "暂停整篇折叠（模型请求边界生效）"}
-              onClick={foldPauseResume}>
-              {foldJob?.status === "paused" ? "继续" : foldJob?.status === "pausing" ? "正在暂停…" : "暂停"}
-            </button>
+        <button className="rdrr-tbtn" onClick={() => { setAaOpen(value => !value); setTocOpen(false); setFoldMenuOpen(false); }}>Aa</button>
+        <button className="rdrr-tbtn rdrr-aifold" id="btn-aifold"
+          data-stage={foldOn ? "on" : jobBusy ? "processing" : jobReadable ? "ready" : "off"}
+          data-paused={jobStatus === "paused" ? "1" : "0"}
+          title={foldOn ? "关闭折叠，回到普通阅读"
+            : jobReadable ? "进入折叠阅读（含未完成部分的已有成果）"
+            : jobBusy ? "整篇折叠生成中；可在状态入口暂停"
+            : jobStatus === "paused" ? "已暂停：在状态入口继续"
+            : jobStatus === "failed" ? "未完成：在状态入口补齐重试"
+            : "处理整篇并生成五层折叠（点击即明确授权，可能调用模型）"}
+          disabled={(foldOn && !foldData) || (!foldOn && jobBusy && !jobReadable)
+            || (!foldOn && (jobStatus === "paused" || jobStatus === "failed") && !jobReadable)}
+          onClick={() => {
+            if (foldOn) { if (foldData) exitFold(); }   // 产物未载入前不响应退出（防双击误退）
+            else if (jobReadable) enterFold();
+            else if (jobStatus === "idle") startGeneration();
+          }}>
+          {/* 进度环贴合按钮圆角外形（conic-gradient 内圈）；生成中且未进入折叠时显示 */}
+          {jobBusy && !foldOn && (
+            <span className="rdrr-ring" aria-hidden="true"
+              style={{ "--p": jobRatio } as React.CSSProperties} />
           )}
-        </div>
+          <span className="rdrr-aifold-label">
+            {foldOn ? (foldData ? "关闭折叠" : "载入中…")
+              : jobReadable ? "进入折叠"
+              : jobBusy ? "生成中…"
+              : jobStatus === "paused" ? "已暂停"
+              : jobStatus === "failed" ? "未完成"
+              : "生成折叠"}
+          </span>
+        </button>
+        {/* 状态入口：生成操作与错误的唯一去处（普通阅读与折叠视图同款，无独立悬浮错误条） */}
+        {hasRun && (
+          <div className="rdrr-foldmenu-wrap">
+            <button className={"rdrr-tbtn rdrr-foldstatus" + (foldMenuOpen ? " on" : "")} id="btn-foldstatus"
+              data-state={jobStatus} title="折叠作业状态与操作" aria-label="折叠作业状态与操作"
+              onClick={() => { setFoldMenuOpen(value => !value); setTocOpen(false); setAaOpen(false); }}>
+              <span aria-hidden="true" className={"rdrr-foldstatus-dot"
+                + (jobBusy ? " busy" : "") + (jobStatus === "failed" ? " fail" : "") + (jobStatus === "paused" ? " paused" : "")} />
+            </button>
+            {foldMenuOpen && (
+              <div className="rdrr-foldmenu" role="dialog" aria-label="折叠作业状态与操作">
+                <div className="rdrr-foldmenu-head">
+                  <span>{jobBusy ? "生成中" : jobStatus === "paused" ? "已暂停" : jobStatus === "failed" ? "未完成" : jobReadable ? "成果就绪" : "无进行中作业"}</span>
+                  {jobBusy && <span className="rdrr-foldmenu-ratio">{Math.round(jobRatio * 100)}%</span>}
+                </div>
+                {jobBusy && foldActivityView.parts.length > 0 && (
+                  <div className="rdrr-foldmenu-act" title={foldActivityView.title || undefined}>{foldActivityText}</div>
+                )}
+                {/* 成果可用性（人话计数；availability 为 null 时不出示，不猜 0） */}
+                {foldJob?.availability && (() => {
+                  const a = foldJob.availability as Record<string, unknown>;
+                  const num = (k: string) => (typeof a[k] === "number" && Number.isFinite(a[k]) ? a[k] as number : null);
+                  const valid = num("units_valid"), pending = num("units_pending"), suppressed = num("units_suppressed");
+                  const sumPending = num("summaries_pending");
+                  const bits: string[] = [];
+                  if (valid !== null) bits.push(`已生成 ${valid} 段`);
+                  if (pending !== null) bits.push(`待补 ${pending} 段`);
+                  if (suppressed !== null && suppressed > 0) bits.push(`免折 ${suppressed} 段`);
+                  if (sumPending !== null && sumPending > 0) bits.push(`待补摘要 ${sumPending} 章`);
+                  const basis = typeof a.basis === "string" ? a.basis : "";
+                  if (!bits.length && !basis) return null;
+                  return (
+                    <div className="rdrr-foldmenu-avail" title={basis || undefined}>
+                      {bits.join(" · ")}
+                      {basis && <span className="rdrr-foldmenu-basis">{basis}</span>}
+                    </div>
+                  );
+                })()}
+                <div className="rdrr-foldmenu-ops">
+                  {jobStatus === "running" && <button disabled={Boolean(foldAction)} onClick={() => void foldPauseResume()}>暂停</button>}
+                  {jobStatus === "pausing" && <span className="rdrr-foldmenu-note">正在暂停…</span>}
+                  {jobStatus === "paused" && <button className="rdrr-primary" disabled={Boolean(foldAction)} onClick={() => void foldPauseResume()}>继续</button>}
+                  {jobStatus === "failed" && <button className="rdrr-primary" disabled={Boolean(foldAction)} onClick={startGeneration}>补齐重试</button>}
+                  {newerResults && foldOn && <button className="rdrr-primary" disabled={Boolean(foldAction)} onClick={loadNewResults}>载入新成果</button>}
+                  {(foldError || !foldJob) && <button disabled={Boolean(foldAction)} onClick={refreshRunState} title="重新读取折叠作业状态（不调用模型）">重读状态</button>}
+                </div>
+                {Boolean(foldJob?.errors.length) && (
+                  <details className="rdrr-foldmenu-errs">
+                    <summary>失败 {foldJob!.errors.length} 项（已完成内容保留）</summary>
+                    <ul>{foldJob!.errors.map((item, index) => <li key={index}>{item}</li>)}</ul>
+                  </details>
+                )}
+                {foldError && <div className="rdrr-foldmenu-err" role="alert">{foldError}</div>}
+              </div>
+            )}
+          </div>
+        )}
         <button className="rdrr-tbtn" id="btn-ai" onClick={() => { setChatOpen(value => !value); }}>AI 问答</button>
       </header>
-      {foldErrorLine && foldStage !== "on" && (
-        <div className="rdrr-fixturetag rdrr-layerfail" role="alert"
-          style={{ position: "absolute", top: 54, left: "50%", transform: "translateX(-50%)", zIndex: 65, maxWidth: "72%" }}>
-          {foldErrorLine}
-        </div>
-      )}
 
       {/* 目录抽屉 */}
       {tocOpen && (
@@ -2176,9 +2851,9 @@ export default function ReaderWorkspace({ projectId, document: doc, translation,
         <section className={"rdrr-pane" + (paneVisible("source") ? "" : " hidden")} id="rdrr-pane-source">
           <div className="rdrr-pane-head"><span className="rdrr-tag rdrr-tag-md">原文</span></div>
           <div className="rdrr-pane-body" ref={bodyRefs.source} onScroll={onTextScroll("source")}>
-            {foldStage === "on" && !foldData
+            {foldOn && !foldData
               ? <div className="rdrr-engineerror" role="status">正在载入折叠产物…</div>
-              : foldStage === "on" && foldData
+              : foldOn && foldData
               ? (srcEngine.error
                 ? <div className="rdrr-engineerror" role="alert">内核加载失败：{srcEngine.error}<button onClick={srcEngine.retry}>重试</button></div>
                 : <div ref={srcEngine.containerRef} className="rdrr-tfhost" />)
@@ -2190,9 +2865,9 @@ export default function ReaderWorkspace({ projectId, document: doc, translation,
           <div className="rdrr-pane-head"><span className="rdrr-tag rdrr-tag-zh">译文</span>
             {!hasTrans && <span className="rdrr-tag rdrr-tag-demo">未生成译文</span>}</div>
           <div className="rdrr-pane-body" ref={bodyRefs.trans} onScroll={onTextScroll("trans")}>
-            {foldStage === "on" && !foldData
+            {foldOn && !foldData
               ? <div className="rdrr-engineerror" role="status">正在载入折叠产物…</div>
-              : foldStage === "on" && foldData
+              : foldOn && foldData
               ? (hasTrans
                 ? (dstEngine.error
                   ? <div className="rdrr-engineerror" role="alert">内核加载失败：{dstEngine.error}<button onClick={dstEngine.retry}>重试</button></div>
@@ -2206,9 +2881,8 @@ export default function ReaderWorkspace({ projectId, document: doc, translation,
       </div>
 
       {/* fold 模式：纯五档 bar（上游 footer.zoom 交互语义；上下无任何信息/操作栏）；普通阅读无 bar */}
-      {foldStage === "on" && (
+      {foldOn && (
         <div className="rdrr-lvlwrap">
-          {foldErrorLine && <div className="rdrr-fixturetag rdrr-layerfail" role="alert">{foldErrorLine}</div>}
           <div id="lvlbar" className="rdrr-lvlbar" role="slider" aria-label="折叠层级" aria-valuemin={1} aria-valuemax={5} aria-valuenow={level}
             aria-valuetext={LEVEL_NAMES[level]} tabIndex={0} ref={barRef}
             onPointerDown={onBarPointerDown} onPointerMove={onBarPointerMove} onPointerUp={onBarPointerUp}
@@ -2290,7 +2964,7 @@ export default function ReaderWorkspace({ projectId, document: doc, translation,
           <button className="rdrr-ai-close" id="aiClose" onClick={() => setChatOpen(false)} aria-label="关闭">✕</button>
         </div>
         <div className="rdrr-ai-body" id="aiBody">
-          {!chatMessages.length && <div className="rdrr-ai-empty">向全文提问，或划词/点高亮「追问」引用某一段。<br />回答一律给出原文依据（[#块ID] 可点击回跳）。</div>}
+          {!chatMessages.length && <div className="rdrr-ai-empty">向全文提问，或划词/点高亮「追问」引用某一段。<br />回答中的圈号引用可点击回跳原文。</div>}
           {chatMessages.map(message => message.role === "user" ? (
             <div key={message.id} className="rdrr-msg user" aria-label="你的提问">
               <div className="rdrr-msg-q">{message.question}</div>
@@ -2312,16 +2986,10 @@ export default function ReaderWorkspace({ projectId, document: doc, translation,
     <button onClick={() => void retryChat(message.id)}>重试</button>
   </div>}
               {message.state === "stopped" && <div className="rdrr-ai-wait">已停止</div>}
-              {message.answer && <div className="rdrr-msg-a">{message.answer}</div>}
-              {Boolean(message.citations?.length) && (
-                <div className="rdrr-cites">
-                  {message.citations!.map(c => (
-                    <button key={c.block_id} className="rdrr-cite" onClick={() => activateBlock(c.block_id, "source")}>
-                      § {c.section || c.block_id} · 原文
-                    </button>
-                  ))}
-                </div>
-              )}
+              {message.answer
+                ? <AnswerCitations answer={message.answer} citations={message.citations}
+                    onJump={blockId => activateBlock(blockId, "source")} />
+                : null}
               {message.model && <div className="rdrr-msg-model">{message.model}</div>}
             </div>
           ))}
@@ -2339,26 +3007,39 @@ export default function ReaderWorkspace({ projectId, document: doc, translation,
             <div className="rdrr-quote-rel" id="qRel">{activeQuote.pane === "trans" ? "引用自译文 · 关联原文；证据取原文段落" : "引用自原文"}</div>
           </div>
         )}
-        <div className="rdrr-ai-inputrow">
-          <ModelPicker
-            label="对话模型"
-            providers={providers}
-            value={chatBinding}
-            align="right"
-            compact
-            onChange={binding => { setChatBinding(binding); toast(`下一条消息将使用 ${binding.model}`); }}
-          />
+        <div className="rdrr-composer" id="aiComposer">
           <textarea
             id="aiInput"
+            ref={chatInputRef}
             value={chatDraft}
+            rows={1}
             placeholder={activeQuote ? "就这段内容提问…" : "向全文提问…"}
             aria-label="问题"
             onChange={event => setChatDraft(event.target.value)}
             onKeyDown={event => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void sendQuestion(); } }}
           />
-          {chatBusy
-            ? <button className="rdrr-ai-send" onClick={() => void stopChat()}>停止</button>
-            : <button className="rdrr-ai-send rdrr-primary" id="aiSend" onClick={() => void sendQuestion()}>发送</button>}
+          <div className="rdrr-composer-bar">
+            <ModelPicker
+              label="对话模型"
+              providers={providers}
+              value={chatBinding}
+              align="right"
+              compact
+              onChange={binding => { setChatBinding(binding); toast(`下一条消息将使用 ${binding.model}`); }}
+            />
+            <span className="rdrr-composer-spacer" />
+            {chatBusy
+              ? <button className="rdrr-composer-send" aria-label="停止" title="停止生成" onClick={() => void stopChat()}>
+                  <svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true"><rect x="3" y="3" width="10" height="10" rx="2" fill="currentColor" /></svg>
+                </button>
+              : <button className="rdrr-composer-send rdrr-primary" id="aiSend" aria-label="发送" title="发送（Enter）"
+                  disabled={!chatDraft.trim()} onClick={() => void sendQuestion()}>
+                  <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+                    <path d="M8 13.5V3M8 3L3.5 7.5M8 3l4.5 4.5" fill="none" stroke="currentColor" strokeWidth="1.8"
+                      strokeLinecap="round" strokeLinejoin="round" />
+                  </svg>
+                </button>}
+          </div>
         </div>
       </aside>
 

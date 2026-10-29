@@ -59,7 +59,7 @@
 .rdrr-tbtn{white-space:nowrap;}
 .rdrr-book{min-width:0; flex:1; display:flex; flex-direction:column;}
 .rdrr-book-title{font-size:13px; font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;}
-.rdrr-book-sub{font-size:10.5px; color:var(--rdrr-text3);}
+.rdrr-book-sub{font-size:10.5px; color:var(--rdrr-text3); white-space:nowrap; overflow:hidden; text-overflow:ellipsis;}
 .rdrr-spacer{flex:1;}
 .rdrr-toggles{display:flex; gap:6px; flex:none;}
 .rdrr-ptoggle{position:relative; cursor:pointer; user-select:none;}
@@ -224,15 +224,30 @@
 .rdrr-selpop.themed .rdrr-swatch.cur{box-shadow:0 0 0 2px var(--rdrr-blue); border-color:transparent;}
 .rdrr-selpop.themed .rdrr-sp-hint{font-size:10px; color:var(--rdrr-text3); margin-left:2px;}
 
-/* AIFold 入口：外圈进度环 + 暂停/继续 */
-.rdrr-aifoldwrap{display:flex; align-items:center; gap:6px; flex:none;}
+/* AIFold 入口：进度内圈贴合按钮圆角外形；同一按键依次承担 AIFold→暂停/继续→开始折叠→关闭折叠 */
 .rdrr-aifold{position:relative; font-weight:600; white-space:nowrap;}
+.rdrr-aifold-label{position:relative; z-index:1;}
 .rdrr-aifold[data-stage="ready"]{border-color:var(--rdrr-blue); color:var(--rdrr-blue);}
 .rdrr-aifold[data-stage="on"]{border-color:var(--rdrr-line2); color:var(--rdrr-text2);}
-.rdrr-ring{position:absolute; inset:-4px; width:calc(100% + 8px); height:calc(100% + 8px); pointer-events:none;}
-.rdrr-ring circle{fill:none; stroke-width:2.5;}
-.rdrr-ring-bg{stroke:var(--rdrr-line);}
-.rdrr-ring-fg{stroke:var(--rdrr-blue); stroke-linecap:round; transform:rotate(-90deg); transform-origin:center; transition:stroke-dasharray .2s;}
+.rdrr-ring{position:absolute; inset:2px; border-radius:inherit; pointer-events:none;
+  background:conic-gradient(var(--rdrr-blue) calc(var(--p, 0)*1turn), var(--rdrr-line) 0);}
+/* 内盘用按钮同色变量补底（不用 mask-composite：WKWebView 上多层 mask 合成不可靠，
+   真机曾渲染为空）。hover 的 brightness filter 作用于整个按钮子树，内盘颜色始终同步。 */
+.rdrr-ring::after{content:""; position:absolute; inset:2px; border-radius:inherit;
+  background:var(--rdrr-pane);}
+.rdrr-aifold[data-paused="1"] .rdrr-ring{
+  background:conic-gradient(var(--rdrr-text3) calc(var(--p, 0)*1turn), var(--rdrr-line) 0);}
+
+/* 整篇折叠的紧凑活动行（阶段/当前节/批次/实时计时/待处理/失败/重试）。
+   只在处理中显示，不是常驻横幅；单行、可截断，不挤占三栏阅读空间。 */
+.rdrr-foldact{flex:0 1 auto; display:flex; align-items:center; gap:2px; min-width:0; max-width:min(380px,40vw);
+  font-size:11px; line-height:1; color:var(--rdrr-text2); font-variant-numeric:tabular-nums;
+  white-space:nowrap; overflow:hidden;}
+.rdrr-foldact-part{overflow:hidden; text-overflow:ellipsis; max-width:190px; flex:0 1 auto;}
+.rdrr-foldact-part[data-part="elapsed"]{flex:none; color:var(--rdrr-text);}
+.rdrr-foldact-part[data-part="stage"]{color:var(--rdrr-text); font-weight:600; flex:none;}
+.rdrr-foldact-part.warn{color:#C0392B;}
+.rdrr-root[data-appearance="dark"] .rdrr-foldact-part.warn{color:#FF6B5E;}
 
 /* fold 模式引擎宿主 */
 .rdrr-tfhost{position:absolute; inset:0; overflow:hidden;}
@@ -289,9 +304,18 @@
 .rdrr-qtag{display:inline-block; font-size:9px; font-weight:700; color:var(--rdrr-blue);
   border:1px solid var(--rdrr-blue-line); border-radius:4px; padding:0 4px; margin-right:5px; vertical-align:1px;}
 .rdrr-cites{display:flex; flex-wrap:wrap; gap:5px; margin-top:8px;}
-.rdrr-cite{font-size:10.5px; color:var(--rdrr-blue); border:1px solid var(--rdrr-blue-line); border-radius:6px;
-  padding:2px 8px; cursor:pointer; background:transparent;}
+.rdrr-cite{display:inline-flex; align-items:center; gap:5px; font-size:10.5px; color:var(--rdrr-blue);
+  border:1px solid var(--rdrr-blue-line); border-radius:999px; padding:2px 9px 2px 3px; cursor:pointer;
+  background:transparent; max-width:100%;}
 .rdrr-cite:hover{background:var(--rdrr-blue-soft);}
+.rdrr-cite-num{flex:none; width:16px; height:16px; border-radius:50%; background:var(--rdrr-blue); color:#fff;
+  font-size:9.5px; font-weight:700; display:inline-flex; align-items:center; justify-content:center;}
+.rdrr-cite-sec{overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-weight:600;}
+/* 正文内的圈号引用（NotebookLM 风格）：按答案首次出现顺序编号，同一块不重复 */
+.rdrr-cnum{display:inline-flex; align-items:center; justify-content:center; min-width:15px; height:15px;
+  padding:0 3px; margin:0 2px; border-radius:999px; border:none; background:var(--rdrr-blue-soft);
+  color:var(--rdrr-blue); font-size:9.5px; font-weight:700; vertical-align:1px; cursor:pointer;}
+.rdrr-cnum:hover{background:var(--rdrr-blue); color:#fff;}
 .rdrr-simbadge{display:inline-block; font-size:9px; font-weight:600; color:#8a6d00; background:rgba(140,109,0,.12);
   border-radius:4px; padding:1px 6px; margin-top:6px;}
 .rdrr-ai-wait{color:var(--rdrr-text3); font-size:12px;}
@@ -306,12 +330,22 @@
   -webkit-box-orient:vertical; overflow:hidden; cursor:pointer;}
 .rdrr-quote-text:hover{color:var(--rdrr-blue);}
 .rdrr-quote-rel{font-size:10px; color:var(--rdrr-text3); margin-top:3px;}
-.rdrr-ai-inputrow{flex:none; display:flex; gap:8px; align-items:flex-end; padding:10px 12px; border-top:1px solid var(--rdrr-line);}
-.rdrr-ai-inputrow textarea{flex:1; border:1px solid var(--rdrr-line2); border-radius:9px; padding:8px 10px;
-  font-family:inherit; font-size:13px; resize:none; height:40px; outline:none; line-height:1.5;
-  background:var(--rdrr-pane); color:var(--rdrr-text); min-width:0;}
-.rdrr-ai-inputrow textarea:focus{border-color:var(--rdrr-blue);}
-.rdrr-ai-send{flex:none; padding:8px 14px;}
+/* 统一问答输入区：单容器圆角输入框（参照主流输入框：内容自适应增高）+ 底部内嵌模型选择与圆形发送键 */
+.rdrr-composer{flex:none; margin:10px 12px 12px; border:1px solid var(--rdrr-line2); border-radius:16px;
+  background:var(--rdrr-pane); padding:8px 8px 8px 12px; display:flex; flex-direction:column; gap:6px;
+  box-shadow:0 1px 3px rgba(0,0,0,.05);}
+.rdrr-composer:focus-within{border-color:var(--rdrr-blue-line);}
+.rdrr-composer textarea{border:none; background:transparent; color:var(--rdrr-text); font-family:inherit;
+  font-size:13px; line-height:1.55; resize:none; outline:none; min-height:22px; max-height:132px;
+  overflow-y:auto; padding:2px 2px 0; width:100%; box-sizing:border-box;}
+.rdrr-composer textarea::placeholder{color:var(--rdrr-text3);}
+.rdrr-composer-bar{display:flex; align-items:center; gap:6px;}
+.rdrr-composer-spacer{flex:1;}
+.rdrr-composer-send{flex:none; width:30px; height:30px; border-radius:50%; display:flex; align-items:center;
+  justify-content:center; padding:0; border:1px solid var(--rdrr-line2); background:var(--rdrr-pane);
+  color:var(--rdrr-text2); cursor:pointer;}
+.rdrr-composer-send.rdrr-primary{border-color:var(--rdrr-blue);}
+.rdrr-composer-send:disabled{opacity:.4; cursor:not-allowed;}
 
 /* 模型选择器（按服务商分组） */
 .rdrr-mpick{position:relative; flex:none;}
@@ -397,7 +431,7 @@
 }
 
 /* 缺译回退标识 */
-.rdrr-missing .rdrr-mflag{display:inline-block; font-size:10px; font-weight:600; color:#B26A1B;
+.rdrr-mflag{display:inline-block; font-size:10px; font-weight:600; color:#B26A1B;
   background:rgba(192,110,43,.12); border-radius:5px; padding:2px 7px; margin-bottom:6px;}
 .rdrr-fbtag{display:inline-block; font-size:10px; color:var(--rdrr-text3); border:1px solid var(--rdrr-line2);
   border-radius:5px; padding:1px 6px; margin-left:6px; vertical-align:1px;}
@@ -439,10 +473,43 @@
 .rdrr-engineerror{position:absolute; inset:0; display:flex; flex-direction:column; gap:10px; align-items:center;
   justify-content:center; color:var(--rdrr-text2); font-size:13px; padding:20px; text-align:center;}
 
-/* fold 引擎初始化失败：可见可重试 */
-.rdrr-engineerror{position:absolute; inset:0; display:flex; flex-direction:column; gap:10px; align-items:center;
-  justify-content:center; color:var(--rdrr-text2); font-size:13px; padding:20px; text-align:center;}
+/* ===== 折叠状态入口（生成/暂停/继续/补齐/载入新成果与错误的唯一去处） ===== */
+.rdrr-foldmenu-wrap{position:relative; flex:none;}
+.rdrr-foldstatus{padding:0 8px; display:inline-flex; align-items:center;}
+.rdrr-foldstatus-dot{width:8px; height:8px; border-radius:50%; background:var(--rdrr-text3, var(--label-3,#9b9ba0)); display:inline-block;}
+.rdrr-foldstatus-dot.busy{background:var(--rdrr-blue); animation:rdrr-dotbeat 1.4s ease-out infinite;}
+.rdrr-foldstatus-dot.fail{background:var(--rdrr-red, var(--red,#e0483e));}
+.rdrr-foldstatus-dot.paused{background:var(--rdrr-amber, var(--orange,#c77800));}
+.rdrr-foldmenu{position:absolute; top:calc(100% + 6px); right:0; z-index:80; width:300px; max-width:calc(100vw - 24px);
+  background:var(--rdrr-card, var(--card-1,#fff)); border:1px solid var(--rdrr-line2); border-radius:10px;
+  box-shadow:0 8px 28px rgba(0,0,0,.14); padding:10px 12px; font-size:12px; color:var(--rdrr-text);
+  max-height:calc(100dvh - 120px); overflow-y:auto;}
+.rdrr-foldmenu-head{display:flex; align-items:center; justify-content:space-between; font-weight:600; font-size:12.5px;}
+.rdrr-foldmenu-ratio{font-variant-numeric:tabular-nums; color:var(--rdrr-text2); font-weight:500;}
+.rdrr-foldmenu-act{margin-top:6px; color:var(--rdrr-text2); overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
+.rdrr-foldmenu-ops{display:flex; flex-wrap:wrap; gap:6px; margin-top:8px;}
+.rdrr-foldmenu-ops button{border:1px solid var(--rdrr-line2); border-radius:7px; background:transparent;
+  color:var(--rdrr-text); padding:4px 10px; font-size:12px; cursor:pointer;}
+.rdrr-foldmenu-ops button:hover{background:var(--rdrr-hover, rgba(0,0,0,.04));}
+.rdrr-foldmenu-ops button.rdrr-primary{border-color:var(--rdrr-blue); color:var(--rdrr-blue);}
+.rdrr-foldmenu-note{color:var(--rdrr-text2); padding:4px 0;}
+.rdrr-foldmenu-errs{margin-top:8px; color:var(--rdrr-text2);}
+.rdrr-foldmenu-errs summary{cursor:pointer; color:var(--rdrr-amber, var(--orange,#c77800));}
+.rdrr-foldmenu-errs ul{margin:6px 0 0; padding-left:18px; max-height:150px; overflow:auto;}
+.rdrr-foldmenu-errs li{margin-bottom:4px; line-height:1.5; word-break:break-all;}
+.rdrr-foldmenu-err{margin-top:8px; color:var(--rdrr-red, var(--red,#e0483e)); line-height:1.5; word-break:break-all;}
 
-/* fold 引擎初始化失败：可见可重试 */
-.rdrr-engineerror{position:absolute; inset:0; display:flex; flex-direction:column; gap:10px; align-items:center;
-  justify-content:center; color:var(--rdrr-text2); font-size:13px; padding:20px; text-align:center;}
+/* ===== pending（部分失败）呈现：全文照常可读，仅加「未生成」徽标 ===== */
+.rdrr-pendwrap{position:relative; margin:0 0 10px;}
+.rdrr-pendtag{display:inline-block; font-size:10.5px; line-height:1; letter-spacing:1px;
+  color:var(--rdrr-text3, var(--label-3,#9b9ba0)); border:1px solid var(--rdrr-line2); border-radius:4px;
+  padding:2px 5px; margin:0 0 5px; vertical-align:middle;}
+.rdrr-spine-item .rdrr-pendtag{margin:0 0 0 8px;}
+.rdrr-mini-pend{font-size:10.5px; color:var(--rdrr-amber, var(--orange,#c77800));
+  border:1px solid var(--rdrr-line2); border-radius:4px; padding:1px 4px;}
+.rdrr-foldmenu-avail{margin-top:6px; color:var(--rdrr-text2); line-height:1.5;}
+.rdrr-foldmenu-basis{display:block; margin-top:2px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
+@media(max-width:899px){
+  .rdrr-foldmenu{position:fixed; left:12px; right:12px; bottom:16px; top:auto;
+    width:auto; max-width:none; max-height:min(70dvh,520px);}
+}

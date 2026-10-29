@@ -72,7 +72,7 @@ async function main() {
     await openPanel();
     const input = page.locator("#aiInput");
     await input.fill(question);
-    netLog.push(`DEBUG pre-send: draft="${await input.inputValue()}" sendBtn=${await page.locator("#aiSend").count()} btnText=${JSON.stringify(await page.locator(".rdrr-ai-send").first().innerText().catch(() => ""))} toast=${JSON.stringify(await page.locator(".rdrr-toast").innerText().catch(() => ""))}`);
+    netLog.push(`DEBUG pre-send: draft="${await input.inputValue()}" sendBtn=${await page.locator("#aiSend").count()} sendDisabled=${JSON.stringify(await page.locator("#aiSend").isDisabled().catch(() => null))} toast=${JSON.stringify(await page.locator(".rdrr-toast").innerText().catch(() => ""))}`);
     netLog.push(`DEBUG hit-test: ${JSON.stringify(await page.evaluate(() => {
       const btn = document.getElementById("aiSend");
       if (!btn) return "no #aiSend";

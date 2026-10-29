@@ -2,6 +2,7 @@ import { memo, useEffect, useMemo, useRef } from "react";
 import type { Block, FlowLink, FlowLinks } from "../types";
 import { useVirtualWindow } from "../workbench/useVirtualWindow";
 import { blockMarkdown } from "./projection";
+import { blockSources } from "./blockSources";
 
 const EDITABLE_TYPES = ["title", "paragraph", "list", "footnote"];
 const TYPE_LABELS: Record<string, string> = { paragraph: "正文", list: "列表", footnote: "脚注" };
@@ -20,9 +21,13 @@ type Props = {
   tab: ResultTab;
   onTab: (tab: ResultTab) => void;
   onSelect: (blockId: string) => void;
+  onLocateSource: (blockId: string, pageIndex: number, sourceIndex: number) => void;
   onCheck: (blockId: string, range: boolean) => void;
   onClearChecks: () => void;
   onPatch: (proposal: PatchProposal) => void;
+  onEdit: (id: string, mode: "edit" | "split") => void;
+  onMerge: () => void;
+  onUndo: () => void; onRedo: () => void; canUndo: boolean; canRedo: boolean;
   onBatchPatch: (operation: "set_type" | "set_title", after: string | number) => void;
   markdown: string;
   jsonValue: unknown;
@@ -41,7 +46,7 @@ function summary(block: Block): string {
   return "(空块)";
 }
 
-const BlockCard = memo(function BlockCard({ block, selected, active, checked, busy, flow, onSelect, onCheck, onPatch }: {
+const BlockCard = memo(function BlockCard({ block, selected, active, checked, busy, flow, onSelect, onLocateSource, onCheck, onPatch, onEdit }: {
   block: Block;
   selected: boolean;
   active: boolean;
@@ -49,12 +54,15 @@ const BlockCard = memo(function BlockCard({ block, selected, active, checked, bu
   busy: boolean;
   flow?: FlowLink;
   onSelect: (blockId: string) => void;
+  onLocateSource: (blockId: string, pageIndex: number, sourceIndex: number) => void;
   onCheck: (blockId: string, range: boolean) => void;
   onPatch: (proposal: PatchProposal) => void;
+  onEdit: (id: string, mode: "edit" | "split") => void;
 }) {
   const isTitle = block.type === "title";
   const editable = EDITABLE_TYPES.includes(block.type);
   const currentValue = isTitle ? String(block.level) : block.type;
+  const sources = blockSources(block);
   const flowChip = flow?.next_region ? "续下页" : "";
   return (
     <article
@@ -74,6 +82,7 @@ const BlockCard = memo(function BlockCard({ block, selected, active, checked, bu
         </span>
       </div>
       <p>{summary(block)}</p>
+      {selected && sources.length > 1 && <div className="block-source-pages" onClick={event => event.stopPropagation()}>来源：{sources.map(source => <button key={source.index} type="button" onClick={() => onLocateSource(block.block_id, source.page_index, source.index)}>第 {source.page_index + 1} 页 · 来源 {source.index + 1}</button>)}</div>}
       {selected && editable && <div className="card-actions" onClick={event => event.stopPropagation()}>
         <label>结构 <select aria-label="当前块结构" disabled={busy} value={currentValue} onChange={event => {
           const raw = event.target.value;
@@ -89,6 +98,7 @@ const BlockCard = memo(function BlockCard({ block, selected, active, checked, bu
           <option value="footnote">脚注</option>
           {[1, 2, 3, 4, 5, 6].map(level => <option key={level} value={level}>H{level} 标题</option>)}
         </select></label><small>标题 1–6 · 正文/列表/脚注</small>
+        {["title", "paragraph"].includes(block.type) && <><button disabled={busy} onClick={() => onEdit(block.block_id, "edit")}>编辑内容</button><button disabled={busy} onClick={() => onEdit(block.block_id, "split")}>拆分块</button></>}
       </div>}
 
     </article>
@@ -97,7 +107,7 @@ const BlockCard = memo(function BlockCard({ block, selected, active, checked, bu
 
 /** 右侧解析结果栏：结构块 / Markdown / JSON 三个视图，负责与左侧双向定位。 */
 export default memo(function ResultPane(props: Props) {
-  const { blocks, busy, selected, activeBlock, checked, tab, onTab, onSelect, onCheck, onClearChecks, onPatch, onBatchPatch, markdown, jsonValue, follow, onFollow, flowLinks } = props;
+  const { blocks, busy, selected, activeBlock, checked, tab, onTab, onSelect, onLocateSource, onCheck, onClearChecks, onPatch, onBatchPatch, markdown, jsonValue, follow, onFollow, flowLinks, onEdit, onMerge, onUndo, onRedo, canUndo, canRedo } = props;
   const listRef = useRef<HTMLDivElement>(null);
   const markdownRef = useRef<HTMLDivElement>(null);
   const scrolledTo = useRef("");
@@ -134,6 +144,7 @@ export default memo(function ResultPane(props: Props) {
         {tab === "blocks" && <label className="follow-toggle" title="PDF 滚动时自动跟随当前块"><input type="checkbox" checked={follow} onChange={event => onFollow(event.target.checked)}/>跟随</label>}
       </div>
       {tab === "blocks" && <>
+        <div className="result-toolbar"><div className="batch-actions"><button disabled={busy || !canUndo} onClick={onUndo} title="⌘Z / Ctrl+Z">撤销</button><button disabled={busy || !canRedo} onClick={onRedo} title="⌘⇧Z / Ctrl+Shift+Z">重做</button></div></div>
         {checked.size > 0 && <div className="result-toolbar">
           <div className="batch-actions">
             <strong>已选 {checked.size}</strong>
@@ -144,7 +155,7 @@ export default memo(function ResultPane(props: Props) {
             }}>
               <option value="" disabled>调整为…</option><option value="paragraph">正文</option><option value="list">列表</option><option value="footnote">脚注</option>{[1, 2, 3, 4, 5, 6].map(level => <option key={level} value={level}>H{level} 标题</option>)}
             </select>
-            <button onClick={onClearChecks}>清空</button>
+            <button disabled={busy || checked.size < 2} onClick={onMerge}>合并块</button><button onClick={onClearChecks}>清空</button>
           </div>
         </div>}
         <div className="block-list" ref={node => { listRef.current = node; vw.scrollerRef.current = node; }} onScroll={vw.onScroll}>
@@ -159,8 +170,10 @@ export default memo(function ResultPane(props: Props) {
                 checked={checked.has(block.block_id)}
                 flow={flowLinks[block.block_id]}
                 onSelect={onSelect}
+                onLocateSource={onLocateSource}
                 onCheck={onCheck}
                 onPatch={onPatch}
+                onEdit={onEdit}
               />
             </div>)}
             <div style={{ height: Math.max(0, vw.totalHeight - (vw.rangeEnd > 0 ? vw.offsets[blocks[vw.rangeEnd - 1].block_id] + vw.heightOf(blocks[vw.rangeEnd - 1].block_id) : 0)) }}/>
@@ -176,8 +189,10 @@ export default memo(function ResultPane(props: Props) {
                   checked={checked.has(block.block_id)}
                   flow={flowLinks[block.block_id]}
                   onSelect={onSelect}
+                onLocateSource={onLocateSource}
                   onCheck={onCheck}
                   onPatch={onPatch}
+                onEdit={onEdit}
                 />
               </div>;
             })}

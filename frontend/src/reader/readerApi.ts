@@ -32,8 +32,8 @@ export const readerApi = {
   layers: (projectId: string, locale: string) =>
     api<ReaderLayers>(`/projects/${projectId}/reader/layers?locale=${encodeURIComponent(locale)}`),
 
-  /** 触发五层折叠：mode=auto 用模型（需 service_id 或 reader_fold 角色绑定），mode=local 仅本地摘句。 */
-  generateLayers: (projectId: string, body: { locale: string; service_id?: string; model?: string; mode?: "auto" | "local"; force?: boolean; section_ids?: string[] }) =>
+  /** 触发五层折叠：只接受 mode=auto 模型处理（需 service_id 或 reader_fold 角色绑定）；本地摘句已移除。 */
+  generateLayers: (projectId: string, body: { locale: string; service_id?: string; model?: string; mode?: "auto"; force?: boolean; section_ids?: string[] }) =>
     api<{ job_id: string; status: string; locale: string }>(`/projects/${projectId}/reader/layers`, {
       method: "POST",
       body: JSON.stringify(body),

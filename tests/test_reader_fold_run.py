@@ -333,6 +333,39 @@ class FoldRunTests(unittest.TestCase):
 
     # 7. 事实哈希不变 ---------------------------------------------------------
 
+    def test_zombie_running_run_heals_and_resumes_without_rebilling(self) -> None:
+        """崩溃/重启遗留：run 快照停在 running 但线程已死（真实故障：Imperiled Destinies
+        「继续」无响应）。current_run 按 paused 呈现；resume 落盘纠偏并续跑，有效缓存零新调用；
+        pause 同样纠正为 paused 而不是永久卡在 pausing。"""
+        provider = ScriptedProvider()
+        self.runner.start_run(
+            self.project_id, locale="zh-CN", provider_factory=self._provider_factory(provider),
+            model_label="fake-model", service_id="svc", binding_source="reader_role",
+        )
+        final = wait_for(self.runner, self.project_id, ("ready", "failed"))
+        self.assertEqual(final["status"], "ready", final)
+        # 模拟崩溃窗口：终态被覆盖回 running（终态没写完/通用恢复只标了 job）
+        run_id = str(final.get("run_id") or "")
+        stored = self.reader.load_fold_run(self.project_id)
+        self.reader.save_fold_run(self.project_id, {**stored, "status": "running"})
+        calls_before = len(provider.calls)
+
+        # 重启语义：新 runner 实例（无线程、无内存状态）
+        fresh = ReaderJobRunner(self.store)
+        healed = fresh.current_run(self.project_id)
+        self.assertEqual(healed.get("status"), "paused", healed)   # 呈现为可继续
+        run = fresh.pause_run(self.project_id, run_id)
+        self.assertEqual((run or {}).get("status"), "paused", run)   # 暂停僵尸 → 纠正而非卡死
+        resumed, created = fresh.resume_run(
+            self.project_id, run_id,
+            provider_factory=self._provider_factory(provider),
+        )
+        self.assertTrue(resumed and created, {"run": resumed, "created": created})
+        final2 = wait_for(fresh, self.project_id, ("ready", "failed"))
+        self.assertEqual(final2["status"], "ready", final2)
+        # 落盘已纠偏为 paused→running→ready，且有效缓存零新调用（不重计费）
+        self.assertEqual(len(provider.calls), calls_before, provider.calls)
+
     def test_fact_files_untouched_by_run(self) -> None:
         before = self._facts_digests()
         provider = ScriptedProvider()
@@ -697,7 +730,7 @@ class FoldRunTests(unittest.TestCase):
         err_ids = {item.get("section_id") for item in final.get("errors") or []}
         self.assertIn("S2", err_ids)
         reasons = [item.get("error") for item in final.get("errors") or [] if item.get("section_id") == "S2"]
-        self.assertTrue(any("本地摘句" in r or "未就绪" in r or "不一致" in r for r in reasons), reasons)
+        self.assertTrue(any("无存盘投影" in r or "本地摘句" in r or "未就绪" in r for r in reasons), reasons)
 
     def test_mixed_translation_longer_stays_suppressed_in_native(self) -> None:
         """native/缓存恢复：目标译文较长的 suppressed 源 unit 在 native 中保持 suppressed
@@ -863,13 +896,41 @@ class FoldRunApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 400)
         self.assertIn("折叠模型", response.json()["detail"])
 
-    def test_unknown_run_pause_is_404_and_native_missing_is_404(self) -> None:
+    def test_unknown_run_pause_is_404_and_native_missing_rebuilds_safe_projection(self) -> None:
+        """未知 run 的 pause 仍 404；native 文件缺失不再是 404 ——
+        新契约下 GET 会从当前全文 + 有效缓存确定性重建**安全投影**（全文完整、
+        lit.readable=false、所有短层槽位 pending），所以前端不会因缺 native 空等。"""
         response = self.client.post(f"/projects/{self.project_id}/reader/fold-runs/fr-nope/pause", headers=self.headers)
         self.assertEqual(response.status_code, 404)
         response = self.client.get(
             f"/projects/{self.project_id}/reader/layers/native?locale=zh-CN", headers=self.headers,
         )
-        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        lit = body["lit"]
+        self.assertFalse(lit["readable"])
+        self.assertTrue(lit["full_text"])
+        self.assertTrue(lit["rebuilt"])
+        self.assertTrue(lit["partial"])
+        # 安全投影仍带完整全文：每个 unit 都有 toks，且全部短层槽位标 pending。
+        self.assertTrue(body["units"])
+        for unit in body["units"].values():
+            self.assertTrue(unit["toks"])
+            self.assertTrue(unit["lit_pending"])
+        self.assertEqual(lit["availability"]["units_valid"], 0)
+        self.assertGreater(lit["availability"]["units_pending"], 0)
+        # 再取一次：事实未变 → 直接返回已重建的投影，不重复重建。
+        again = self.client.get(
+            f"/projects/{self.project_id}/reader/layers/native?locale=zh-CN", headers=self.headers,
+        )
+        self.assertEqual(again.status_code, 200)
+        self.assertFalse(again.json()["lit"]["rebuilt"])
+        # 若章节真的不存在，section 过滤仍 404。
+        missing = self.client.get(
+            f"/projects/{self.project_id}/reader/layers/native?locale=zh-CN&section=S999",
+            headers=self.headers,
+        )
+        self.assertEqual(missing.status_code, 404)
 
     def test_fold_run_input_rejects_unknown_fields(self) -> None:
         response = self.client.post(

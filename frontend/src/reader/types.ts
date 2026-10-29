@@ -75,11 +75,16 @@ export type ReaderFoldUnit = {
   key?: string;
   topic?: string;
   role?: string;
-  /** 本层内容来源：model=模型写出；local=本地摘句；suppressed=表格等被抑制。 */
-  source?: "model" | "local" | "suppressed";
+  /** 本层内容来源：model=模型写出；local=历史摘句缓存；pending=AI未生成；suppressed=确定性抑制。 */
+  source?: "model" | "local" | "pending" | "suppressed";
   suppressed?: boolean;
   /** 译文缺失回退原文时为 true。 */
   fallback?: boolean;
+  /**
+   * 该单元（本语言 lane）AI 短层未生成（部分失败）：所有层保留全文/已有全文译文，
+   * 仅加「未生成」标记；native 产物同名字段由内核补丁消费。缺失/false = 正常。
+   */
+  lit_pending?: boolean;
   /**
    * 短层（brief/takeaway）的真实来源，adapter 逐 unit 写入：
    * - `derived`：由原文 AI 层派生的分层译句（不是已存译文的逐字摘录）；
@@ -99,7 +104,9 @@ export type ReaderFoldSection = {
   takeaway?: string;
   topic?: string;
   /** 本节聚合来源：model / local / suppressed / mixed（混合时不能整体标 AI）。 */
-  source?: "model" | "local" | "suppressed" | "mixed";
+  source?: "model" | "local" | "pending" | "suppressed" | "mixed";
+  /** 本章摘要 AI 未生成（lit_summary_pending）：标题保留，摘要行不显示；段落全文/要点照常可用。 */
+  lit_summary_pending?: boolean;
   units: ReaderFoldUnit[];
 };
 
@@ -134,6 +141,37 @@ export type ReaderLayers = {
   /** 章节摘要与当前 document/translation 不一致（补译/校对后需要重折叠）。 */
   stale: boolean;
   generated: boolean;
+};
+
+/**
+ * 整篇折叠 run 的可选实时活动（`GET /projects/{id}/reader/fold-run` 的 `activity`）。
+ *
+ * 后端只在**模型请求边界**写这份证据（stage/section/batch/时间戳）；旧 run、刚启动、
+ * 或 run 已结束时该字段可能缺失，界面必须当作「没有证据」：只显示状态文本，
+ * 不编造阶段、不把缺失的 elapsed/pending 当 0。时间戳后端写 ISO 字符串或 epoch。
+ */
+export type ReaderFoldActivity = {
+  /** 公开阶段值：`waiting` 等首个字节 / `generating` 模型生成中 / `validating` 结构校验 /
+   *  `saving` 落盘 / `source` 原文折叠 / `derive` 译文派生 / `apparatus` 书目索引等装置识别。
+   *  内部别名由后端归一，不会再出现；未知值仍按原样显示（不吞成空白）。 */
+  stage?: string;
+  /** provider 事件里的同义字段（`waiting`/`generating`）：stage 缺失时回退使用，不单独成阶段。 */
+  state?: string;
+  /** 当前节 id（与 section_index / 折叠层同一来源）。 */
+  section_id?: string;
+  /** 当前节内请求批次：`batch_index` **0 起**（界面按「第 1 批」呈现），`batch_total` 为该节批数。 */
+  batch_index?: number;
+  batch_total?: number;
+  /** 在途请求发出时刻：界面据它本地计时，等待期间也不冻结。 */
+  request_started_at?: string | number | null;
+  /** 最近一次模型响应时刻：请求之间用它显示「已等」。 */
+  last_response_at?: string | number | null;
+  /** 后端自报的已用秒数（时间戳缺失时的回退证据）。 */
+  elapsed_seconds?: number;
+  /** **当前节/当前语言 lane 仍待补**的 unit 数（不是全库剩余量，也不是批大小）。 */
+  pending_units?: number;
+  /** 非空表示该 run 内发生过重试（如超时/格式错误），原因如实显示为「曾重试」。 */
+  retry_reason?: string;
 };
 
 /** 阅读角色的有效绑定与来源（后端 role_state；不要靠空 dict 推断）。 */

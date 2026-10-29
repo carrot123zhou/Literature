@@ -4,7 +4,7 @@
 > 本文只描述**后端与集成契约**；阅读器界面设计与交互契约见 `docs/ui/reader-design.md`（由 designer 维护，唯一现状）。
 > 前端 UI 代码归 `frontend/src/reader/**`（designer）；本文的 DTO 与端点是双方的合同。
 
-最后更新：2026-10-25。
+最后更新：2026-10-27。
 
 ## 1. 范围与边界
 
@@ -16,7 +16,7 @@
   - `reader/chat.json`：问答会话历史（按条冻结模型与引用快照）
 - 删除 `reader/` 目录等于「清空阅读痕迹」，原文与译文不受影响。
 
-本地预览先补目标所依赖的原文缺失章节，原译两栏采用相同稳定 unit 锚点；本地生成不调用模型。已有有效模型产物保留其原始 digest/绑定信息，不能因本地预览更新元数据而误判 stale。自动模型升级每次限定当前可见节，切回全文或已有有效层不重复生成。
+**2026-10-27：移除本地摘句折叠。** `POST /reader/layers` 只接受 `mode="auto"`，`local` 返回 422；未配置模型不建作业、不写分层。模型失败或派生未覆盖的单元不补本地摘句，保留有效模型缓存及原全文，按未完成章节继续处理。旧 `local` / `translation-local` 标签仅用于识别旧缓存，不允许被当成 AI 成功；确定性 suppressed、分词及词锚计算保留。问答无折叠缓存时只用全文结构检索，不临时生成摘句。AIFold 默认关闭，用户显式启动整篇处理；普通阅读和打开缓存不自动生成。
 
 ## 2. TextFold 复用（真实代码，不是同名重写）
 
@@ -29,7 +29,7 @@ Apache-2.0 © 2026 Xia Chen。完整清单、逐文件 blob 与补丁说明见 `
 | 分词 / 句子区间（CJK、缩写、引号收尾） | `textfold/tokens.py`（逐字） | 不再自写断句；`literature/textfold_adapter.split_sentences` 薄封装 |
 | 折叠提示词与 JSON schema | `textfold/ladder.py::prompt_for/SCHEMA`（逐字） | 直接调用；章节表格上下文走上游 `tables_of()` |
 | 模型回复 → ladder（evidence 过滤、topic 锚回、公式还原） | `ladder.py::assemble/written/locate/topic_tokens`（逐字） | 直接调用；额外一条更严格规则见 §4.4 |
-| 无模型降级折叠（英文取首句头 / 中文取“最像主张的句子”） | `ladder.py::local/is_apparatus/cjk_*`（逐字） | 直接调用 |
+| 确定性装置单元抑制 | `ladder.py::MIN_FOLD_WORDS` / `suppressed` | 仅全节不足阈值的 suppressed 路径；不提供正文无模型摘句功能 |
 | 章节层（一句话主线 + 主题）、背景行收敛、跨页断句缝补 | `ladder.py::section_ladder/fold_background/dress`（逐字） | 直接调用 |
 | `textfold/doc` 结构投影与 Markdown 导出 | `textfold/fold.py::unit/section/markdown/LEVELS/WRITTEN` | 直接调用（`/reader/layers/markdown`） |
 | 系统提示词与“正文不得当指令”边界 | `textfold/llm.py::SYSTEM/system_for`（逐字） | 折叠与问答共用 |
@@ -48,7 +48,7 @@ Apache-2.0 © 2026 Xia Chen。完整清单、逐文件 blob 与补丁说明见 `
 - 只折叠 paragraph / list；图片、表格、公式、脚注按原样在“全文”层渲染（表格文本作为章节上下文进提示词）。
 - 词数 < 3 的块（页码、`* * *` 分隔符）用上游 `suppressed()` 语义：不折叠、不编 takeaway。
 - `full` 用 token 还原原文（上游 `" ".join(sentences)` 会给中文句间加空格）；
-- `evidence` 全无效时**不采用**模型那一行（上游会退到 `[0]`），改为本地折叠 + 告警（可追溯性优先）。
+- `evidence` 全无效时不采用模型行（上游会退到 `[0]`）；保留全文并标为 pending，不生成本地摘句。
 
 ## 3. 数据与存储
 
@@ -102,9 +102,7 @@ Apache-2.0 © 2026 Xia Chen。完整清单、逐文件 blob 与补丁说明见 `
    用目标语重写（`written()`/`topic_tokens()` 锚定）；`ev_sentences`（**schema required**）逐条对应 evidence，
    作为译文层的 brief，标 `brief_source="derived"`（分层译句，非已存译文逐字摘录，可回溯：brief[i] ↔ evidence[i]）。
    Full 永远来自 translation.json，人工译文不被覆写。
-4. 派生未覆盖的 unit 补 `apply_translated_local()`（上游 `ladder.local()` 对译文文本本地折叠，
-   `brief_source="translation-local"`，与 AI 层永远可区分）。**全部 unit 派生失败 → 本节记 failed（partial），
-   不冒充成功。**
+4. 派生失败或遗漏单元不补 `translation-local`。章节如实未完成；Full 仍来自既有原文/译文全文。显式继续时补齐未完成部分，有效原文模型缓存不重计费。
 
 译文层 DTO 新增：unit `brief_source: "derived" | "translation-local" | "source-fallback"`；
 provenance 新增 `target_derived: true`、`strategy: "derive"`、`calls`（本层请求数）。
@@ -115,7 +113,7 @@ prompt_version)`——**不含译文文本**：译文文字编辑不重烧派生
 
 **brief 与 full 的来源差异（必须区分）**：译文层 `full`/Key 句来自 `translation.json`（用户/既有译文，
 可能逐字摘录）；`brief`（`brief_source="derived"`）是**模型对证据句的分层译句**，不是已存译文的逐字摘录，
-不能当 exact quote 渲染，必须可回溯到原文 evidence 下标；`translation-local` 才是译文逐字本地预览。
+不能当 exact quote 渲染，必须可回溯到原文 evidence 下标；`translation-local` 仅是旧缓存兼容来源标记，新作业不再生成。
 
 **驱动与并发边界（不夸大）**：UI 契约是**单 AI driver**——有译文只调 targetLocale 的 startModelFold
 （`generate(target)` 内部 `_ensure_source_fold` 补齐并同步 source 层）；无译文才调 source。API 级去重键是
@@ -140,16 +138,16 @@ reasoning=0。整书费用靠显式点击 + 按节缓存 + 失败只补失败节
 
 ### 4.5 来源标注（不把本地生成伪装成 AI）
 
-每个 unit 带 `source: "model" | "local" | "suppressed"`，每节有聚合 `source`（`model|local|mixed|suppressed`）。
+每个 unit 带 `source`（`model` / `pending` / `suppressed`；`local` 仅旧缓存兼容），每节按实际单元聚合来源。新作业不运行本地摘句。
 `provenance` 字段：
 
 | 字段 | 含义 |
 |---|---|
 | `ai_generated` | **真的有 unit 由模型写出**才为 true（空 units 回复 → false） |
-| `local` | 本次请求是否走「本地摘句」模式（上游语义） |
+| `local` | 历史来源兼容字段；新作业不提供本地摘句模式 |
 | `content` | 内容实际来源：`model` / `local` / `mixed` |
 | `ai_units` / `local_units` | 逐 unit 计数 |
-| `partial` | 本次有章节失败或被停止，部分内容是旧的/本地降级 |
+| `partial` | 本次存在未完成项；展示保留当前全文及经校验有效的 AI 短层，不生成本地摘句 |
 | `model` / `service_id` / `prompt_version` / `textfold_commit` | 可追溯元信息 |
 
 作业 `result` 同步给出 `ai_generated / ai_units / local_units / content / partial / failed_sections / warnings / stopped`。
@@ -169,12 +167,16 @@ reasoning=0。整书费用靠显式点击 + 按节缓存 + 失败只补失败节
 - 重启恢复边界：进程重启时 `ReaderJobRunner.recover()` 把遗留 `running/queued` 折叠作业标为
   `failed` 并说明「已完成章节保留，重新折叠只补未完成的章节」——不宣称能续跑线程。
   （reader_fold_run 作业不同：重启后标 `paused` 可继续，见 §4.8。）
+- **僵尸守护（2026-10-27）**：`start_run`/`resume_run`/`pause_run` 对磁盘快照为 `running/pausing`
+  但无活线程的 run，先落盘纠偏为 `paused` 再续跑/暂停（与 `current_run` 的呈现一致）。
+  启动时 `JobManager.recover_interrupted_jobs()` 会调用 `reader_jobs.recover()`，且通用恢复
+  **跳过** `reader_layers`/`reader_fold_run` 两类作业（历史上只标 job、不修 run 快照，产生
+  「继续无响应」的僵尸；见 2026-10-27 日志）。
 
 ### 4.8 整篇 fold-run（AIFold 生命周期，2026-10-25 新增）
 
 **用户决策（取代“按可见节自动生成”）**：AIFold 默认关闭；点击顶部 AIFold 后自动处理整篇文章，
-进度外圈、可暂停继续；**全部应处理节齐备才 ready**，ready 才显示「启动」进入五级阅读。
-local/partial 不能冒充完成。
+可暂停继续；全部应处理节齐备才 `ready`，`readable` 独立表示有效成果可供阅读。部分失败不再阻塞进入已有成果，但不能冒充全部完成。
 
 - **单一目标 controller**：一个 run 只驱动一个 locale（有译文=译文 locale，否则 source）。
   有译文时 generate 内部先保原文层（缓存命中 0 调用）再派生短层——维持「原文一次 fold→
@@ -218,6 +220,15 @@ local/partial 不能冒充完成。
   阈值（`tf_tokens.words < MIN_FOLD_WORDS=3`，与 `apply_reply`/`local()` 同一判据，非语义猜测）
   时，源前置与派生请求都不发（零模型费用），直接 suppressed 落盘；本地内容持 local digest
   （`_merge_source_section`/readiness 对称）。含真实正文内容的节**不会**被跳过。
+
+### 4.8a 有界请求、逐单元恢复与书后材料（2026-10-27）
+
+- 每批最多 12 个 unit，估算输入 ≤6000 token、输出 ≤4000 token；超长段按句/子句分窗后由模型归并，不截掉正文。节摘要在全部短层齐备后生成，过长时分层汇总；整篇完成后统一 finalize。
+- 同服务跨项目最多两路请求；429 后暂降一路。每个请求独立连接与预算预留，首包/块间空闲 90 秒、总时限 180 秒；套接字看门狗中止卡住的读取。输出同时按语义流字节与实际 usage 校验。可能已计费的超时、5xx、断流不自动重发；明确未计费的连接失败/429 和协议兼容回退另处理。
+- `reader/fold_checkpoints.json` 按 unit 保存已验证结果，键含原文、实际消费的上下文、服务/模型和提示词版本；批间落盘，只补缺失或失效项。旧目标层通过旧源指纹证明后迁入逐单元缓存，避免修一段而重烧全节。旧源段落缺短层时不播种该项，避免以空消费上下文覆盖已有有效目标检查点。恢复 ladder 精确保留原有短层文本，不追加标点。
+- 索引/参考文献/丛书目录仅通过显式标题召回，再用首中尾有界样本交 AI 确认类型及非混合内容。确认后保留 Full、跳过短层；分类收据绑定原文/服务/模型/策略。缺收据或收据失效即重新校验，混有正文不抑制。目标层同步源层决定。
+- `progress` 从 section_states 去重计算，completed+reused ≤ total；失败与暂停不累加旧次数。`activity` 只含阶段、节、零起批次、本节 lane 待补量、请求开始/最近响应时间、重试原因等元数据。流式回调实时刷新 waiting/generating；前端每秒推进请求计时，暂停停表。
+- 真实 usage 与未知费用分开记录：带 response 的错误仍记已知用量；未拿到 response 的可能计费请求保留未知账项。未配置价格时 cost=null，不表示免费。恢复、迁入或缓存命中不能额外生成一份模型结果。
 
 ### 4.8b 词级 native 结构（上游 reader.js stage/morph 的数据源，2026-10-25）
 
@@ -267,6 +278,17 @@ local/partial 不能冒充完成。
   原文层；写失败只记 warning 且 **该 run 不能 ready**——`current_run` 复验含 native 在盘校验）。
   `?section=S3` 按节过滤 chunks（units 全量返回保词身份）。缺失时 404。
 - 现有 `GET /reader/layers`（string 投影）不变，旧 UI 兼容。
+
+### 4.8c 可阅读与全部完成分离（2026-10-27）
+
+- `ready` 保留严格的全部完成语义；run 新增 `readable` 和 `availability`。`readable` 独立于 running/pausing/paused/failed/ready：只要当前事实与冻结绑定能验证至少一个 AI 短层槽位，即可进入已有成果；全合法 suppressed 且无待补内容也可读。全部失败无有效成果时不假称 AI 可读，普通全文一直可用。
+- `availability` 计数以源+目标语言的短层槽位为单位：`units_total = units_valid + units_pending + units_suppressed`。同时给 `source_units_*` / `target_units_*`、`summaries_total/pending`、`source_summaries_pending` / `target_summaries_pending`，以及 `full_text`、`basis`、`checked_at`。缺译的原文回退不是目标派生失败。界面不得将「可读」写成「全部完成」。
+- `ReaderLayerService.reading_projection()` 以当前 canonical/translation 全文为底，只还原匹配当前事实/冻结绑定的节缓存或逐单元检查点；过期短层不展示，未变的有效单元独立保留。原文部分失败不再整节堵住有效单元的目标语派生；章节摘要缺失不阻塞段落阅读。事实变化时旧节摘要不直接复活；继续生成时，摘要检查点仍按实际消费的全部单元上下文及冻结绑定校验，输入未变可复用，不要求为变化过的整节无条件重新调用模型。没有 local 摘句或默认首句补位。
+- native 单元 `lit_pending` 与章节 `lit_summary_pending` **恒指原文**；各自 `tr[locale]` 内同名键恒指目标语，不能随请求 locale 改变顶层含义。失败单元在所有五层以 Full 词空间渲染当前全文/已有全文译文，批注也使用 Full 锚，不伪造短层对应。
+- `GET /reader/layers/native` 调用 `reading_native()`。事实文件、缓存、检查点、冻结绑定及投影版本的廉价指纹一致时复用安全 native；不一致或文件缺失时从安全投影重建，零模型调用。未生成的项目也可返回纯全文投影（`lit.readable=false`），无规范文档才返回 404。
+- 根 `native.lit` 含 `partial/readable/full_text/pending_units/pending_summaries/rebuilt/checked_at/facts_fingerprint/availability`。run 对各作业状态都按事实指纹刷新可用性，running 最多每 15 秒重算、终态立即刷新，指纹未变不反复构造全书；读路径不重新解析全局角色来覆盖 run 冻结绑定。
+- 生成路径原始 native 一律不写可信事实指纹，首次 GET 必经安全重建后缓存，避免仅凭有效数量误信旧内容。字符串恢复的源层与原始词级产物可能存在 token 细节差异，导致个别派生检查点失配：此时标 pending，继续时重新派生，不冒险显示未验证短层。
+- 模型回复仍按上游 `units_of` 兼容可确定归一的容器形式；单元字段异常只使该单元 pending，合法同批单元继续接收；章节字段异常只影响摘要。不以裁切译句、默认第一句或推测对应关系修复内容错误。
 
 ### 4.9 短层笔记原生锚（`engine_anchor`，2026-10-26，**单一契约**）
 
@@ -367,7 +389,7 @@ local/partial 不能冒充完成。
 |---|---|---|
 | GET | `/projects/{id}/reader/state?locale=` | overlay + layers 摘要 + 最近折叠作业 + 文档元信息 |
 | GET | `/projects/{id}/reader/layers?locale=` | `textfold/doc`（`sections[]`）+ `stale/generated/section_count/unit_count/digest` |
-| POST | `/projects/{id}/reader/layers` | `{locale, mode: "auto"\|"local", service_id?, model?, force?, section_ids?}` → `{job_id, created}` |
+| POST | `/projects/{id}/reader/layers` | `{locale, mode: "auto", service_id?, model?, force?, section_ids?}` → `{job_id, created}` |
 | POST | `/projects/{id}/reader/layers/stop` | 章节边界停止（无在跑作业时 409） |
 | POST | `/projects/{id}/reader/fold-runs` | 整篇折叠 run：`{locale?, force?}` → `{run_id, created, run}`（幂等；paused 即 resume） |
 | GET | `/projects/{id}/reader/fold-run` | 当前 run 快照（无记录时 `{status:"idle"}`） |
@@ -551,31 +573,11 @@ TextFold 的阅读问答（`textfold/notes.py`）**不使用 embedding 或向量
 `/reader/state.thinking.{fold,chat}` 返回**已探测到的**写法（null = 未探测/未知）：界面只能据此标注，
 不得默认宣称「已关闭思考」。用户显式设置的思考档位始终优先（`with_thinking_disabled()` 会直接返回原对象）。
 
-## 9. 冻结基线（源码 sha256，tester 复验前后各校验一次）
+## 9. 冻结与验收证据
 
-`runtime_revision` 只是源码指纹的近似标记，**不能当作字节身份**；下面这些 sha256 才是「是不是同一份代码」的凭据。
-审查包重建前/后都应一致（若某文件变了，包就必须重建，旧包作废）。
+`runtime_revision` 是源码指纹的近似标记，不能代替包内字节身份。每次实质变更应重新记录生产源码与实际 served 前端资产 SHA256，再构建 sidecar/客户端，核对包内 sidecar 与 manifest 的 SHA/size，以及内嵌前端文件名。已安装包与候选包分别记录，不把候选包自动视为已安装。
 
-| 文件 | sha256 |
-|---|---|
-| `frontend/src/reader/ReaderWorkspace.tsx` | `ae70b9288fa68fcb017b52f0f029ba3c7e8c0aab646260b6916df6a9c6dd0a21`（60299 B，designer 冻结版，含 D2/D3） |
-| `frontend/src/reader/reader.css` | `689b21017dca5d6a6545ce9325943ef76ff5b029ed57bb0bac8a6c849574ff4a` |
-| `frontend/src/readerChatClient.ts` | `a2cfe3ba4712fc6180a03402368572eca36bdb3472aa44965491bd8c11673ac4`（含 D1 修复：顶层 service_id/model） |
-| `frontend/src/reader/types.ts` | `541160c9421b441475ef02ac1a86e86df17ec3e3898bb220a12fcd858f204c50` |
-| `frontend/src/reader/readerApi.ts` | `fe770a9c3da023843b23b72c2d6c43b94f22d8f72c62cdfc782fdfc1890f1c56` |
-| `frontend/src/reader/ReaderSettings.tsx` | `3c427af19e26a479e70a7b75b031dff42de3217c95dc2d9ef6c29cd216526bf7` |
-| `frontend/src/reader/index.ts` | `1a237a887077434e7dd629396980961eab6dea7d52f0c3b7e54bdf4fe9a9f23c` |
-| `frontend/src/reader/ModelPicker.tsx` | `5ffdcb0789b5ea7ab4f653830e78ac5a4f8cc70360fc4dc86a69d1458d345b15`（定稿：统一 `matches()`、`commit()` 拒绝 disabled、键盘跳过不可用；行为见 §9.1） |
-| `literature/reader.py` | `eedbc540818ed5cfcc100151e86645a9ca82f2c436b27c3e5114e990f6645319` |
-| `literature/textfold_adapter.py` | `71279a19c6dd33731727d7ed96725ca8a64fd754e457b9a601c46e6f4d15ab85` |
-| `literature/api.py` | `a6b7631c22873b9d7ff4bff7d266b521bd51230d4e82b91e3faf6ac82211d4e5` |
-| `literature/model_services.py` | `9e95ff504552767597e89addf56dadc18041cf6a1cb960e56164d73216438778` |
-| `third_party/textfold/{tokens,kinds,ladder,fold,llm,retrieval,__init__}.py` | `e5a75421…` / `9898aad3…` / `a75a24f7…` / `8b1baeab…` / `8da7f1ca…` / `7c34717b…` / `dfea286d…` |
-| `scripts/reader_frozen_check.py` | `c835275c1af168b253a89d38e7b9013d3f0183678a44e6df47a7281acd5937bf` |
-| `scripts/app_shell_overflow_check.py` | `0dd15468688563b25dedd2d204836e94cc89a515924b67008f486255f6245fcf` |
-| `scripts/build_review_bundle.sh` | `1c2b61d15027221c3a6c7bb0459ae79646a2118ee8d30af6963c199ccc9f8190` |
-| `scripts/reader_model_picker_check.py` | `15035ab4dba6c4831cc2ff194c5e22381aa4a1399cf5cd90dfbf8e219db67a1a` |
-| `scripts/reader_real_chat_check.py` | `5cbee3503dccebecfd1e4581ca26298f3119351ce4c862ba36bbe4fc7027e800` |
+逐轮版本和验收边界只写 `docs/DEVELOPMENT_LOG.md`，本处不再维护易过期的第二份源码哈希表。本轮证据为 `tmp/reader-partial-final-pytest.log`、`tmp/reader-partial-result.json`、`tmp/reader-partial-package-check.json`；`tmp/` 是本机验收产物，复验需重新生成。当前冻结可执行契约使用 `tests/manual/reader_frozen_contract_check.py --mode binary --binary <sidecar>`，不沿用旧 local 折叠脚本作为放行门。
 
 ### 9.1b 引用证据来源（早前 `quote_evidence_is_source:false` 的复核结论）
 

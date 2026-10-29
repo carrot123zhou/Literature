@@ -37,7 +37,7 @@ type Props = {
 function isTyping(target: EventTarget | null): boolean {
   const element = target as HTMLElement | null;
   if (!element) return false;
-  return element.isContentEditable || ["INPUT", "TEXTAREA", "SELECT"].includes(element.tagName);
+  return element.isContentEditable || ["TEXTAREA", "SELECT"].includes(element.tagName) || (element instanceof HTMLInputElement && !["checkbox", "radio", "button", "submit"].includes(element.type));
 }
 
 /** MinerU 文本结构类型中可以在结构校对里修改的集合。 */
@@ -73,6 +73,9 @@ export default function ReviewWorkspace(props: Props) {
   const [tocCandidates, setTocCandidates] = useState<TocCandidate[]>([]);
   const [auditPayload, setAuditPayload] = useState<unknown>(null);
   const [tab, setTab] = useState<ResultTab>("blocks");
+  const [tocPicked, setTocPicked] = useState<Set<string>>(new Set());
+  const [history, setHistory] = useState({ can_undo: false, can_redo: false });
+  const [editor, setEditor] = useState<{ mode: "edit" | "split" | "merge"; blockId: string; text: string; offset: number; separator: string } | null>(null);
   const [picked, setPicked] = useState<Set<string>>(new Set());
   const [activeBlock, setActiveBlock] = useState("");
   const [focus, setFocus] = useState<FocusRequest | null>(null);
@@ -146,10 +149,10 @@ export default function ReviewWorkspace(props: Props) {
   const selectedBlock = useMemo(() => document.blocks.find(block => block.block_id === selected), [document.blocks, selected]);
   const jsonValue = auditPayload ?? selectedBlock?.raw ?? document;
 
-  const locate = useCallback((blockId: string) => {
+  const locate = useCallback((blockId: string, pageIndex?: number, sourceIndex?: number) => {
     nonce.current += 1;
     onSelect(blockId);
-    setFocus({ blockId, nonce: nonce.current });
+    setFocus({ blockId, pageIndex, sourceIndex, nonce: nonce.current });
     setActiveBlock(blockId);
   }, [onSelect]);
 
@@ -160,26 +163,53 @@ export default function ReviewWorkspace(props: Props) {
     try { await action(); } catch (error) { setMessage(String(error instanceof Error ? error.message : error)); } finally { submitting.current = false; setBusy(false); }
   }, [setMessage, structureRunning]);
 
-  const applyPatch = useCallback((proposal: PatchProposal) => void run(async () => {
-    await api(`/projects/${projectId}/structure/patches`, { method: "POST", body: JSON.stringify(proposal) });
-    await refresh();
-    locate(proposal.block_id);
-    onSuggestions(suggestions.filter(value => value.block_id !== proposal.block_id));
-    setMessage("结构已更新，可在修订历史中撤销。");
-  }), [projectId, refresh, locate, run, setMessage, suggestions, onSuggestions]);
+  const refreshHistory = useCallback(async () => {
+    try { setHistory(await api<{ can_undo: boolean; can_redo: boolean }>(`/projects/${projectId}/structure/edit-history`)); }
+    catch { setHistory({ can_undo: false, can_redo: false }); }
+  }, [projectId]);
+  useEffect(() => { void refreshHistory(); }, [refreshHistory]);
 
-  const applyBatch = (operation: "set_type" | "set_title", after: string | number) => void run(async () => {
-    const targets = [...picked].filter(id => document.blocks.some(block => block.block_id === id && EDITABLE_TYPES.includes(block.type)));
-    if (!targets.length) return;
-    await api(`/projects/${projectId}/structure/patches/batch`, {
-      method: "POST",
-      body: JSON.stringify({ patches: targets.map(block_id => ({ block_id, operation, after, reason: "批量结构调整", automatic: false })) }),
+  const editOperation = (payload: Record<string, unknown>) => void run(async () => {
+    const result = await api<{ can_undo: boolean; can_redo: boolean }>(`/projects/${projectId}/structure/edit`, {
+      method: "POST", body: JSON.stringify({ ...payload, expected_document_updated_at: document.updated_at }),
     });
-    setPicked(new Set());
-    onSuggestions(suggestions.filter(value => !targets.includes(value.block_id)));
-    await refresh();
-    setMessage(`已批量调整 ${targets.length} 个块`);
+    setHistory({ can_undo: result.can_undo, can_redo: result.can_redo });
+    setEditor(null); setPicked(new Set()); setTocPicked(new Set());
+    await refresh(); await refreshSuggestions();
+    setMessage("校对修改已保存；阅读和翻译将使用更新后的文档。");
   });
+  const moveHistory = (direction: "undo" | "redo") => void run(async () => {
+    const result = await api<{ can_undo: boolean; can_redo: boolean }>(`/projects/${projectId}/structure/edit-history/${direction}`, { method: "POST" });
+    setHistory({ can_undo: result.can_undo, can_redo: result.can_redo });
+    setPicked(new Set()); setTocPicked(new Set()); setEditor(null);
+    await refresh(); await refreshSuggestions(); setMessage(direction === "undo" ? "已撤销校对操作" : "已重做校对操作");
+  });
+  useEffect(() => {
+    const handler = (event: KeyboardEvent) => {
+      if (isTyping(event.target) || !(event.metaKey || event.ctrlKey) || event.altKey || event.key.toLowerCase() !== "z") return;
+      const redo = event.shiftKey;
+      if (busy || structureRunning || (redo ? !history.can_redo : !history.can_undo)) return;
+      event.preventDefault(); moveHistory(redo ? "redo" : "undo");
+    };
+    window.addEventListener("keydown", handler); return () => window.removeEventListener("keydown", handler);
+  });
+  const openEditor = (blockId: string, mode: "edit" | "split") => {
+    const block = document.blocks.find(item => item.block_id === blockId);
+    if (block) setEditor({ mode, blockId, text: block.source_text, offset: 0, separator: " " });
+  };
+  const mergeBlocks = document.blocks.filter(block => picked.has(block.block_id));
+  const applyPatch = useCallback((proposal: PatchProposal) => void run(async () => {
+    const result = await api<{ can_undo: boolean; can_redo: boolean }>(`/projects/${projectId}/structure/edit`, { method: "POST", body: JSON.stringify({ operation: "patch", block_id: proposal.block_id, patch_operation: proposal.operation, after: proposal.after, expected_document_updated_at: document.updated_at }) });
+    setHistory({ can_undo: result.can_undo, can_redo: result.can_redo });
+    await refresh(); locate(proposal.block_id);
+    onSuggestions(suggestions.filter(value => value.block_id !== proposal.block_id));
+    setMessage("结构已更新，可撤销或重做。");
+  }), [projectId, document.updated_at, refresh, locate, run, setMessage, suggestions, onSuggestions]);
+
+  const applyBatch = (operation: "set_type" | "set_title", after: string | number) => {
+    const targets = [...picked].filter(id => document.blocks.some(block => block.block_id === id && EDITABLE_TYPES.includes(block.type)));
+    if (targets.length) editOperation({ operation: "patch_batch", block_ids: targets, patch_operation: operation, after });
+  };
 
   // 采用建议：带 suggestion_id 的走服务端决策（项目内原子应用并记录），本地分析结果退回补丁接口。
   const confirm = (suggestion: StructureSuggestion) => void run(async () => {
@@ -429,6 +459,7 @@ export default function ReviewWorkspace(props: Props) {
   const onMode = (next: StructureMode) => setMode(next);
 
   return (
+    <>
     <SplitPane
       className="workspace review-grid"
       storageKey="literature.split.review"
@@ -455,6 +486,10 @@ export default function ReviewWorkspace(props: Props) {
         onRevert={revert}
         onRevertAll={revertAll}
         busy={busy}
+        checked={tocPicked}
+        onCheck={id => setTocPicked(current => { const next = new Set(current); if (next.has(id)) next.delete(id); else next.add(id); return next; })}
+        onClearChecks={() => setTocPicked(new Set())}
+        onSetLevels={level => editOperation({ operation: "set_levels", block_ids: [...tocPicked], level })}
         providers={providers}
         modelValue={taskModel}
         // 按任务实际选中的服务商判断密钥状态，而不是角色绑定的那家。
@@ -492,15 +527,39 @@ export default function ReviewWorkspace(props: Props) {
         tab={tab}
         onTab={setTab}
         onSelect={locate}
+        onLocateSource={locate}
         onCheck={togglePick}
         onClearChecks={() => setPicked(new Set())}
         onPatch={applyPatch}
         onBatchPatch={applyBatch}
+        onEdit={openEditor}
+        onMerge={() => setEditor({ mode: "merge", blockId: "", text: "", offset: 0, separator: " " })}
+        onUndo={() => moveHistory("undo")} onRedo={() => moveHistory("redo")}
+        canUndo={history.can_undo} canRedo={history.can_redo}
         markdown={markdown}
         jsonValue={jsonValue}
         follow={follow}
         onFollow={setFollow}
       />
     </SplitPane>
+    {editor && <div className="review-edit-overlay" role="presentation"><div className="review-edit-dialog" role="dialog" aria-modal="true" aria-label={editor.mode === "merge" ? "合并块" : editor.mode === "split" ? "拆分块" : "编辑块内容"}>
+      <h2>{editor.mode === "merge" ? "合并块" : editor.mode === "split" ? "拆分块" : "编辑块内容"}</h2>
+      {editor.mode === "merge" ? <>
+        <p>按文档顺序合并所选块。仅支持连续的标题或正文块。</p>
+        <label>连接方式 <select value={editor.separator} onChange={e => setEditor({ ...editor, separator: e.target.value })}><option value=" ">空格</option><option value="">直接连接</option><option value="\n">换行</option><option value=" — ">破折号</option></select></label>
+        <div className="review-edit-preview">{mergeBlocks.map(b => b.source_text).join(editor.separator)}</div>
+        <small>来源：{mergeBlocks.map(b => `第 ${b.page_index + 1} 页`).join("、")}</small>
+      </> : editor.mode === "edit" ? <label>原文<textarea value={editor.text} onChange={e => setEditor({ ...editor, text: e.target.value })}/></label> : <>
+        <p>点击文本中的拆分位置，再确认拆分。</p>
+        <textarea aria-label="选择拆分位置" readOnly value={editor.text} onClick={e => { const element = e.currentTarget; setEditor({ ...editor, offset: Array.from(element.value.slice(0, element.selectionStart)).length }); }} onKeyUp={e => { const element = e.currentTarget; setEditor({ ...editor, offset: Array.from(element.value.slice(0, element.selectionStart)).length }); }}/>
+        <div className="review-edit-preview"><strong>拆分预览</strong><p>{Array.from(editor.text).slice(0, editor.offset).join("")}</p><hr/><p>{Array.from(editor.text).slice(editor.offset).join("")}</p></div>
+      </>}
+      <div className="review-edit-actions"><button onClick={() => setEditor(null)}>取消</button><button className="primary" disabled={busy || (editor.mode === "split" && (editor.offset <= 0 || editor.offset >= Array.from(editor.text).length)) || (editor.mode === "edit" && !editor.text.trim())} onClick={() => {
+        if (editor.mode === "merge") editOperation({ operation: "merge", block_ids: mergeBlocks.map(b => b.block_id), separator: editor.separator });
+        else if (editor.mode === "split") editOperation({ operation: "split", block_id: editor.blockId, offset: editor.offset });
+        else editOperation({ operation: "edit_text", block_id: editor.blockId, text: editor.text });
+      }}>确认{editor.mode === "merge" ? "合并" : editor.mode === "split" ? "拆分" : "保存"}</button></div>
+    </div></div>}
+    </>
   );
 }

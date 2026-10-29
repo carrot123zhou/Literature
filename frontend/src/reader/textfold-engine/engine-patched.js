@@ -118,10 +118,15 @@
     // glue: the half of a sentence a page break left in the unit before this one (ladder.dress)
     if (z) {
       // Literature 补丁（backend §4.8b）：目标 lane 分派 ——
+      //  - lit_pending：目标 lane 短层未生成但全文译文（z.toks）在——必须用 z.toks 原有全文
+      //    译文且 p 带 locale，绝不回退源 u.toks、不走 source-fallback；
       //  - brief_source==='source-fallback'：原文回退（不错摘译文）；
       //  - ev_space==='source' 且有 derived_brief：L3 Brief 用派生独立 token 流
       //    （briefOverride：toks/sents/ev 全在派生空间，不进全文、不伪造 m）；
       //  - ev_space==='target'（translation-local）：内核原生路径（目标 sents + 目标 lad.ev）。
+      if ((z.lad && z.lad.pend === true) || z.lit_pending === true || z.pending === true) {
+        return { toks: z.toks, sents: z.sents, ev: u.lad.ev.filter((s) => s < z.sents.length), brief: [], tn: 0, topic: [], glue: u.lad.glue, p: `${lang}~`, pend: 1 };
+      }
       if (z.lad && z.lad.brief_source === 'source-fallback') {
         return { toks: u.toks, sents: u.sents, ev: u.lad.ev, brief: u.lad.brief, tn: u.lad.tn, topic: u.lad.topic, glue: u.lad.glue, p: '', fb: 1 };
       }
@@ -268,7 +273,21 @@
     return !(CJK.test(a) || CJK.test(b));
   }
 
-  const levelOf = (uid) => localLevel.has(uid) ? localLevel.get(uid) : level;
+  // Literature 补丁（lit_pending）：lane 独立 —— 先按当前 trOf/locale 选 lane：
+  // 目标栏（有 tr[locale]）只用目标 lane 状态；源栏（无 tr）只用顶层状态。绝不 OR 两 lane
+  //（源摘要缺失不得传播到目标栏，反之亦然）。
+  const litPendingBase = (x) => x ? (x.lit_pending === true || x.pending === true || (x.lad && x.lad.pend === true)) : false;
+  const litPendingOf = (x) => {
+    if (!x) return false;
+    const z = trOf(x);
+    if (z) return litPendingBase(z);   // 目标 lane 在：只看目标 lane
+    return litPendingBase(x);          // 源栏：只看顶层
+  };
+  const levelOf = (uid) => {
+    if (localLevel.has(uid)) return localLevel.get(uid);
+    if (litPendingOf(U[uid])) return 4;
+    return level;
+  };
 
   // Two ways to draw a unit. Near the viewport every piece is its own inline-block with a persistent element,
   // so a level change can slide it ("tokens"). Everywhere else the unit is plain text in a few runs ("text"):
@@ -277,6 +296,7 @@
   function renderUnit(uid, hot = true) {
     const L = levelOf(uid), el = unitEl.get(uid);
     el.classList.toggle('local-open', localLevel.has(uid) && L > level);
+    el.classList.toggle('is-pend', litPendingOf(U[uid]));   // Literature 补丁：is-pend 按当前 lane 重算（不随构建时语言陈旧）
     const fig = figOf.get(uid);
     if (fig) fig.dataset.l = L;
     el._mode = hot ? 'tok' : 'txt';
@@ -391,7 +411,7 @@
 
   function unitNode(uid, tag) {
     const u = U[uid];
-    const el = h(tag, `u ${u.role} r-${u.lad.role}${u.lad.model === 'local' ? ' is-local' : ''}`);
+    const el = h(tag, `u ${u.role} r-${u.lad.role}${u.lad.model === 'local' ? ' is-local' : ''}`);   // Literature 补丁：is-pend 徽标由 renderUnit 按 lane 同步（切语言重算）
     el.dataset.u = uid;
     el.id = uid;
     const dot = h('span', 'dot'); dot.dataset.id = `dot:${uid}`;
@@ -460,7 +480,11 @@
         // section heading. Full keeps it as written; every folded level drops the section, or Takeaway shows a
         // block of quoted text where a heading should be
         const ref = CJK_DOC && !c.units.length && /\[[A-Za-z]+\/OL\]|https?:\/\//.test(c.title || '');
-        const cur = h('section', `chunk l${c.level}${c.units.length ? '' : ' empty'}${ref ? ' ref' : ''}`);
+        const _czt = trOf(c);
+        const _spend = _czt
+          ? (_czt.lit_summary_pending === true || (_czt.lad && _czt.lad.spend === true))   // Literature 补丁：目标 lane 在只看目标
+          : (c.lit_summary_pending === true || (c.lad && c.lad.spend === true));           // 源栏只看顶层（lane 独立，不 OR）
+        const cur = h('section', `chunk l${c.level}${c.units.length ? '' : ' empty'}${ref ? ' ref' : ''}${_spend ? ' is-spend' : ''}`);
         cur.dataset.chunk = c.id; cur.id = c.id;
         const hd = h('h2', 'hd'); hd.dataset.id = `h:${c.id}`;
         hd.hidden = !c.num && !c.title;   // a document's opening text has no heading of its own
@@ -580,6 +604,15 @@
   function renderStake(c, st) {
     const lad = (trOf(c) && trOf(c).lad) || c.lad;
     st.replaceChildren();
+    // Literature 补丁（lit_summary_pending）：本章摘要未生成 → 不显示摘要行（标题保留），
+    // 不把局部/旧 take 冒充本章摘要。lane 独立：有 tr[locale] 只用目标 lane 状态，
+    // 源栏只用顶层状态，不 OR（源缺失不传播到目标，反之亦然）。
+    const _cz0 = trOf(c);
+    const _spendLane = _cz0
+      ? (_cz0.lit_summary_pending === true || (_cz0.lad && _cz0.lad.spend === true))
+      : ((c && c.lit_summary_pending === true) || (c && c.lad && c.lad.spend === true));
+    if (_spendLane) { st.hidden = true; return; }
+    if (!CJK_DOC) st.hidden = false;   // Literature 补丁：lane 切换后确定性复位（上游非 CJK 从不管理 hidden）
     if (CJK_DOC) {   // no section stake: leave no empty row
       st.hidden = !lad || !lad.take.length;
       if (st.hidden) return;
@@ -1615,6 +1648,7 @@
     const r = el.getBoundingClientRect();
     morph(() => {
       if (localLevel.has(uid)) localLevel.delete(uid); else localLevel.set(uid, 4);
+      window.dispatchEvent(new CustomEvent('lit-open', {detail:{kind:'unit', id:uid, open:localLevel.has(uid)}}));
       renderUnit(uid, true);
     }, { el, y: r.top, frac: 0 });
   }
@@ -1931,8 +1965,52 @@
     }
     return exact.size || soft.size || line.size || dexact.size ? { exact, soft, old, line, sh, lineSh, dexact } : null;
   }
+  // Literature: host-confirmed notes are applied in memory only; never POST here.
+  const hostSectionOpen = new Set();
+  const hostOpenPending = new Map();
+  function hostOpen(kind, id, open) {
+    const key = kind + ':' + id;
+    hostOpenPending.set(key, open);
+    const run = () => {
+      if (!hostOpenPending.has(key)) return;
+      if (busy || stage) { setTimeout(run, 60); return; }
+      const value = hostOpenPending.get(key); hostOpenPending.delete(key);
+      const chunk = kind === 'section' && D.chunks.find(c => c.id === id);
+      const ids = chunk ? chunk.units : [id];
+      for (const uid of ids) {
+        if (!unitEl.has(uid)) continue;
+        if (value) localLevel.set(uid, 4); else localLevel.delete(uid);
+        renderUnit(uid, true);
+      }
+      if (chunk) {
+        if (value) hostSectionOpen.add(id); else hostSectionOpen.delete(id);
+        const sc = secs.get(id); if (sc) sc.st.dataset.hostOpen = String(value);
+      }
+      relayout();
+    };
+    run();
+  }
+  window.__tfApply = {
+    applyNotes(arr) {
+      const keys = new Set(notesOf.keys());
+      notes = Array.isArray(arr) ? arr : [];
+      notesOf.clear(); indexNotes();
+      for (const key of notesOf.keys()) keys.add(key);
+      notesChanged([...keys]);
+    },
+    setUnitOpen(uid, open) { hostOpen('unit', uid, Boolean(open)); },
+    setSectionOpen(id, open) { hostOpen('section', id, Boolean(open)); },
+    toggleSection(id) {
+      const open = !hostSectionOpen.has(id);
+      hostOpen('section', id, open);
+      window.dispatchEvent(new CustomEvent('lit-open', {detail:{kind:'section', id, open}}));
+    },
+    getUnitState(uid) { return {localOpen:localLevel.has(uid)}; },
+    getSectionState(id) { return {localOpen:hostSectionOpen.has(id)}; },
+    noteAt,
+  };
+
   function indexNotes() {
-    notesOf.clear();
     for (const n of notes) {
       if (!shown(n.anchor)) continue;   // a unit or section the paper no longer has: the note is kept, not shown
       const key = keyOf(n.anchor);
@@ -1992,6 +2070,9 @@
     if (!D.app) { store.set(NOTES_KEY, JSON.stringify(notes)); return Promise.resolve(); }
     return post(`/api/notes/${D.meta.id}`, { op: 'put', note: n });
   }
+  // Literature 补丁：暴露内核 notes API 给桥
+  window.__tfNotes = { saveNote, deleteNote, notes: () => notes, selectionAnchors };
+
   function deleteNote(n) {
     notes = notes.filter((x) => x.id !== n.id);
     indexNotes();
@@ -2104,6 +2185,7 @@
   document.body.append(selbar);
   let selAnchors = null;
   function showSelbar() {
+    if (window.__litHostMenu) return;
     if (busy || stage) return;
     const anchors = selectionAnchors();
     if (!anchors) { hideSelbar(); return; }

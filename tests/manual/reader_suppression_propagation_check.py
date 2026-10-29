@@ -210,7 +210,27 @@ def main() -> int:
         doc_c = make_doc(pid_c)
         store.save_document(doc_c)
         store.save_translation(make_translation(doc_c))
-        svc.generate(pid_c, locale="zh-CN", provider=None, model_label="", service_id="", mode="local")
+        # 本地摘句模式已移除（2026-10-27）：mode="local" 不再存在。「只有本地摘句、无模型
+        # 内容」的节只能来自旧存盘 translation-local 缓存——模拟旧缓存（hash 匹配、unit
+        # 标 local），readiness 必须视为未完成且原因可见。
+        provider_c = CountingProvider()
+        runner.start_run(pid_c, locale="zh-CN", provider_factory=lambda: provider_c,
+                         model_label="fake-model", service_id="svc", binding_source="reader_role")
+        deadline = time.time() + 30
+        while time.time() < deadline:
+            if runner.current_run(pid_c).get("status") in ("ready", "failed"):
+                break
+            time.sleep(0.05)
+        stored_c = svc.reader.load_layers(pid_c)
+        zh_doc_c = stored_c["docs"]["zh-CN"]
+        for section in zh_doc_c["sections"]:
+            for unit in section["units"]:
+                if unit.get("source") == "model":
+                    unit["source"] = "local"
+                    unit["brief_source"] = "translation-local"
+        svc.reader.save_locale_doc(pid_c, "zh-CN",
+                                   {**zh_doc_c, "sections": zh_doc_c["sections"]},
+                                   stored_c["section_hashes"].get("zh-CN") or {})
         r_c = readiness(svc, pid_c)
         reasons = [s for s in r_c["sections"] if not s["ready"]]
         ok("C1 纯本地未完成：readiness 不得 ready", r_c["ready"] is False,

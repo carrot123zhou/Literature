@@ -3,8 +3,9 @@ import type { Block, FlowLinks, PageMeta } from "../types";
 import PdfPageCanvas from "./PdfPageCanvas";
 import type { PdfState } from "./usePdfDocument";
 import { estimatedPageHeight } from "./geometry";
+import { blockSources } from "./blockSources";
 
-export type FocusRequest = { blockId: string; nonce: number; pageIndex?: number };
+export type FocusRequest = { blockId: string; nonce: number; pageIndex?: number; sourceIndex?: number };
 
 type Props = {
   pdf: PdfState;
@@ -13,7 +14,7 @@ type Props = {
   space: string;
   selected: string;
   flowLinks: FlowLinks;
-  onSelect: (blockId: string) => void;
+  onSelect: (blockId: string, pageIndex?: number, sourceIndex?: number) => void;
   onActiveBlock: (blockId: string) => void;
   onPageChange?: (page: number) => void;
   focus: FocusRequest | null;
@@ -57,9 +58,13 @@ export default function PdfPane({ pdf, pages, blocks, space, selected, flowLinks
   const byPage = useMemo(() => {
     const map = new Map<number, Block[]>();
     for (const block of blocks) {
-      const list = map.get(block.page_index);
-      if (list) list.push(block);
-      else map.set(block.page_index, [block]);
+      const sources = blockSources(block);
+      const locations = sources.length > 1 ? sources.map(source => ({ ...block, page_index: source.page_index, bbox: source.bbox, sourceIndex: source.index })) : [block];
+      for (const location of locations) {
+        const list = map.get(location.page_index);
+        if (list) list.push(location);
+        else map.set(location.page_index, [location]);
+      }
     }
     return map;
   }, [blocks]);
@@ -127,14 +132,15 @@ export default function PdfPane({ pdf, pages, blocks, space, selected, flowLinks
   useEffect(() => {
     if (!focus || !pdf.document) return;
     const block = blocks.find(item => item.block_id === focus.blockId);
-    const targetPage = block?.page_index ?? focus.pageIndex;
+    const targetPage = focus.pageIndex ?? block?.page_index;
     if (targetPage === undefined) return;
     setPinnedPage(targetPage);
     const timer = window.setTimeout(() => {
       const container = containerRef.current;
       if (!container) return;
-      const target = container.querySelector<HTMLElement>(`.bbox[data-block-id="${block?.block_id}"]`)
-        ?? container.querySelector<HTMLElement>(`.pdf-page[data-page-index="${targetPage}"]`);
+      const page = container.querySelector<HTMLElement>(`.pdf-page[data-page-index="${targetPage}"]`);
+      const source = focus.sourceIndex === undefined ? "" : `[data-source-index="${focus.sourceIndex}"]`;
+      const target = page?.querySelector<HTMLElement>(`.bbox[data-block-id="${block?.block_id}"]${source}`) ?? page;
       target?.scrollIntoView({ block: "center", behavior: "smooth" });
     }, 80);
     return () => window.clearTimeout(timer);

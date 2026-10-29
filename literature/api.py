@@ -17,6 +17,7 @@ from typing import Any, Callable, Literal
 from fastapi import File, UploadFile
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from . import __version__
 from .exporters import create_export, delete_export, export_options, list_exports, rename_export, resolve_export_file
 from .flow import detect_cross_page_flow
 from .mineru import detect_language, import_mineru
@@ -31,7 +32,7 @@ from .models import UsageRecord
 from .reader import (
     ReaderChatRunner, ReaderConflict, ReaderJobRunner, ReaderLayerService, ReaderStore,
     answer_question, build_sections, clear_layers, layer_state, layers_markdown,
-    local_fold_section, summarize_reader, usage_recorder,
+    summarize_reader, usage_recorder,
 )
 from .ocr import MinerUService, delete_mineru_token, get_mineru_token, save_mineru_token
 from .parse_backends import LOCAL_BACKEND_ID, describe_backends, resolve_job_backend
@@ -40,6 +41,7 @@ from .request_coordinator import BudgetExhausted, RequestCoordinator, ServiceBus
 from .runtime_revision import RUNTIME_REVISION
 from .storage import ProjectStore, StorageError
 from .structure_signals import enrich_furniture_evidence
+from .structure_edit import apply_edit, edit_history, move_history, recover_edit
 from .structure import analyze_structure, apply_automatic, apply_patch, apply_patch_batch, find_toc_page_candidates, local_printed_toc, plan_structure_analysis, reconcile_toc, revert_patch, run_structure_job, structure_mode_config, structure_model_payload
 from .translation import TranslationService, align_structure_only, draft_glossary, estimate_translation, translation_payload, translation_stats, REVISION_PROTOCOL
 from .uploads import UploadStore
@@ -496,8 +498,8 @@ class ReaderLayersInput(BaseModel):
     locale: str = "source"
     service_id: str = ""
     model: str = ""
-    # auto：有模型就用模型折叠；local：只用本地摘句（不产生任何模型调用）。
-    mode: Literal["auto", "local"] = "auto"
+    # auto：有模型就用模型折叠。mode=local 已移除（用户 4c：AIFold 必须 AI 成功产物）。
+    mode: Literal["auto"] = "auto"
     force: bool = False
     section_ids: list[str] | None = None
 
@@ -581,6 +583,19 @@ class SelectionSave(BaseModel):
     source_text: str
     translated_text: str
     locale: str = "zh-CN"
+
+
+class StructureEditInput(BaseModel):
+    operation: Literal["merge", "split", "edit_text", "set_levels", "patch", "patch_batch"]
+    block_ids: list[str] = Field(default_factory=list)
+    block_id: str = ""
+    patch_operation: Literal["set_type", "set_title", "set_level"] | None = None
+    after: str | int | None = None
+    text: str | None = None
+    offset: int | None = None
+    separator: str = " "
+    level: int | None = None
+    expected_document_updated_at: str = ""
 
 
 class PatchBatchInput(BaseModel):
@@ -1206,12 +1221,20 @@ class JobManager:
             for job in self.store.list_jobs(project_id):
                 if job.get("status") not in {"queued", "running"}:
                     continue
+                if job.get("kind") in {"reader_layers", "reader_fold_run"}:
+                    continue   # 阅读器作业由 ReaderJobRunner.recover() 专门恢复（fold-run 转 paused 可续跑）
                 self.store.update_job(
                     project_id, job["job_id"], status="failed",
                     error="应用上次退出时该任务被中断，请重新运行。",
                     message="任务被中断，请重新运行。",
                 )
                 recovered += 1
+        # 阅读器折叠作业/整篇 run 的专用恢复：fold-run 快照转 paused（继续只补未完成节），
+        # 不能走上面的通用标失败——否则 job 标了 failed、run 快照永远停在 running（僵尸）。
+        try:
+            self.reader_jobs.recover()
+        except Exception:
+            logger.exception("Failed to recover reader fold runs")
         # MinerU 解析作业单独存储：上次退出时的活动任务落为可恢复的 interrupted，
         # 保留切片进度并继续留在队列中（由 resume_ocr_jobs 按序唤醒）。
         try:
@@ -1326,7 +1349,7 @@ def create_app(store: ProjectStore | None = None):
         finally:
             manager.shutdown()
 
-    app = FastAPI(title="Literature Local API", version="0.1.0", lifespan=lifespan)
+    app = FastAPI(title="Literature Local API", version=__version__, lifespan=lifespan)
     app.state.session_token = token
     app.state.store = store
     app.state.ocr_service = ocr
@@ -1371,11 +1394,11 @@ def create_app(store: ProjectStore | None = None):
     def health():
         return {
             "status": "ok",
-            "version": "0.1.0",
+            "version": __version__,
             "runtime_revision": RUNTIME_REVISION,
             "capabilities": ["intake_items_v1", "structure_review_v2", "model_services_v1", "model_services_v2", "model_services_v3", "model_services_v4", "structure_job_v1", "structure_modes_v1", "structure_pause_v1", "structure_vision_v1", "structure_flow_v1", "desktop_resources_v1", "translation_module_v1", "translation_engine_v2", "resource_pipeline_v1", "translation_safety_v1", "parse_lifecycle_v1", "task_history_v1", "parse_backends_v1", "parse_engine_v1", "export_v1", "export_manage_v1",
                     "reader_v1", "reader_v2", "reader_chat_v1", "reader_roles_v1",
-                    "reader_fold_run_v1", "reader_native_v1"],
+                    "reader_fold_run_v1", "reader_native_v1", "reader_fold_batches_v1"],
         }
 
     @app.get("/parse/backends")
@@ -1586,6 +1609,7 @@ def create_app(store: ProjectStore | None = None):
 
     @app.get("/projects/{project_id}/document")
     def document(project_id: str):
+        recover_edit(store, project_id)
         value = store.load_document(project_id)
         # flow_links 是只读派生视图元数据（跨页续接），不写回 document.json。
         return {**value.to_dict(), "flow_links": detect_cross_page_flow(value, store.project_path(project_id))}
@@ -2065,6 +2089,22 @@ def create_app(store: ProjectStore | None = None):
         except Exception as error:
             store.update_job(project_id, job_id, status="failed", error=str(error))
             raise
+
+    @app.get("/projects/{project_id}/structure/edit-history")
+    def structure_edit_history(project_id: str):
+        return edit_history(store, project_id)
+
+    @app.post("/projects/{project_id}/structure/edit")
+    def structure_edit(project_id: str, request: StructureEditInput):
+        result = apply_edit(store, project_id, request.model_dump())
+        manager.refresh_translation_summary(project_id)
+        return result
+
+    @app.post("/projects/{project_id}/structure/edit-history/{direction}")
+    def structure_edit_move(project_id: str, direction: Literal["undo", "redo"]):
+        result = move_history(store, project_id, direction)
+        manager.refresh_translation_summary(project_id)
+        return result
 
     @app.post("/projects/{project_id}/structure/patches")
     def structure_patch(project_id: str, request: PatchInput):
@@ -2557,6 +2597,9 @@ def create_app(store: ProjectStore | None = None):
     def services_has(service: Any) -> bool:
         return bool(service) and bool(service.get("models"))
 
+    from .reader_limits import FoldRequestGate
+    fold_gate = FoldRequestGate()
+
     def _provider_factory_for(project_id: str, binding: dict[str, str]) -> Callable[[], Any]:
         """按已解析的绑定给出「按需新建 provider」的工厂（预算/服务并发钩子照旧挂上）。"""
         resolved = str(binding.get("service_id") or "")
@@ -2588,6 +2631,53 @@ def create_app(store: ProjectStore | None = None):
                     resolved, provider, project_id=project_id, budget=budget,
                     cost_of=prompt_cost_estimator(provider.config),
                 )
+
+            def prepare_fold(child: Any) -> None:
+                # A bounded request has its own output estimate and thread-local reservation.
+                child._attempt_state = threading.local()
+                if resolved:
+                    manager.coordinator.attempt_hooks_for(
+                        resolved, child, project_id=project_id, budget=budget,
+                        cost_of=prompt_cost_estimator(child.config),
+                    )
+                hooks = getattr(child, "attempt_hooks", None)
+                if hooks is not None:
+                    def begin(chars: int) -> Any:
+                        fold_gate.acquire(resolved)
+                        try:
+                            if budget > 0:
+                                summary = store.usage_summary(project_id)
+                                if (int(summary.get("unknown_cost_records") or 0) > 0
+                                        or int(summary.get("pending_cost_records") or 0) > 0
+                                        or manager.coordinator.unknown_cost_requests(project_id) > 0):
+                                    raise BudgetExhausted("已有费用未知的请求，无法核实剩余预算；完成费用对账后可继续折叠。")
+                            return hooks[0](chars)
+                        except BaseException:
+                            fold_gate.release(resolved)
+                            raise
+
+                    def end(handle: Any, response: Any, error: Any, final: bool = True) -> None:
+                        try:
+                            hooks[1](handle, response, error, final)
+                        finally:
+                            status = int(getattr(response, "status_code", 0) or getattr(error, "status_code", 0) or 0)
+                            fold_gate.release(resolved, status)
+
+                    child.attempt_hooks = (begin, end)
+
+            def settle_fold(child: Any, response: Any, error: Exception | None = None) -> None:
+                state = getattr(child, "_attempt_state", None)
+                handle = getattr(state, "handle", None) if state is not None else None
+                if state is not None:
+                    state.handle = None
+                actual = getattr(response, "estimated_cost", None)
+                if response is None and error is not None and getattr(error, "possible_charge", None) is False:
+                    actual = 0.0
+                if handle is not None:
+                    manager.coordinator.reconcile(handle, actual_cost=actual)
+
+            provider._fold_prepare = prepare_fold
+            provider._fold_settle = settle_fold
             return provider
 
         return factory
@@ -2691,9 +2781,16 @@ def create_app(store: ProjectStore | None = None):
         _require_reader_project(project_id)
         store.load_document(project_id)
         locale = _run_locale(project_id, request.locale.strip())
-        resolution = _reader_require(ROLE_READER_FOLD, "折叠模型", "", "")
-        binding = resolution["binding"]
-        effective = resolution.get("effective") or binding
+        current = manager.reader_jobs.current_run(project_id)
+        if current.get("status") in ("paused", "failed") and current.get("locale") == locale:
+            effective = dict(current.get("binding") or {})
+            if not effective.get("service_id") or not effective.get("model"):
+                raise HTTPException(status_code=400, detail="原任务缺少折叠模型绑定，无法继续。")
+            resolution = {"source": str(effective.get("source") or "frozen_run")}
+        else:
+            resolution = _reader_require(ROLE_READER_FOLD, "折叠模型", "", "")
+            binding = resolution["binding"]
+            effective = resolution.get("effective") or binding
         try:
             run, created = manager.reader_jobs.start_run(
                 project_id, locale=locale,
@@ -2701,7 +2798,6 @@ def create_app(store: ProjectStore | None = None):
                 model_label=str(effective.get("model") or ""),
                 service_id=str(effective.get("service_id") or ""),
                 force=request.force, binding_source=resolution["source"],
-                on_response=usage_recorder(store, project_id, "", "reader_fold_run"),
             )
         except StorageError as error:
             raise HTTPException(status_code=409, detail=str(error)) from error
@@ -2752,7 +2848,6 @@ def create_app(store: ProjectStore | None = None):
                 project_id, run_id,
                 provider_factory=_provider_factory_for(project_id, effective),
                 force=request.force,
-                on_response=usage_recorder(store, project_id, "", "reader_fold_run"),
             )
         except StorageError as error:
             raise HTTPException(status_code=409, detail=str(error)) from error
@@ -2764,9 +2859,15 @@ def create_app(store: ProjectStore | None = None):
     def reader_layers_native(project_id: str, locale: str = "source", section: str = ""):
         """词级原生结构（toks/sents/lad/atoms，brief 词 m、topic 词 k）：前端词级 stage/morph 数据源。
 
-        只读已落盘的派生层（不发模型）；`section=S3` 可按节过滤 chunks（units 仍全量返回，
-        词级定位与跨节词身份需要）。"""
-        payload = ReaderStore(store).load_native(project_id, locale)
+        只读、零模型。**安全投影**：文件事实指纹仍匹配就直接返回已落盘载荷；否则从当前全文 +
+        仅「当前事实/冻结绑定校验通过」的层与逐 unit 检查点确定性重建（过期短层丢弃，
+        `units[*].lit_pending` / `chunks[*].lit_summary_pending` 标未生成），原子写回后返回。
+        native 文件缺失也走重建（部分失败/首次阅读也能拿到安全投影），只有项目没有 document
+        时才是 404。`section=S3` 按节过滤 chunks（units 仍全量返回）。"""
+        try:
+            payload = ReaderLayerService(store).reading_native(project_id, locale=locale)
+        except StorageError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
         if payload is None:
             raise HTTPException(status_code=404,
                                 detail=f"还没有 {locale} 的词级折叠结构；请先运行 AIFold 或生成分层。")

@@ -21,6 +21,7 @@ type Props = {
   onDismiss: (suggestion: StructureSuggestion) => void; onConfirmAll: (values: StructureSuggestion[]) => void;
   onRevert: (patchId: string) => void; onRevertAll: () => void;
   busy: boolean;
+  checked: Set<string>; onCheck: (id: string) => void; onClearChecks: () => void; onSetLevels: (level: number) => void;
   /** 全部服务商（含模型列表）与当前任务级选择；默认 = 角色绑定。 */
   providers: ModelService[]; modelValue: ModelRoleBinding; configured: boolean;
   onConfigureModel: () => void; analysis: StructureAnalysis;
@@ -29,14 +30,14 @@ type Props = {
   onModelChange: (patch: TaskModelPatch) => void;
   onRunModel: () => void; onPause: () => void;
 };
-function TocRow({ node, selected, activeBlock, onSelect }: { node: TocNode; selected: string; activeBlock: string; onSelect: (id: string) => void }) {
+function TocRow({ node, selected, activeBlock, onSelect, checked, onCheck }: { node: TocNode; selected: string; activeBlock: string; onSelect: (id: string) => void; checked: Set<string>; onCheck: (id: string) => void }) {
   return <li>
     <div className={`toc-row${selected === node.block_id ? " selected" : ""}${activeBlock === node.block_id ? " active" : ""}`}>
-      <span className="toc-level">H{node.level}</span>
+      <input type="checkbox" aria-label={`选择目录 ${node.title}`} checked={checked.has(node.block_id)} onChange={() => onCheck(node.block_id)}/><span className="toc-level">H{node.level}</span>
       <button className="toc-title u-truncate" onClick={() => onSelect(node.block_id)} title={node.title}>{node.title}</button>
       <span className="toc-page">{node.page_index + 1}</span>
     </div>
-    {node.children.length > 0 && <ul>{node.children.map(child => <TocRow key={child.node_id} node={child} selected={selected} activeBlock={activeBlock} onSelect={onSelect}/>)}</ul>}
+    {node.children.length > 0 && <ul>{node.children.map(child => <TocRow key={child.node_id} node={child} selected={selected} activeBlock={activeBlock} onSelect={onSelect} checked={checked} onCheck={onCheck}/>)}</ul>}
   </li>;
 }
 function formatDuration(seconds: number): string {
@@ -65,7 +66,7 @@ const BASELINE_LABELS: Record<string, string> = {
   none: "无目录模式：未找到印刷目录，AI 依据标题群与版面推断结构（正常路径，证据不足的项保留待复核）",
 };
 export default memo(function OutlinePane(props: Props) {
-  const { document, tocCandidates, onFindTocPages, onJumpPage, pageText, onPageText, onPreviewActualAudit, suggestions, patches, selected, activeBlock, onSelect, onConfirm, onDismiss, onConfirmAll, onRevert, onRevertAll, busy, providers, modelValue, configured, onConfigureModel, analysis, onMode, reasoningMode, reasoningBudget, onModelChange, onRunModel, onPause } = props;
+  const { document, tocCandidates, onFindTocPages, onJumpPage, pageText, onPageText, onPreviewActualAudit, suggestions, patches, selected, activeBlock, onSelect, onConfirm, onDismiss, onConfirmAll, onRevert, onRevertAll, busy, providers, modelValue, configured, onConfigureModel, analysis, onMode, reasoningMode, reasoningBudget, onModelChange, onRunModel, onPause, checked, onCheck, onClearChecks, onSetLevels } = props;
   const [queue, setQueue] = useState("all");
   const allPending = suggestions.filter(value => !value.automatic);
   const group = (value: StructureSuggestion) => value.operation === "set_type" ? "cleanup" : value.operation === "set_title" ? "promotion" : "level";
@@ -114,9 +115,14 @@ export default memo(function OutlinePane(props: Props) {
   return <aside className="sidebar mineru-control-column review-outline">
     <div className="panel-title"><strong>文档目录</strong><span>{flattenToc(document.toc).length} 个标题</span></div>
     <div className="pane-scroll">
-      <details className="outline-section" open><summary>当前目录</summary>
-        {document.toc.length ? <ul className="toc-tree">{document.toc.map(node => <TocRow key={node.node_id} node={node} selected={selected} activeBlock={activeBlock} onSelect={onSelect}/>)}</ul> : <p className="empty-note">还没有标题。选择右侧正文块，将其设为标题。</p>}
-      </details>
+      {/* 目录树独立滚动：长目录不会把 AI 校准等功能压出可视区；批量条固定在树上方。
+          目录是主导航，用普通 section 而非 details，保证内部 flex 滚动高度约束可靠。 */}
+      <section className="outline-section outline-toc" aria-label="当前目录">
+        <div className="outline-toc-head">当前目录</div>
+        {checked.size > 0 && <div className="batch-actions"><strong>已选 {checked.size}</strong><select aria-label="批量调整目录层级" disabled={blocked} value="" onChange={e => { const level = Number(e.target.value); e.currentTarget.blur(); onSetLevels(level); }}><option value="" disabled>设为层级…</option>{[1,2,3,4,5,6].map(level => <option key={level} value={level}>H{level}</option>)}</select><button onClick={onClearChecks}>清空</button></div>}
+        {document.toc.length ? <div className="toc-scroll"><ul className="toc-tree">{document.toc.map(node => <TocRow key={node.node_id} node={node} selected={selected} activeBlock={activeBlock} onSelect={onSelect} checked={checked} onCheck={onCheck}/>)}</ul></div> : <p className="empty-note">还没有标题。选择右侧正文块，将其设为标题。</p>}
+      </section>
+      <div className="outline-lower">
       <details className="outline-section review-assistant">
         <summary>AI 校准</summary>
         <details className="task-model-details" open={!configured}>
@@ -164,7 +170,6 @@ export default memo(function OutlinePane(props: Props) {
             <ul className="structure-activity">{(job.activity ?? []).map((item, index) => <li key={index}>{item.text}</li>)}</ul>
           </details>
         </div>}
-        {/* 按需纠错入口：仅当目录识别不准时才指定真实 PDF 目录页；留空即自动识别。 */}
         {!running && <details className="calib-correct">
           <summary>目录识别不准？指定真实目录页</summary>
           <div className="review-page-picker">
@@ -203,6 +208,7 @@ export default memo(function OutlinePane(props: Props) {
         </article>)}
         {!patches.length && <p className="empty-note">尚无修订。</p>}
       </details>
+      </div>
     </div>
   </aside>;
 });

@@ -300,11 +300,11 @@ class LifecycleTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.temporary.cleanup()
 
-    def test_local_only_state_is_not_advertised_as_ai(self) -> None:
-        result = self.service.generate(self.project_id, mode="local")
-        self.assertFalse(result["provenance"]["ai_generated"])
-        self.assertTrue(result["provenance"]["local"])
-        self.assertEqual(result["provenance"].get("content"), "local")
+    def test_model_mode_produces_ai_content(self) -> None:
+        result = self.service.generate(self.project_id, provider=self.provider, model_label="m")
+        self.assertTrue(result["provenance"]["ai_generated"])
+        self.assertFalse(result["provenance"]["local"])
+        self.assertEqual(result["provenance"].get("content"), "model")
 
     def test_model_change_invalidates_cache(self) -> None:
         """换折叠模型必须重折叠（缓存键含 model），不得复用别家输出。"""
@@ -318,7 +318,7 @@ class LifecycleTests(unittest.TestCase):
         """已有 AI 分层时，非 force 的 local 请求不得推翻 AI 内容。"""
         ai_result = self.service.generate(self.project_id, provider=self.provider, model_label="semantic/model", mode="auto")
         ai_takeaways = {u["id"]: u.get("takeaway") for s in ai_result["sections"] for u in s["units"]}
-        rerun = self.service.generate(self.project_id, mode="local")
+        rerun = self.service.generate(self.project_id, provider=self.provider, model_label="m")
         local_takeaways = {u["id"]: u.get("takeaway") for s in rerun["sections"] for u in s["units"]}
         same = [uid for uid in ai_takeaways if ai_takeaways[uid] == local_takeaways.get(uid)]
         # local 折叠与 AI 折叠内容天然不同：如果层被覆盖，takeaway 会变成机械首句
@@ -376,15 +376,16 @@ class TranslationLayerConsistencyTests(unittest.TestCase):
 
     def test_first_bilingual_local_preview_populates_both_pane_indexes(self) -> None:
         before = self.store.translation_path(self.project_id, "zh-CN").read_bytes()
-        self.service.generate(self.project_id, locale="zh-CN", mode="local", section_ids=["S1"])
+        self.service.generate(self.project_id, locale="zh-CN", provider=self.provider, model_label="m", section_ids=["S1"])
         source = self.service.document(self.project_id, locale="source")
         target = self.service.document(self.project_id, locale="zh-CN")
         self.assertEqual([s["id"] for s in source["sections"]], ["S1"])
         self.assertEqual([s["id"] for s in target["sections"]], ["S1"])
         self.assertEqual([u["id"] for u in source["sections"][0]["units"]],
                          [u["id"] for u in target["sections"][0]["units"]])
-        self.assertFalse(source["ai_generated"])
-        self.assertFalse(target["ai_generated"])
+        # mode=auto + provider → AI 产物（不再有 local 预览路径）
+        self.assertTrue(source["ai_generated"])
+        self.assertTrue(target["ai_generated"])
         self.assertEqual(before, self.store.translation_path(self.project_id, "zh-CN").read_bytes())
 
     def test_translation_locale_keeps_evidence_consistent(self) -> None:
@@ -652,13 +653,11 @@ class SingleFlightTests(unittest.TestCase):
                 return super().complete(system=system, user=user)
 
         failing = FailingOnce()
-        # 失败语义：generate 不抛，转为该节 failed + 本地回退（不伪 AI）
+        # 失败语义：generate 不抛，转为该节 failed（不 local 兜底——AIFold 必须 AI 成功产物）
         first = self.service.generate(self.project_id, provider=failing, model_label="m", mode="auto")
         self.assertTrue(first.get("failed_sections"), "网络失败应记入 failed_sections")
-        # 失败语义：失败 unit 回退 local（不标 AI）；同节后续 unit 成功可为 model（逐 unit 调用）
-        self.assertTrue(any(u.get("source") == "local"
-                            for s in first["sections"] for u in s["units"]),
-                        "失败 unit 应回退本地折叠")
+        # 失败节无存盘投影（不 local 冒充）——失败节不在 sections 里
+        self.assertTrue(first.get("failed_sections"), "failed_sections 确认失败")
         # 失败后重试：single-flight 锁已释放，成功 provider 能补齐全部章节
         recovered = self.service.generate(self.project_id, provider=failing, model_label="m", mode="auto")
         self.assertEqual(recovered.get("failed_sections"), [], "重试应补齐失败章节")

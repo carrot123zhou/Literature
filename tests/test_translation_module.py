@@ -8,7 +8,7 @@ from pathlib import Path
 
 from literature.api import create_app
 from literature.mineru import import_mineru
-from literature.models import Block
+from literature.models import Block, TranslationEntry
 from literature.providers import MockProvider, ProviderConfig, ProviderError, ProviderResponse
 from literature.storage import ProjectStore
 from literature.structure import apply_patch
@@ -240,6 +240,18 @@ class TranslationModuleTests(unittest.TestCase):
         self.assertEqual(stats["stale_source"], 1)
         payload = translation_payload(document, layer)
         self.assertEqual(payload["entries"][paragraph.block_id]["stale_reason"], "source")
+
+    def test_legacy_translation_without_hash_tracks_content_edit_revision(self):
+        block = Block(block_id="b", type="paragraph", order=0, page_index=0,
+                      source_text="corrected", structure_revision=3,
+                      raw={"structure_content_revision": 2})
+        old = TranslationEntry(block_id="b", text="旧译文", status="edited", structure_revision=1)
+        self.assertEqual(entry_stale_reason(block, old), "source")
+        # 编辑后的译文依然可在随后的纯层级变化中保持结构对齐状态。
+        old.structure_revision = 2
+        self.assertEqual(entry_stale_reason(block, old), "structure")
+        old.structure_revision = 3
+        self.assertIsNone(entry_stale_reason(block, old))
 
     def test_locked_stale_is_counted_and_excluded_from_stale_scope(self):
         service = TranslationService(self.store, MockProvider())

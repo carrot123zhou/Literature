@@ -17,7 +17,7 @@ type Props = {
   showBoxes: boolean;
   space: string;
   flowLinks: FlowLinks;
-  onSelect: (blockId: string) => void;
+  onSelect: (blockId: string, pageIndex?: number, sourceIndex?: number) => void;
 };
 
 /** 块类型的中文短标签，供框上的角标直接显示。 */
@@ -134,14 +134,15 @@ export default function PdfPageCanvas({ pdf, pageIndex, renderWidth, active, pag
           const continues = Boolean(flowLinks[block.block_id]?.next_region);
           return (
             <button
-              key={block.block_id}
+              key={`${block.block_id}-${(block as Block & { sourceIndex?: number }).sourceIndex ?? "main"}`}
+              data-source-index={(block as Block & { sourceIndex?: number }).sourceIndex}
               type="button"
               data-block-id={block.block_id}
               className={`bbox bbox-${block.type}${current ? " selected" : ""}`}
               style={{ left: `${rect.left}%`, top: `${rect.top}%`, width: `${rect.width}%`, height: `${rect.height}%` }}
               title={`${block.block_id} · ${block.type}${block.level ? ` H${block.level}` : ""}${continues ? " · 跨页续接（续下页）" : ""}`}
               aria-label={block.source_text || block.block_id}
-              onClick={() => onSelect(block.block_id)}
+              onClick={() => onSelect(block.block_id, pageIndex, (block as Block & { sourceIndex?: number }).sourceIndex)}
             >
               <span className="bbox-label" aria-hidden="true">{typeLabel(block)}</span>
             </button>

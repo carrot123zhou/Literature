@@ -35,12 +35,21 @@ backend 契约：docs/READER_BACKEND.md §4.8b（tr[locale].lad.ev_space / deriv
    engine_anchor.space='derived'）→ marksFor 仅在派生 lane 消费（dexact，不进 Full exact/soft）
    → pieces 着色走 dexact。Full 层不消费 derived 锚，防错标；
 3. **srcdoc history 守卫**：setLang 的 history.replaceState 在 srcdoc iframe 内 try/catch。
+4. **统一宿主菜单**：暴露只读 selectionAnchors/noteAt，关闭内核自带选段菜单的触发；宿主复用普通阅读的菜单与顶栏问答，保存 CAS 成功后通过纯内存 applyNotes 重绘，绝不由通知再次 POST。保留全文/写行/派生/摘要/标题的锚空间及原有 tone 强度；宿主五色色板映射上游颜色变量。
+5. **局部展开同步**：原生 toggleUnit 状态经事件上报，宿主向对侧发送明确 open 布尔值；章节摘要点击支持同节所有单元展开/收起。命令等待内核运动结束，不伪改 CSS 类。
+6. **滚动桥**：以稳定 unit/section ID 和视口 30% 位置的块内比例同步，目标程序滚动不再次反驱；受宿主跟随开关控制。
+
+7. **部分完成的全文降级**：后端显式给出原文/目标语各自的 `lit_pending` 与 `lit_summary_pending`。
+   `levelOf` 将未生成单元固定为 Full(4)，渲染、选区和批注均使用全文词空间；目标语未生成时
+   使用已有 `z.toks` 全文译文。缺失章节摘要不隐藏段落；原译状态分别消费，不相互传播。
+   `is-pend` / `is-spend` 的低干扰标记由宿主样式绘制，不写入正文 textContent。
+
 
 其余集成（paper-data 注入、template 脚手架、fetch RPC 路由、KaTeX）均为外壳行为，不改内核逻辑。
 
 上游 reader.js 是整页 IIFE：吃 `#paper-data` JSON，接管 `document`（topbar/footer.zoom/#doc/#ghosts）。
 Literature 三栏客户端里由 `TextFoldPane.tsx` 以 **iframe(srcdoc)** 承载：每栏（原文/译文）一个引擎实例，
-srcdoc = template.html 脚手架 + i18n + paper-data + engine-patched（内核+兼容补丁）内联。宿主通过
+srcdoc 的 paper-data/tf-config 是非执行 JSON；bridge/i18n/engine-patched/after/bootstrap 均以同源静态脚本外链加载，保留严格 CSP。宿主通过
 `contentWindow.__reader`（setLevel/zoomBy/scrubTo/letGo/level/lang…）下发命令，注入的
 `bridge.js`（宿主代码，非上游）把引擎内部层变化 postMessage 回宿主，并转发跨栏 hover/批注事件。
 

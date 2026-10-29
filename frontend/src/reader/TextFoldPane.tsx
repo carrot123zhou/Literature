@@ -36,6 +36,12 @@ export type EngineEvent =
   | { type: "level"; level: number }
   | { type: "hover"; uid: string | null }
   | { type: "activate"; uid: string }
+  | { type: "scroll"; uid: string; ratio: number }
+  | { type: "open-change"; kind: "unit" | "section"; id: string; open: boolean }
+  | { type: "edit-note"; id: string; rect: { left: number; top: number; width: number; height: number } }
+  | { type: "operation-error"; message: string }
+  | { type: "selection"; rect: { left: number; top: number; width: number; height: number }; text: string; anchor: Record<string, unknown> | null }
+  | { type: "sel-clear" }
   | { type: "notes-get"; reqId: string }
   | { type: "notes-put"; reqId: string; note: Record<string, unknown> }
   | { type: "notes-delete"; reqId: string; noteId: string }
@@ -60,7 +66,10 @@ function buildSrcdoc(data: PaperData, level0to4: number, katexBase: string, inst
 <style>${readerCss}</style>
 <style>
   /* 宿主外壳适配（非上游，逐条可追踪）：栏内不渲染上游自带 topbar/footer（五档 bar 由宿主渲染） */
-  .topbar, footer.zoom, .madewith { display: none !important; }   /* #ghosts 是上游词级动画层，必须保留 */
+  .topbar, footer.zoom, .madewith { display: none !important; }
+  /* 统一宿主菜单：隐藏内核自带 selbar/npop/chat（用户反馈：双菜单） */
+  .selbar, .npop, .chat, .chatbtn { display: none !important; }
+  /* #ghosts 是上游词级动画层，必须保留 */
   html, body { background: transparent; }
   #doc { padding-top: 8px; }
   /* 桥点亮态：只作用段前小点（借上游 dr-beat 关键帧），不给整段背景 */
@@ -71,6 +80,19 @@ function buildSrcdoc(data: PaperData, level0to4: number, katexBase: string, inst
   .selbar { background: var(--card); border: 1px solid var(--line); box-shadow: var(--pop); }
   .selbar button { color: var(--ink); }
   .selbar button:hover { background: var(--line-2); }
+  /* Literature（lit_pending，冻结契约 tmp/reader-partial-contract.md）：
+     未生成短层的单元全文照常显示，仅加「未生成」徽标（::before 不进 textContent，
+     不影响内核 token 锚与选择偏移）；摘要未生成章节保留标题、不显示摘要行。 */
+  .u.is-pend::before {
+    content: '未生成'; display: block;
+    font-family: var(--sans, -apple-system, sans-serif); font-size: 11px; line-height: 1;
+    letter-spacing: 1px; opacity: .55; margin: 0 0 4px;
+  }
+  .u.is-pend > .dot { opacity: 1; }
+  .chunk.is-spend > .hd::after {
+    content: '· 摘要未生成'; font-family: var(--sans, -apple-system, sans-serif);
+    font-size: .72em; font-weight: 400; opacity: .5; margin-left: 8px;
+  }
 </style>
 <script type="application/json" id="tf-config">${config}<\/script>
 <script src="${absSrc(scriptOrigin, bridgeUrl)}"><\/script>
@@ -91,7 +113,7 @@ function buildSrcdoc(data: PaperData, level0to4: number, katexBase: string, inst
 export type TextFoldPaneHandle = {
   setLevel: (level0to4: number) => void;
   lightUnit: (uid: string | null) => void;
-  gotoUnit: (uid: string) => void;
+  gotoUnit: (uid: string, ratio?: number) => void;
   /** 引擎内语言切换（译文栏用实际 locale；内核原生支持 langs/tr）。 */
   setLang: (locale: string) => void;
 };
@@ -107,9 +129,10 @@ export function useTextFoldEngine(args: {
   /** RPC 处理（宿主真实执行 overlay/问答），返回值回信内核。 */
   rpc: (path: string, method: string, body: unknown) => Promise<unknown>;
   onActivate?: (uid: string) => void;
-}): { containerRef: React.RefObject<HTMLDivElement | null>; handle: React.MutableRefObject<TextFoldPaneHandle | null>; ready: boolean; error: string; retry: () => void } {
+}): { containerRef: React.RefCallback<HTMLDivElement>; handle: React.MutableRefObject<TextFoldPaneHandle | null>; ready: boolean; error: string; retry: () => void } {
   const { data, initialLevel, onEvent, litUid, theme, locale, rpc, onActivate } = args;
-  const containerRef = useRef<HTMLDivElement>(null);
+  const [hostNode, setHostNode] = useState<HTMLDivElement | null>(null);
+  const containerRef = useCallback((node: HTMLDivElement | null) => { setHostNode(node); }, []);
   const frameRef = useRef<HTMLIFrameElement | null>(null);
   const handle = useRef<TextFoldPaneHandle | null>(null);
   const [ready, setReady] = useState(false);
@@ -136,13 +159,14 @@ export function useTextFoldEngine(args: {
   );
 
   useEffect(() => {
-    if (!srcdoc || !containerRef.current) { setReady(false); return; }
+    if (!srcdoc || !hostNode) { setReady(false); return; }
     setReady(false); setError("");
     const frame = document.createElement("iframe");
     frame.setAttribute("title", "TextFold reader");
     frame.style.cssText = "width:100%;height:100%;border:0;display:block;background:transparent";
+    frame.dataset.tfInst = inst;
     frame.srcdoc = srcdoc;
-    containerRef.current.replaceChildren(frame);
+    hostNode.replaceChildren(frame);
     frameRef.current = frame;
     const onMessage = (event: MessageEvent) => {
       // 严格校验：只信本实例 iframe 的 contentWindow，且实例 id 匹配
@@ -153,8 +177,8 @@ export function useTextFoldEngine(args: {
       if (d.type === "error") { setError(String(d.message || "内核初始化失败")); onEventRef.current?.(d as EngineEvent); return; }
       if (d.type === "rpc") {
         void rpcRef.current(String(d.path || ""), String(d.method || "GET"), d.body).then(
-          (result) => frame.contentWindow?.postMessage({ __tfresp: 1, reqId: d.reqId, data: result }, "*"),
-          (err) => frame.contentWindow?.postMessage({ __tfresp: 1, reqId: d.reqId, error: err instanceof Error ? err.message : String(err) }, "*"),
+          (result) => frame.contentWindow?.postMessage({ inst, __tfresp: 1, reqId: d.reqId, data: result }, "*"),
+          (err) => frame.contentWindow?.postMessage({ inst, __tfresp: 1, reqId: d.reqId, error: err instanceof Error ? err.message : String(err) }, "*"),
         );
         return;
       }
@@ -169,7 +193,7 @@ export function useTextFoldEngine(args: {
       handle.current = null;
       setReady(false);
     };
-  }, [srcdoc, inst]);
+  }, [srcdoc, inst, hostNode, nonce]);
 
   // 引擎语言：译文栏按实际 locale 切（内核原生 langs/tr；数据没有该语言时内核如实忽略）
   useEffect(() => {
@@ -185,8 +209,8 @@ export function useTextFoldEngine(args: {
     if (!r) { handle.current = null; return; }
     handle.current = {
       setLevel: (l) => { try { (r.setLevel as (n: number) => void)(l); } catch { /* 引擎未就绪 */ } },
-      lightUnit: (uid) => { try { frame?.contentWindow?.postMessage({ __lit: "light", uid, on: Boolean(uid) }, "*"); } catch { /* ignore */ } },
-      gotoUnit: (uid) => { try { frame?.contentWindow?.postMessage({ __lit: "goto", uid }, "*"); } catch { /* ignore */ } },
+      lightUnit: (uid) => { try { frame?.contentWindow?.postMessage({ inst, __lit: "light", uid, on: Boolean(uid) }, "*"); } catch { /* ignore */ } },
+      gotoUnit: (uid, ratio) => { try { frame?.contentWindow?.postMessage({ inst, __lit: ratio === undefined ? "goto" : "scroll-to", uid, ratio }, "*"); } catch { /* ignore */ } },
       setLang: (l) => { try { (r.setLang as (c: string) => void)(l); } catch { /* ignore */ } },
     };
   }, [ready]);
@@ -215,8 +239,7 @@ export function useTextFoldEngine(args: {
     }
   }, [theme, ready]);
 
-  const retry = useCallback(() => setNonce(value => value + 1), []);
-  useEffect(() => { if (nonce > 0) setReady(false); }, [nonce]);
+  const retry = useCallback(() => { setError(""); setNonce(value => value + 1); }, []);
 
   return { containerRef, handle, ready, error, retry };
 }

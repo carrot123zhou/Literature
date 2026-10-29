@@ -151,6 +151,15 @@ def entry_stale_reason(block: Block, entry: TranslationEntry | None) -> str | No
         return None
     if entry.source_hash and entry.source_hash != block_source_digest(block):
         return "source"
+    # 旧译文可能没有 source_hash。结构编辑记录最后一次原文变动的版本，
+    # 防止这类旧译文在合并、拆分或改字后仅被当成「层级已对齐」。
+    if not entry.source_hash:
+        try:
+            content_revision = int((block.raw or {}).get("structure_content_revision") or 0)
+        except (TypeError, ValueError):
+            content_revision = 0
+        if content_revision > int(entry.structure_revision or 0):
+            return "source"
     if int(entry.structure_revision or 0) != int(getattr(block, "structure_revision", 0) or 0):
         return "structure"
     return None

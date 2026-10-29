@@ -53,11 +53,43 @@
 .review-outline .panel-title strong { min-width: 0; font-size: var(--fs-subhead); }
 .review-outline .panel-title span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--label-2); font-size: var(--fs-caption1); }
 .review-outline .pane-scroll {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
   min-width: 0;
+  min-height: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+  overscroll-behavior: contain;
+  padding: var(--sp-2);
+}
+/* 长目录信息架构：目录树独立滚动占满剩余高度；AI 校准/待确认/修订历史在下方独立滚动，
+   不会被 132+ 条目录压出可视区。 */
+.review-outline .outline-toc {
+  flex: 1 1 0%;
+  min-height: 96px;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.review-outline .outline-toc > .outline-toc-head {
+  flex: none;
+  color: var(--label-2);
+  font-size: var(--fs-caption1);
+  font-weight: var(--fw-semibold);
+  cursor: default;
+}
+.review-outline .outline-toc .toc-scroll {
+  flex: 1 1 0%;
   min-height: 0;
   overflow: auto;
   overscroll-behavior: contain;
-  padding: var(--sp-2);
+}
+.review-outline .outline-lower {
+  flex: 0 1 auto;
+  min-height: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
 }
 .review-outline .outline-section {
   min-width: 0;
@@ -79,31 +111,41 @@
   padding: 0;
   list-style: none;
 }
-.review-outline .toc-tree ul { padding-left: var(--sp-3); }
+.review-outline .toc-tree ul {
+  margin-left: 13px;
+  padding-left: var(--sp-3);
+  border-left: 1px solid var(--separator);
+}
 .review-outline .toc-row {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
+  grid-template-columns: auto auto minmax(0, 1fr) auto;
   align-items: center;
   min-width: 0;
   gap: var(--sp-2);
   padding: var(--sp-1) var(--sp-2);
   border-radius: var(--r-control);
 }
+.review-outline .toc-row input[type="checkbox"] { flex: none; margin: 0; accent-color: var(--accent); cursor: pointer; }
 .review-outline .toc-row:hover,
 .review-outline .toc-row.active:not(.selected) { background: var(--fill-3); }
 .review-outline .toc-row.selected { background: var(--accent-tint); color: var(--accent); }
 .review-outline .toc-level {
   flex: none;
-  padding: var(--sp-1);
+  min-width: 26px;
+  justify-self: start;
+  padding: 1px var(--sp-1);
   border-radius: var(--r-pill);
   background: var(--tint-blue);
   color: var(--on-blue);
   font-size: var(--fs-caption2);
   font-weight: var(--fw-semibold);
   line-height: var(--lh-tight);
+  text-align: center;
+  font-variant-numeric: tabular-nums;
 }
 .review-outline .toc-title {
   min-width: 0;
+  min-height: 0;
   overflow: hidden;
   padding: 0;
   border: 0;
@@ -116,7 +158,22 @@
   white-space: nowrap;
 }
 .review-outline .toc-title:hover { color: var(--accent); }
-.review-outline .toc-page { flex: none; color: var(--label-2); font-size: var(--fs-caption1); font-variant-numeric: tabular-nums; }
+.review-outline .toc-page { flex: none; justify-self: end; color: var(--label-2); font-size: var(--fs-caption1); font-variant-numeric: tabular-nums; }
+/* 批量调级操作条：勾选后固定出现在目录树上，不随树滚动。 */
+.review-outline .batch-actions {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  gap: var(--sp-2);
+  margin-top: var(--sp-2);
+  padding: var(--sp-1) var(--sp-2);
+  border-radius: var(--r-control);
+  background: var(--accent-tint);
+}
+.review-outline .batch-actions strong { flex: none; color: var(--accent); font-size: var(--fs-caption1); white-space: nowrap; }
+.review-outline .batch-actions select { flex: 1 1 auto; min-height: 26px; font-size: var(--fs-caption1); }
+.review-outline .batch-actions button { flex: none; min-height: 26px; padding: 0 var(--sp-2); border: 0; border-radius: var(--r-control); background: transparent; color: var(--accent); font-size: var(--fs-caption1); cursor: pointer; }
+.review-outline .batch-actions button:hover { background: var(--accent-tint-strong); }
 .review-hint,
 .review-page-picker small { display: block; color: var(--label-2); font-size: var(--fs-caption2); line-height: var(--lh-normal); }
 .review-page-picker,
@@ -385,7 +442,7 @@
 /* 900–1180 keeps three usable, shrinkable columns. Below 900, source is primary. */
 @media (min-width: 900px) and (max-width: 1180px) {
   .review-grid { grid-template-columns: minmax(0, 18fr) var(--gutter) minmax(0, 43fr) var(--gutter) minmax(0, 39fr) !important; }
-  .review-outline .toc-tree ul { padding-left: var(--sp-2); }
+  .review-outline .toc-tree ul { margin-left: 9px; padding-left: var(--sp-2); }
   .review-grid .result-tabs { padding: 0 var(--sp-2); }
   .review-grid .result-tabs button { padding: 0 var(--sp-1); }
   .pdf-scroll { padding: var(--sp-3); }
@@ -398,3 +455,12 @@
   .review-grid > .pdf-panel { min-width: 0; min-height: 0; }
   .pdf-scroll { padding: var(--sp-3); }
 }
+.review-edit-overlay { position: fixed; inset: 0; z-index: 1000; display: flex; align-items: center; justify-content: center; background: rgba(0,0,0,.4); padding: 16px; }
+.review-edit-dialog { width: min(560px, 100%); max-height: 85vh; overflow: auto; padding: 20px; border-radius: 12px; background: var(--bg-elevated); color: var(--label); box-shadow: 0 8px 30px rgba(0,0,0,.2); }
+.review-edit-dialog h2 { margin: 0 0 12px; }
+.review-edit-dialog label { display: block; margin: 12px 0; }
+.review-edit-dialog textarea { display: block; width: 100%; min-height: 160px; margin-top: 8px; }
+.review-edit-preview { white-space: pre-wrap; overflow-wrap: anywhere; padding: 12px; margin: 12px 0; border: 1px solid var(--separator); border-radius: 8px; }
+.review-edit-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
+.review-grid .block-source-pages { display: flex; flex-wrap: wrap; justify-content: flex-start; align-items: center; gap: var(--sp-1); margin: var(--sp-2) 0; color: var(--label-2); font-size: var(--fs-caption1); }
+.review-grid .block-source-pages button { padding: 3px 7px; font-size: var(--fs-caption1); }

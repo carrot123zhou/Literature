@@ -372,9 +372,10 @@ async function waitRun(page,pid,statuses,timeout=25000){
        body:JSON.stringify({locale:'zh-CN',force:true})});
    },{api:API,pid:scenario.pid});
    await page.reload({waitUntil:'domcontentloaded'});
-   await page.waitForSelector('#btn-foldpause',{timeout:25000});
+   await page.waitForSelector('#btn-aifold[data-stage="processing"]',{timeout:25000});
    const pausePosts0=timeline.filter(e=>e.dir==='req'&&e.method==='POST'&&e.path.includes('/pause')).length;
-   await page.locator('#btn-foldpause').click();
+   // 2026-10-27 UI 改版：暂停/继续并入主按键（不再有独立 #btn-foldpause）
+   await page.locator('#btn-aifold').click();
    await page.waitForTimeout(600);
    const pausePosts=timeline.filter(e=>e.dir==='req'&&e.method==='POST'&&e.path.includes('/pause')).length;
    ok('3.1 暂停请求真实发出（POST …/pause）',pausePosts>pausePosts0,{pausePosts});
@@ -390,9 +391,9 @@ async function waitRun(page,pid,statuses,timeout=25000){
         {progress:pausedSnap.progress,errors:pausedSnap.errors});
    }
    // UI「继续」：等 data-paused=1
-   await page.waitForSelector('#btn-foldpause[data-paused="1"]',{timeout:15000});
+   await page.waitForSelector('#btn-aifold[data-paused="1"]',{timeout:15000});
    const resumeReqs0=timeline.filter(e=>e.dir==='req'&&e.path.includes('/resume')).length;
-   await page.locator('#btn-foldpause').click();
+   await page.locator('#btn-aifold').click();   // data-paused=1：同键变「继续」
    const deadline=Date.now()+30000;
    let final={},resumeStatus=null;
    while(Date.now()<deadline){

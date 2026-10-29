@@ -70,8 +70,8 @@ Literature 没有那个库：事实来源是 `document/document.json` + `transla
 - **译文层实际路径**：`literature/textfold_adapter.py` 的 `derive_context()`/`apply_derived_reply()`——
   只输入原文层已写出的短层 + 被选中证据句（fold 产物），输出目标语短层 + `ev_sentences`
   （分层译句，与 evidence 1:1，标 `brief_source="derived"`）；Full/Key 文本永远来自
-  translation.json，不重新翻译全文，也不把整章原文/译文投给模型。无模型回退走
-  `apply_translated_local()`（译文逐字本地预览，标 `translation-local`）。
+  translation.json，不重新翻译全文，也不把整章原文/译文投给模型。新作业失败保持 pending，
+  不再运行 `apply_translated_local()` 或本地摘句；`translation-local` 仅旧缓存兼容标记。
 
 ## Literature 复用了什么（对应 `literature/textfold_adapter.py`）
 
@@ -80,7 +80,7 @@ Literature 没有那个库：事实来源是 `document/document.json` + `transla
 2. `ladder.RULES`/`SCHEMA`/`prompt_for()`：折叠提示词与 JSON schema（unit 的 role/takeaway/topic/reason/evidence）。
 3. `ladder.assemble()`：把模型回复变成 ladder——evidence 越界过滤、`clean()`、`written()` 公式与原子还原、
    `topic_tokens()` 把主题锚回 takeaway 的词序列。
-4. `ladder.local()`：没有模型时的降级折叠（英文取首句头，中文取「最像主张的句子」并沿用 CJK 预算）。
+4. `ladder.local()`：上游快照保留该降级函数供版本对照；Literature 生产业务不调用它，缺失短层保留全文与 pending 状态。
 5. `ladder.is_apparatus()` / `budgets_of()` / `cjk_doc()` / `cjk_takeaway()` / `cjk_topic()`：
    目录行、脚注、图表题这类「版式管道」不折叠；中文按字符预算切在分句边缘。
 6. `ladder.section_ladder()`、`fold_background()`、`dress()`：章节一句话主线与主题、小节里连续背景行的收敛、
@@ -93,14 +93,14 @@ Literature 没有那个库：事实来源是 `document/document.json` + `transla
 
 ## Literature 没有复用、并明确说明的部分
 
-- 上游的 `store.py` / `pipeline.py` / `server.py` / 前端 `web/reader.js`：前者绑定 TextFold 自己的文件库与
-  多模型 agent 运行时；后者的**浮条、层排版、批注锚定** 由前端在 `frontend/src/reader/` 中
-  按 Apache-2.0 改编；原始文件为固定提交的 `textfold/web/reader.js` / `reader.css`，
-  当前并未整文件复用该阅读器，不应将原型中的块级动画等同生产实现。
+- 上游的 `store.py` / `pipeline.py` / `server.py`：绑定 TextFold 自己的文件库和任务运行时，
+  Literature 使用自己的规范文档、作业、检查点与用量账本。
+- 前端 `web/reader.js` / `reader.css` 已以同一 pin 保留逐字副本，生产运行可追踪补丁生成的
+  `engine-patched.js`，原译各独立 iframe。兼容补丁、宿主桥及许可详见
+  `frontend/src/reader/textfold-engine/VENDOR.md`；不能继续沿用早期「未整文件复用」的结论。
 - 上游的模型选择与价格目录（`models.py`）：Literature 用自己的 `model_services`。
-- 上游的词级连续 morph（`reader.js` 的 stage/keyframes）尚未迁移。现有阅读 DTO 主要是字符串投影，
-  没有保存上游词级 `m/k` 对应与 stage 所需的完整结构；当前不能宣称已实现该能力。
-  没有证据证明 WKWebView 本身无法承载上游交互，不能将“WebView 不可靠”当作未迁移的结论。
+- 上游词级 stage/morph 已随阅读内核集成；只有真实共享词才有 `m/k` 锚，派生译句不伪造
+  与已有全文译文的逐词对应。受控浏览器有运动证据，macOS 原生逐帧性能尚未系统量化。
 
 ## 维护约定
 

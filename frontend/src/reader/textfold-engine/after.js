@@ -18,10 +18,7 @@
       emit({ type: 'hover', uid: u ? (u.dataset.u || u.id) : null });
     }, { passive: true });
     doc.addEventListener('mouseleave', function () { emit({ type: 'hover', uid: null }); });
-    doc.addEventListener('click', function (e) {
-      var u = e.target.closest && e.target.closest('.u');
-      if (u && !(e.target.closest && e.target.closest('button, a, mark.hl, .npop, .selbar'))) emit({ type: 'activate', uid: u.dataset.u || u.id });
-    });
+
   }
   emit({ type: 'ready' });   // 内核初始化成功的真握手（替代定时器假 ready）
 })();

@@ -9,6 +9,7 @@ from pathlib import Path
 
 from literature.models import Block, Document, Page, TranslationEntry, TranslationLayer
 from literature.providers import MockProvider, ProviderResponse
+from tests.conftest import local_fold_section
 from literature.reader import (
     ReaderLayerService,
     ReaderStore,
@@ -16,7 +17,6 @@ from literature.reader import (
     build_ask_context,
     build_sections,
     clear_layers,
-    local_fold_section,
     parse_section_reply,
     sanitize_overlay,
     section_digest,
@@ -172,11 +172,13 @@ class ParseReplyTests(unittest.TestCase):
     def test_invalid_evidence_falls_back_with_warning(self) -> None:
         payload = {"units": [{"id": "U0", "evidence": [9], "takeaway": "Made up."}]}
         folded, warnings = parse_section_reply(payload, self.sections[0])
-        # 越界 evidence 被上游 assemble 过滤后为空 → 该段回退本地折叠，不编句子。
+        # 越界 evidence 被过滤后为空 → 该段不可追溯：按未生成处理（pending 占位，空短层），
+        # 不回退本地摘句、不编句子（AIFold 必须 AI 成功产物）。
         unit = folded["units"][0]
-        self.assertEqual(unit["evidence"], [0])
-        self.assertTrue(all(sentence in unit["sentences"] for sentence in unit["brief"]))
-        self.assertNotEqual(unit["takeaway"], "Made up")
+        self.assertTrue(any("evidence 全部无效" in w for w in warnings))
+        self.assertEqual(unit["source"], "pending")
+        self.assertEqual(unit["brief"], [])
+        self.assertEqual(unit["takeaway"], "")   # 不采用模型伪造行
 
     def test_unknown_ids_and_overlong_fields_are_bounded(self) -> None:
         payload = {"units": [{"id": "U9", "evidence": [0], "takeaway": "x"}]}
@@ -192,6 +194,38 @@ class ParseReplyTests(unittest.TestCase):
         self.assertLessEqual(len(unit["evidence"]), 3)
         self.assertTrue(unit["key"].startswith(unit["takeaway"]))
         self.assertEqual(unit["role"], "context")   # 非法 role 落回上游默认值
+
+    def test_missing_unit_and_empty_takeaway_stay_pending(self) -> None:
+        """模型漏段 / 空 takeaway：该 unit 落 pending 未生成占位（空短层），不本地摘句。"""
+        # 场景 1：模型漏段（只回 U0，U1 缺失）
+        payload = {
+            "section": {"takeaway": "Partial.", "topic": "Partial"},
+            "units": [
+                {"id": "U0", "evidence": [0], "takeaway": "Real takeaway.",
+                 "reason": "Grounded.", "topic": "Real", "role": "claim"},
+            ],
+        }
+        folded, warnings = parse_section_reply(payload, self.sections[0])
+        sources = {u["id"]: u["source"] for u in folded["units"]}
+        self.assertEqual(sources.get("b-p-1"), "model")
+        self.assertEqual(sources.get("b-p-2"), "pending")
+        self.assertTrue(any("未返回" in w for w in warnings))
+        # 场景 2：空 takeaway（预检拦截，不进 assemble，不落 local）
+        payload2 = {
+            "section": {"takeaway": "Partial.", "topic": "Partial"},
+            "units": [
+                {"id": "U0", "evidence": [0], "takeaway": "Real takeaway.",
+                 "reason": "Grounded.", "topic": "Real", "role": "claim"},
+                {"id": "U1", "evidence": [0], "takeaway": "", "reason": "", "topic": "", "role": "claim"},
+            ],
+        }
+        folded2, warnings2 = parse_section_reply(payload2, self.sections[0])
+        sources2 = {u["id"]: u["source"] for u in folded2["units"]}
+        self.assertEqual(sources2.get("b-p-2"), "pending")
+        self.assertTrue(any("takeaway" in w for w in warnings2))
+        pending_unit = next(u for u in folded2["units"] if u["source"] == "pending")
+        self.assertEqual(pending_unit["brief"], [])
+        self.assertEqual(pending_unit["takeaway"], "")
 
 
 class OverlayTests(unittest.TestCase):
@@ -277,7 +311,13 @@ class CountingProvider:
 
     def complete(self, *, system: str, user: str) -> ProviderResponse:
         self.calls.append((system, user))
-        payload = self._reply(user)
+        # 派生路径（derive_context 提示含 source takeaway）需要 ev_sentences。
+        if "source takeaway:" in user:
+            payload = self._reply(user)
+            for unit in payload.get("units") or []:
+                unit["ev_sentences"] = [f"分层译句 {unit.get('id', 'U')}。"]
+        else:
+            payload = self._reply(user)
         return ProviderResponse(
             content=json.dumps(payload, ensure_ascii=False), provider="fake", model="fake-model",
             request_id=f"req-{len(self.calls)}", input_tokens=100, output_tokens=50, estimated_cost=0.001,
@@ -351,20 +391,21 @@ class LayerGenerationTests(unittest.TestCase):
         self.assertTrue(self.service.document(self.project_id)["stale"] is False)
 
     def test_stale_flag_detects_structure_change(self) -> None:
-        self.service.generate(self.project_id, mode="local")
+        self.service.generate(self.project_id, provider=CountingProvider(reply_for), model_label="fake")
         document = self.store.load_document(self.project_id)
         document.blocks[1].source_text = "Completely rewritten paragraph."
         self.store.save_document(document)
         self.assertTrue(self.service.document(self.project_id)["stale"])
 
-    def test_local_mode_makes_no_model_calls(self) -> None:
+    def test_auto_mode_uses_model_and_produces_ai_content(self) -> None:
         provider = CountingProvider(reply_for)
-        result = self.service.generate(self.project_id, provider=provider, mode="local")
-        self.assertEqual(provider.calls, [])
-        self.assertTrue(result["provenance"]["local"])
-        self.assertFalse(result["provenance"]["ai_generated"])
+        result = self.service.generate(self.project_id, provider=provider, model_label="fake")
+        self.assertTrue(len(provider.calls) > 0)
+        self.assertTrue(result["provenance"]["ai_generated"])
+        self.assertFalse(result["provenance"]["local"])
+        self.assertTrue(result["generated"])
 
-    def test_failed_section_falls_back_to_local_fold(self) -> None:
+    def test_failed_section_no_local_fallback(self) -> None:
         class Boom(CountingProvider):
             def complete(self, *, system: str, user: str) -> ProviderResponse:
                 from literature.providers import ProviderError
@@ -372,10 +413,13 @@ class LayerGenerationTests(unittest.TestCase):
 
         result = self.service.generate(self.project_id, provider=Boom(reply_for), model_label="fake")
         self.assertEqual(len(result["failed_sections"]), 2)
-        self.assertTrue(all(section["units"] for section in result["sections"]))
+        # AIFold 失败不 local 兜底：失败节的 unit 无 brief/takeaway（Full 层仍渲染）
+        for section in result["sections"]:
+            for unit in section.get("units") or []:
+                self.assertFalse(unit.get("brief"), f"{unit['id']} 不应有 local brief")
 
     def test_clear_layers_removes_only_derived_content(self) -> None:
-        self.service.generate(self.project_id, mode="local")
+        self.service.generate(self.project_id, provider=CountingProvider(reply_for), model_label="fake")
         clear_layers(self.reader, self.project_id)
         self.assertFalse(self.service.document(self.project_id)["generated"])
         self.assertTrue(self.store.load_document(self.project_id).blocks)
@@ -536,30 +580,27 @@ class ReaderApiTests(unittest.TestCase):
         self.assertIn("revision", conflict.json()["detail"])
 
     def test_local_layer_job_completes_and_is_readable(self) -> None:
-        started = self.client.post(self.url("/layers"), headers=self.headers, json={
-            "locale": "source", "mode": "local",
-        })
-        self.assertEqual(started.status_code, 200)
-        job_id = started.json()["job_id"]
-        status = ""
+        # mode=local 已移除——改用 fold-run + mock provider 验证 API 层完整链路
+        from tests.test_reader_fold_run import ScriptedProvider
+        provider = ScriptedProvider()
+        manager = self.client.app.state.job_manager
+        manager.provider_from = lambda *a, **k: provider
+        svc = manager.models.create({"name": "svc-test", "preset": "custom",
+                                     "base_url": "http://127.0.0.1:1/v1", "models": [{"model": "fake-model"}]})
+        manager.models.set_roles({"reader_fold": {"service_id": svc["service_id"], "model": "fake-model"}})
+        started = self.client.post(self.url('/fold-runs'), headers=self.headers, json={'locale': 'source'})
+        self.assertEqual(started.status_code, 200, started.text)
+        run_id = started.json()['run_id']
+        status = ''
         for _ in range(100):
-            job = self.client.get(self.url("/state"), headers=self.headers).json()["layer_job"]
-            self.assertIsNotNone(job)
-            self.assertEqual(job["job_id"], job_id)
-            status = job["status"]
-            if status in ("completed", "failed"):
-                break
-            import time as _time
-            _time.sleep(0.05)
-        self.assertEqual(status, "completed")
-        document = self.client.get(self.url("/layers"), headers=self.headers, params={"locale": "source"}).json()
-        self.assertTrue(document["generated"])
-        self.assertEqual(document["format"], "textfold/doc")
-        self.assertEqual([section["id"] for section in document["sections"]], ["S1", "S2"])
-        # 本地折叠不声明 AI 生成。
-        self.assertFalse(document["provenance"]["ai_generated"])
-        self.assertTrue(document["provenance"]["local"])
-
+            run = self.client.get(self.url('/fold-run'), headers=self.headers).json()
+            status = run.get('status', '')
+            if status in ('ready', 'failed'): break
+            import time; time.sleep(0.05)
+        self.assertEqual(status, 'ready', run)
+        layers = self.client.get(self.url('/layers'), headers=self.headers).json()
+        self.assertTrue(layers['generated'])
+        # 删除后重新空
         cleared = self.client.delete(self.url("/layers"), headers=self.headers, params={"locale": "source"})
         self.assertEqual(cleared.status_code, 200)
         empty = self.client.get(self.url("/layers"), headers=self.headers).json()
@@ -665,7 +706,7 @@ class ReaderInvariantTests(unittest.TestCase):
             "prefs": {"level": 3},
         }, base_revision=0)
         service = ReaderLayerService(self.store)
-        service.generate(self.project_id, mode="local")
+        service.generate(self.project_id, provider=CountingProvider(reply_for), model_label="fake")
         service.generate(self.project_id, provider=CountingProvider(reply_for), model_label="fake/model")
         document = self.store.load_document(self.project_id)
         answer_question(document, [local_fold_section(item) for item in build_sections(document)],
@@ -911,12 +952,11 @@ class ReaderModelContractTests(unittest.TestCase):
         job = self._wait_job()
         self.assertEqual(job["status"], "completed")
         self.assertEqual(len(job["result"]["failed_sections"]), 2)
+        # 2026-10-26：模型失败不再 local 兜底——失败节无存盘投影（诚实失败），
+        # resume 重折这些节。layers 不应标注成 AI 生成。
         layers = self.client.get(self.url("/layers"), headers=self.headers).json()
-        self.assertTrue(layers["generated"])
-        # 模型完全失败时内容来自本地折叠，不能标注成「AI 生成」。
         self.assertFalse(layers["provenance"]["ai_generated"])
-        # 边界（2026-10-25）：请求方是模型模式，所以 provenance.local=False，
-        # 但实际内容是本地折叠——两个来源标志都为假，前端无法据此说明内容来源。
+        self.assertFalse(layers["generated"])
         self.assertFalse(layers["provenance"]["local"])
         self.assertTrue(all(section["units"] for section in layers["sections"]))
 
@@ -1075,7 +1115,7 @@ class RealLibraryReaderTests(unittest.TestCase):
                     {"id": "real-1", "block_id": store.load_document(project_id).blocks[0].block_id,
                      "start": 0, "end": 4, "note": "真实样本批注"},
                 ]}, base_revision=0)
-                ReaderLayerService(store).generate(project_id, mode="local")
+                ReaderLayerService(store).generate(project_id, provider=CountingProvider(reply_for), model_label="fake")
 
                 document = store.load_document(project_id)
                 sections = [local_fold_section(item) for item in build_sections(document)]
