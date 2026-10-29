@@ -13,6 +13,7 @@
 - 修复①：`model_services.py` `config_for` 在密钥缺失时提前抛可读错误「模型服务「DeepSeek」还没有保存 API Key：请在设置 → 模型服务里填写后点「保存密钥」」，不再由 provider 层报原始 service_id。
 - 修复②：`ModelServicesDialog.tsx` `save`：点「保存服务商」时若表单里填了 API Key，自动 `saveKey` 写入 Keychain（密钥保存失败仍阻断并提示）。
 - 验证：`pytest tests/test_model_services.py tests/test_backend_safety.py tests/test_reader.py` → 128 passed；前端 `tsc --noEmit` + Vite 生产构建通过；sidecar 重建（SHA256 `fd0960b809504201…`、runtime_revision `4528c791828e38aaaa3e`）+ Tauri 重打包 + adhoc 深签名通过；`setup_macos_launcher.sh --app-only` 安装，旧包备份 `launcher/.rollback-Literature-20261030-local.app.zip`，`/health` runtime_revision 与 manifest 一致；实测 `/model-services/{id}/check` 返回新可读文案。真实 DeepSeek 密钥仍需用户在 UI 点「保存密钥」后才能翻译（未验收真实调用）。
+- 发布物：应用户选择未发新版本，直接用 `--clobber` 替换 GitHub Release v0.1.1 的 `Literature-0.1.1-macos-arm64.zip`（55,763,139 B，2026-10-30 构建，sidecar `fd0960b809…`），Release 正文已补「资产更新」段注明 Windows exe 仍为旧构建不含本修复。
 
 
 
