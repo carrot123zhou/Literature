@@ -1,6 +1,6 @@
 [package]
 name = "literature"
-version = "0.1.0"
+version = "0.1.1"
 description = "Structured literature processing workbench"
 authors = ["Literature contributors"]
 edition = "2021"

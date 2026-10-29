@@ -2,7 +2,111 @@
 
 > 本日志记录可验证事实、架构决策和仍需外部条件完成的验收。更新代码时应同步更新本文，避免把“已编码”“已测试”和“已用真实服务验证”混为一谈。
 
-> 条目为「最新在上」。2026-10-14 前的手工「第N轮」编号是遗留标记（历史上出现过重复，已用 `·` 后缀消歧），不再续编；新条目用 `## YYYY-MM-DD · 主题`，引用时以上文日期与主题为准。
+> 条目为「最新在上」。2026-10-14 前的手工「第N轮」编号是遗留标记（历史上出现过重复，已用 `·` 后缀消歧），不再续编；新条目使用日期与主题。
+
+
+
+
+
+## 2026-10-28 · v0.1.1 发布：代码同步 GitHub 与 Apple Silicon 新包
+状态：已真实验收（构建 / 安装 / 启动 / 健康检查 / 冻结契约）/ 原生窗口逐项点验与真实模型验收未做 / Windows 安装包由标签 CI 构建，未真机运行。
+
+- 版本统一到 `0.1.1`（`literature/__init__.py`、`pyproject.toml`、`src-tauri/Cargo.toml`、`src-tauri/tauri.conf.json`、`frontend/package.json`）；`/health` 与 FastAPI 标题改读 `literature.__version__`，不再三处手写版本字符串。README 下载表指向 v0.1.1。
+- 构建环境：仓库 `.venv`（3.12.13）的 `ssl.py` 被上游工具打过补丁，`--check-tls` 会被拒绝，故按 PACKAGING 用 uv 托管 CPython 3.12.13 新建独立构建环境 `~/Library/Caches/literature-build/venv`；PyInstaller 构建后直接跑冻结 `--check-tls` 通过。
+- 产物事实：sidecar SHA256 `944443b5b706ad164a40699bdbde0fc191f5c9f43e459bd6b9e54319fd186688`、49,261,696 B、runtime_revision `cb87926a4f118048b8b3`；前端 `index-09OtD-a8.js`；main SHA256 `d70ab031e49345af46468e08945ca35c63f0cbc683b768031b0cee92dc721c2f`；`.app` 61.19 MiB，adhoc 深签名 `codesign --verify --deep --strict` 通过。
+- 安装与运行：`launcher/Literature.app` 已替换，旧包备份 `launcher/.rollback-Literature-20261028-v0.1.0.app`（main `b032cd45…`）。启动后 `/health` → `version=0.1.1`、`runtime_revision=cb87926a4f118048b8b3`，29 项能力含 `reader_fold_batches_v1`；本次启动段 `sidecar.log` 无 ERROR/Traceback。
+- 自动化证据：`pytest tests -o addopts= -q` → 999 passed（6 条既有弃用警告）；前端 `tsc --noEmit` + Vite 生产构建通过；冻结 sidecar `tests/manual/reader_frozen_contract_check.py --binary` → 23/23（含 `mode=local` → 422、未绑模型 fold-run → 400、事实哈希不变）。
+- 发布物：`dist/release/Literature-0.1.1-macos-arm64.zip`（53 MB，`ditto --keepParent`，解压得到 `Literature.app`）附到 GitHub Release [v0.1.1](https://github.com/carrot123zhou/Literature/releases/tag/v0.1.1)；Windows 安装包由 `.github/workflows/windows.yml` 在标签推送后构建并附到同一 Release。
+- 未验收：本轮新功能（AIFold 部分失败可读、结构块编辑、目录面板、原译连续滚动）未在 macOS 原生窗口逐项点击；未调用真实模型与真实书；未做 Developer ID 签名、公证、跨机器安装，本 adhoc 包不能等同正式对外发行包。
+
+## 2026-10-28 · 目录面板布局与信息架构校准（本轮）
+状态：已编码 / 前端类型检查与生产构建通过 / 真实书隔离副本生产前端 Chromium 验收 27/27、既有结构编辑回归 11/11 / 已打包安装并在真实 macOS 窗口目视点验目录，未逐项原生操作。
+
+- GLM 5.3 Flash（Orca worker）完成设计实现与隔离验收；Lead 审查截图、打包安装并在真实客户端打开 Making the Gods Speak 确认左栏行、缩进及底部功能可见。安装包 main SHA256 `b032cd45292b63c5d4aba96252c9c624dec832ba1c369250a27961603eb6a53e`，sidecar 保持 `e4dc023d2f8b…`，前端 `index-09OtD-a8.js`，签名通过；备份 `launcher/.rollback-Literature-20261028-outline.app`。
+- 修复结构校对左栏目录行布局错误：`.toc-row` 网格只声明 3 列但有 4 个子元素，导致 H 徽标被 1fr 列拉伸、页码换行、标题与徽标重叠（用户截图问题根因）。改为 4 列网格（checkbox / 固定小徽标 / 标题 1fr / 页码右对齐），徽标固定 26px 宽、行高 27px、长标题省略号截断；覆盖 shell.css 全局 `button{min-height:32px}` 对标题按钮的撑高。
+- 长目录信息架构：目录树（132 条实测）改为独立滚动区占满左栏剩余高度；AI 校准、待确认、修订历史移入下方独立滚动区，不再被长目录压出可视区。批量调级操作条勾选后固定出现在目录树上方。目录区改用普通 section 而非 `details`（details 匿名 content box 破坏内部 flex 高度约束）；子级缩进加引导线，窄宽 1100px 与深色模式实测无溢出。
+- 验证：`tmp/toc-outline-acceptance/check.py`（隔离真实书 + 生产前端 Chromium）27 项全过，含 computed 样式实测、深层 H5、批量调级+快捷键撤销、目录定位、键盘聚焦；`tmp/structure-real-acceptance/ui.py` 既有 11 项回归全过。验收后隔离库 document 层级还原（5×H1 + 127×H2）。截图 `tmp/toc-outline-acceptance/outline-{light,narrow,deep,dark}.png`。改动仅 `frontend/src/review/OutlinePane.tsx` 与 `review.css`；保留所有既有未提交改动；未提交 Git。
+
+## 2026-10-28 · 结构编辑客户端安装与真实书验收
+状态：已打包安装并启动 / 包内阅读冻结契约 23/23 / 真实书隔离副本 API 11/11、生产前端交互 11/11、跨页定位 4/4，结构编辑隔离回归 15/15 / 最终包未逐项原生窗口操作验收。
+
+- 新版客户端 `launcher/Literature.app`，sidecar SHA256 `e4dc023d2f8b902e6c149592bb7a073b4d409ad779b6c464a005875f10965eaf`，runtime_revision `f5530e2a36b84996695c`；主程序 SHA256 `c865f595975e0db589e41d3e71f44ee2fb4b39954340fdcd774532c6fd66f982`，前端 `index-zOH3cbPB.js`，签名校验通过。原安装备份 `launcher/.rollback-Literature-20261028-structure.app`。使用独立构建 Python 并验证冻结 TLS。
+- 用户刚解析的《Making the Gods Speak》（368 页，2719 块）复制至隔离库：真实书标题合并、拆分、目录批量调级、撤销/重做通过；跨页第 15/16 页的真实相邻段块合并验证来源与撤销，二者并非同一自然段，不冒充语义跨页样本。原书 document、PDF 和 raw manifest 哈希不变。证据 `tmp/structure-real-acceptance/{api-result,ui-result,cross-result}.json`。
+- 发现跨页合并后只能跳第一页：已让合并块列出来源页，原页按来源页与 bbox 绘制和跳转，直接点击第二页不跳回第一页。真实书隔离 Chromium 逐页定位通过；原生窗口已打开原书并显示目录，未做原生编辑与跨页点击。批注块编辑及移除已译块仍受保护阻断；作业并发窗口等先前限制未消除。
+
+## 2026-10-28 · 结构块编辑与撤销重做
+状态：已编码 / 后端全量 998 passed / 前端类型检查与生产构建通过、隔离真实 API 与 Chromium 交互 11/11 / 未打包安装、未做 macOS 原生窗口与真实书验收。
+
+- 结构校对增加连续文本块合并、先选择拆分位置再拆分、原文编辑、目录多选批量设置层级，以及持久多步撤销/重做和快捷键；单项与批量用户结构修改进入同一历史。拆分位置换算 Unicode，支持 emoji；操作带文档冲突校验，写前记录支持中断恢复。原始 MinerU 证据不变，跨页来源位置保存在编辑来源记录。
+- 原文修改后的旧译文保留并标记待复核（含缺来源摘要的旧译文），普通阅读正文和标题显示提示；AIFold 逐块提示未覆盖。为避免丢失，涉及批注的文本变更、会移除已有译文记录的块合并会被阻止并说明；并非已实现批注及译文跨块迁移。只支持普通段落/标题，图片、表格、列表等复合块不参与文本合并拆分。运行中作业会阻止编辑，但作业启动与编辑仍有并发窗口。
+- 验证：`pytest tests -o addopts= -q` 998 passed；隔离真实 API + 生产前端 Chromium 11/11（合并、拆分含 emoji、编辑、目录调级、快捷撤销/重做）；不代表真实模型、真实书、多页定位与 WKWebView 已验收。保留已有未提交改动；未提交 Git。
+
+## 2026-10-27 · AIFold 部分失败可读与阅读/作业交互解耦
+状态：已编码 / 后端全量993 passed、冻结binary契约23/23、前端类型检查与生产构建通过 / 两本真实书隔离副本安全投影通过且零模型调用 / 最终生产前端＋隔离API浏览器146/146、普通滚动16/16、宿主生命周期13/13通过 / 自包含macOS候选包已构建，未安装及原生点验，未调用真实模型验收本轮容错。
+
+- **容错边界**：strict `ready` 不放松，新增独立 `readable/availability`；当前事实及冻结绑定有可验证短层即可进入已有成果，全合法免折内容也可读。源/目标短层与章节摘要分别失败、分别降级；五层 pending 单元保留当前 Full/已有全文译文并标「未生成」，摘要缺失保留章节和有效段落，不恢复本地摘句。adapter 逐 unit 隔离坏类型，坏 section 只影响摘要；原文部分失败不再阻塞同节有效单元派生。
+- **安全投影**：native 缺失或事实/缓存/检查点/绑定指纹变化时，零模型调用重建。只还原校验通过的节缓存与逐 unit 检查点；同节改动单元变 pending、未变单元继续复用、旧节摘要在投影中按节失效，继续时仍可复用实际消费上下文未变的有效摘要检查点。原始生成 native 不带可信指纹，首次 GET 必重建后缓存，避免凭数量信任旧内容。装置材料 suppression 需要有效分类收据；无译文原文回退不假算目标槽位。running 可用性重算最多每15秒、终态即时刷新。
+- **交互收口**：主按钮首次生成或进入/关闭折叠；一个状态入口集中进度、暂停/继续/补齐、错误和「载入新成果」。移除顶栏错误横幅与层级条错误行，浮层与 Aa/目录互斥，异步操作同一守卫，切项目拒绝旧响应。作业轮询不替换阅读数据、不重挂 iframe；显式记录补齐请求，修复作业过快完成、未观察到running时遗漏成果更新提示；用户手动载入时关闭旧选区，两栏分别就绪后恢复 uid+段内比例。窄屏状态菜单改为视口内可滚动底部浮层；内核初始化绑定实际宿主DOM与重试代次，修复容器重挂后正文空白、错误重试不重建。pending 划选统一 Full 词空间，源/目标标记不串栏；上游文件未修改。
+- **自动化证据**：最终冻结后 `pytest tests -o addopts= -q` → 993 passed（6项既有弃用警告），日志 `tmp/reader-partial-final-pytest.log`；partial/fold-run定向55项包含独立契约11项；冻结sidecar `reader_frozen_contract_check.py --mode binary` →23/23；前端 tsc/Vite通过，内核pending专项43/43；生产dist＋隔离真实API的宿主生命周期13/13（退出重进、阻断引擎资产触发错误后放行并真实点击重试），证据 `tmp/reader-host-lifecycle-evidence.json`。保留已有未提交改动，未提交Git；Orca DeepSeek4.1承担后端、GLM承担UI与独立测试，Lead合流审查及打包。
+- **最终浏览器证据**：`tests/manual/reader_partial_check.py` 在前端 `index-CqheXgp0.js` 上146/146通过，覆盖源失败、仅派生失败、仅摘要失败、全失败、事实变化、暂停/刷新/切项目、320/390/768窄屏、五层Full与真实徽标、中文真实拖选→Full原生锚保存→刷新高亮恢复、补齐不重挂与主动载入后重建/位置恢复。普通连续滚动在同一最终资产复跑16/16。`tmp/reader-partial-result.json` 记录资产指纹、服务调用及隔离门，文档/译文与真实模型配置哈希均不变；截图 `tmp/reader-partial-{desktop-menu,desktop-theme,narrow-320,narrow-390}.png` 已目视。测试修正了模拟故障未解除、旧终态抢读、中文标题服务路由与提前退出清除载入提示等脚本误报；旧标记断言改为当前安全native与DOM一致，保留过期单元拒绝、未变单元逐字保留和零重复调用强检查，不以生成编号强求重新计费。
+- **真实书兼容（仅隔离副本）**：BEYOND 67单元、132有效+2免折槽位；Imperiled 2351单元、2108有效+2594免折槽位，均待补0、摘要待补0、readable=true，事实哈希不变、模型调用0。最终冻结源码复核冷/缓存分别约0.038/0.009秒、0.628/0.166秒，非跨机器性能承诺；证据 `tmp/reader-partial-real-projection.json`。
+- **候选包与边界**：`src-tauri/target/release/bundle/macos/Literature.app` 包含sidecar（SHA256 `a02f4e8a616aa165d6efe3501cdf3befc25549f2eb6523d73b9a3b95aa0af9a3`，49212976 B，revision `3e95890013f899be9936`），前端最终 `index-CqheXgp0.js`；不依赖源码/Python/Node/Vite。安装的 `launcher/Literature.app` 保持此前版本。首次安全重建有一次开销；恢复源层的token细节差异可能令个别派生检查点失配，安全标pending并在继续时重派生，不承诺所有过期场景零额外调用。手动载入的段内比例恢复已编码，本次短fixture仅验证uid仍在视口，长段重载比例误差尚未量化；真实模型质量/费用、WKWebView交互与干净机器、公证未验收。
+
+## 2026-10-27 · 普通阅读原译双栏连续滚动同步
+状态：已编码 / 类型检查与生产构建通过 / 生产前端＋隔离真实 API 浏览器 16/16 通过 / 未打包安装、未真机点验。
+
+- 用户要求普通阅读也采用锚点＋段内比例同步。`ReaderWorkspace.tsx` 改为以视口 30% 参考线选最近可见块，按稳定 block_id、段内比例与对侧实际段高逐帧同步，页首/页尾显式对齐；不同语言段高无需相同，不声称句级对齐。
+- 文本程序滚动按实际写入位置过滤回传，不再因跟随写入全局抑制而停住主动栏；对侧用户滚到其他位置可立即接管。PDF 仍按真实 bbox 居中，只在文本锚点换块时请求，独立静默 PDF 回传；点击/目录和 fold 内核桥保持原路径。未修改结构校对。
+- 新增 `tests/manual/reader_scroll_sync_check.py` 与 `.cjs`：临时 runtime/library、真实 PDF/生产 dist/API，Keychain 写入及读密钥均替身，无模型请求。16/16 覆盖异高长段、连续真实 wheel、比例误差、立即反向接管、静止无振荡、首尾、follow 开关、跨段、缺译、目录、栏显隐恢复及 PDF 跨页 bbox 中心（误差约 0.48px）。证据 `tmp/reader-scroll-sync-result.json`；最终前端 `index-DGA3TRhh.js`。受控 Chromium 验收不代替 WKWebView 原生手感验收；launcher 仍是原安装包。
+
+## 2026-10-27 · AIFold 有界批处理、真实失败恢复与成本优化
+状态：已编码 / 最终backend 969 passed、冻结binary契约23/23、前端类型与构建及活动显示31/31通过 / 两本真实项目已备份迁入（6/6、81/81）、缓存复跑零调用 / 已安装签名客户端并真机点验原译双栏及进入折叠 / 未系统评估整书语义质量、干净机器与公证。
+
+- **原因与处理**：BEYOND S5 的一个 evidence 槽包含多句，派生模型把槽拆成多个数组项，旧实现重复派生整节仍失败；现明确逐槽返回一项、严格验收并只补缺失 unit。Imperiled 巨型参考文献/索引按整节请求、全局输出上限 128000、超时与重试缺少请求边界，暂停/恢复计数累加且旧路径会丢未遍历章节缓存；现有界批、逐 unit 检查点、同服务最多两路、90秒空闲/180秒总时限、4000输出上限，可能已计费失败不自动重发。S49 真实模型把脚注51/52当句ID，多次被正确拒绝；提示补合法句ID范围后返回[1,2]并通过。
+- **可靠恢复**：部分成功逐批落盘，缓存按实际消费上下文绑定服务/模型，旧混合节仅播种有效 unit。恢复保留已有短层文本，修重复句号；模型摘要失败只补摘要，暂停前后的完整章节投影保留。进度按节状态去重，流式 waiting/generating、节/批/本节待补量与时间接入同一 AIFold 按钮；暂停停表，窄屏并入副标题。
+- **书后材料策略（用户批准）**：显式标题仅作候选，由 AI 用首/中/尾样本确认，原文/绑定/策略匹配收据后保留 Full、跳短层。真实 S85/S86/S87 判为 bibliography/bibliography/index（mixed=false），合计1246单元；S88 catalog 但 mixed=true（含正文书评），照常生成。真实验收捕获了「有效源缓存绕过分类」及「抑制源用local键，恢复误判过期而复活旧检查点」两条漏门，已修并加重复恢复零调用回归。
+- **真实验收和交付数据**：隔离副本经同一生产API及原绑定 `qwen3.8-flash-next` 调用，未切模型/降质量。BEYOND 补4单元仅1请求，1676输入+720输出=2396 token，请求约5秒、整轮6.11秒；对旧整节一次5365 token约少55%，不能外推全书固定节省率。Imperiled最终81/81，缓存复跑0请求；保留原项目后来新增的1049个有效源短层，与已验证结果按同源上下文合并。两本原文/译文及模型配置哈希不变；最终有效正文短层逐字段比对无未授权变化。备份见 `tmp/fold-production-backups/`，证据见 `tmp/fold-optimization-real/`。
+- **用量诚实边界**：验收过程中确实产生了额外调用（包含发现漏门前的无效重派生，未删账）；BEYOND已记1请求2396 token，Imperiled各隔离路径合并去重后90请求，183832输入+80983输出=264815 token，reasoning均0。中间重合并副本的1请求也已补入生产账本，非只统计最后成功轮。价格未配置，费用为null，不声称免费；没有把本次验收总耗费包装成优化后的标准单次成本。迁入本身0付费调用，数据库只插新jobs/usage、不整库替换，原始事实/批注/笔记不动。
+- **最终客户端**：sidecar SHA256 `a5eff2d39acaaaf9629fffea387d87a38e0843d23b3969e8280b64138be8ed71`、47353328 B，runtime_revision `b2299827005aa6370cd1`；main `a87b55d5ef26c6ec7af612f39e98e134bf781e0e11948012bb75a7bfda7bee9d`，前端 `index-Blj3qr0E.js`。严格深度签名、包内sidecar与manifest逐字匹配、运行health新能力位一致。旧包 `launcher/.rollback-Literature-20261027-143538.app`。真机发现保存的引擎语言偏好使原文栏也选中文，已让原文栏显式采用原文语言并重建安装；截图 `tmp/fold-native-imperiled-ready.png` 可见原文英文/译文中文，`tmp/fold-native-beyond-ready.png` 可见法文摘要/中文译文；两本均实际点击「开始折叠」进入，原件及五级条存在。启动与两本进入折叠usage增量0（`tmp/fold-native-usage-after.json`）；新包API读两本run均ready、进度6/6及81/81（`tmp/fold-installed-final.json`）。
+
+- **执行与验收边界**：用户指定的 Orca DeepSeek4.1/GLM workers 分工核心/传输/前端/独立审计，Lead完成合流、真实验收、缓存与暂停回归、数据备份迁入及交付；保留此前未提交改动。长句窗模型归并/超长摘要仅受控测试，没有本次真实超长正文样本，不外推语义准确率。后端唯一现状 `docs/READER_BACKEND.md`，界面唯一现状 `docs/ui/reader-design.md`。
+
+- **延迟评审收口**：旧源 unit 当时为pending且无短层时，不以空消费上下文播种/覆盖已有有效目标检查点；全抑制源缓存在缺省flight_digest时按真实preview重算分类收据指纹。新增「旧源缺项但已有有效目标检查点→仅修源、零派生」回归；最终969项全绿、包内23/23并更新安装，启动后二书6/6、81/81且usage增量均0。
+
+## 2026-10-27 · 修复 AIFold「继续无响应」（僵尸 run）与测试污染模型配置，重键恢复 Imperiled Destinies 77 节
+状态：已编码 / backend 全量 852 passed（含新增僵尸回归）、冻结契约 23/23（新增隔离门）、suppression 17/17 / 已重建并安装客户端（sidecar `ff7f91825536…`、前端 `index-wTWiKYLP.js`、冻结 smoke revision/能力位一致）/ 真实数据修复已执行（配置清理 + run 重键，readiness 68/81 复核通过）/ 继续补齐未验、进度环 WKWebView 渲染未真机点验。
+
+- **故障链（Imperiled Destinies「继续」无响应、任务显示 failed 98%）**：① `tests/manual/reader_frozen_contract_check.py` 源码模式下只更新了 `env` 副本，`os.environ` 未写——in-process `create_app` 内 `ModelServiceStore(application_support())` 指向真实目录，历次运行向 `~/Library/Application Support/Literature/model-services.json` 写入 **27 个 frozen-fake 测试服务并覆盖 reader_fold 角色**；② Imperiled run 冻结了假绑定 cc60c5c5…/fake-model，但旧 sidecar 的 resume 用角色解析的真实服务（yellowbee/Qwen，usage_records 为证）发请求——绑定元数据与实际产物不一致；③ 10-26 19:53 后应用退出，`JobManager.recover_interrupted_jobs()` 把 fold-run job 通用标 failed，而 `ReaderJobRunner.recover()` 从未被调用——run 快照永远停在 running（僵尸）；④ `resume_run` 读盘见 running 直接幂等返回，前端「继续」发 resume 后无任何变化（无响应）；⑤ 进度环空：conic-gradient + mask-composite 在 WKWebView 渲染不可靠（本轮改为 conic 盘 + `::after` 内盘补底，弃用 mask）。
+- **代码修复**：`literature/reader.py` 僵尸守护（start_run/resume_run/pause_run：running/pausing 无活线程 → 落盘纠偏 paused，本次即 resume，与 current_run 呈现一致；新增回归 `test_zombie_running_run_heals_and_resumes_without_rebilling`）；`literature/api.py` 启动恢复接线（通用恢复跳过 reader 两类作业，改为调用 `reader_jobs.recover()`）；`reader_frozen_contract_check.py` 源码模式写 `os.environ` + atexit 恢复 + E-iso 隔离断言（model-services 必须落在临时 runtime，否则退出非零）；`reader.css`/`ReaderWorkspace.tsx` 进度环弃用 mask-composite，标签包 `z-index:1` 定位 span 防环盖字。
+- **真实数据修复（用户授权，均先备份）**：`model-services.json` 28→1（删 27 个 frozen-fake，reader_fold 角色 → yellowbee/qwen3.8-flash-next；备份 `model-services.json.bak-fold-repair-20261027091002`）；Imperiled `reader/layers.json` 两层 section_hashes 按 yellowbee/Qwen 重键（77 节实际由 Qwen 产出，重键后可复用）、双层 digest meta 同步、`fold_run.json` 绑定改真实服务且 running→paused（备份同目录 `*.bak-fold-repair-20261027044330`）；重键后 `fold_run_readiness` 复核 68/81 ready，13 节未就绪均为真实未完成（S54/S85 模型 JSON 格式错误、S87/S88 未跑到、S10/S17/S30/S49/S58/S63/S64/S67/S80 含 pending unit）。
+- **安装与验证边界**：Tauri 包 adhoc 签名严格校验通过，内嵌前端逐字核对 `index-wTWiKYLP.js`/`index-DK55dDO3.css`，冻结 sidecar smoke revision `ff7f91825536…` + `reader_fold_run_v1` 能力位一致；「继续」只补 13 节、真实模型调用费用与语义质量未验收；进度环/继续新交互需真机点验。
+
+## 2026-10-27 · 修复译文 lane 缓存复用不验来源导致 resume 死循环
+状态：已编码 / backend 全量 851 passed（含新增回归）、suppression 独立回归 17/17、冻结契约 22/22 / 未打包安装、未真实验收；未提交本轮改动。
+
+- **真实故障**：BEYOND S5、唐书 S25/S40 整篇 run 反复 failed，ready_basis「存在本地摘句/未折叠 unit（不能冒充 AI 完成）」且 reused=全节——resume 永远补不齐。根因：`literature/reader.py` 译文（zh-CN）lane 的缓存复用分支只比对存盘 hash，**不校验 unit 来源**（原文 lane 早有 `cached_ok` 守卫）；旧 translation-local 缓存（本地摘句移除前的存盘，S25 3 个/S40 8 个/S5 4 个 local unit）hash 恰好匹配，每次 resume 都被复用，readiness 按真实来源判失败，死循环。唐书 S59 另有源层 1 个旧 local unit，`_ensure_source_fold` 的来源校验会重折，不属此 bug。
+- **修复**：译文 lane 复用前先 `_apply_source_suppression` 权威重标，再按与原文 lane 同一判据（全部 unit ∈ model/suppressed）决定复用；含 local/pending 的混合节落到重派生路径（只重派生该节，有效缓存节零调用）。新增回归 `tests/test_reader_no_local_regression.py::test_stale_translation_local_cache_not_reused_and_resume_refolds`（旧 local 缓存不复用、重派生 S1、S2 零调用、存盘修复为 model）。`tests/manual/reader_suppression_propagation_check.py` 场景 C 改为模拟旧 translation-local 缓存（原 `mode="local"` 入口已移除，脚本先于本轮就已跑不通）。
+- **验收边界**：仅受控测试；修复后对真实书的 resume 会重派生 S25/S40（唐书）与 S5（BEYOND）等节、重折唐书 S59 源层，产生少量真实模型调用，费用与语义质量未验收；sidecar 未重建，已安装客户端仍是旧行为。
+
+## 2026-10-27 · 移除本地摘句折叠并统一两种阅读模式
+状态：已编码 / backend 定向 164+83 passed、受控源与最终 binary 契约 22/22 / 前端独立自然操作 39/39、严格 CSP 零违规、类型与构建通过 / 已安装并真机点验统一菜单、问答引用和双栏展开收起 / 未自动重跑真实失败章节、未系统评估费用质量；未提交本轮改动。
+
+- 用户报告 BEYOND S5、唐书 S25/S40 的派生失败回退为 translation-local，唐书 S59 源层为 local、前置摘要缺失或过期；Between Cultures S0 则是源 suppressed 与目标旧 local 投影不一致。Orca Worker developer 只读核查真实缓存，移除无模型入口、失败和缺失单元的摘句补位；旧有效 AI 缓存及笔记保留，源 suppressed 权威传播，未完成项不降低 ready 判据。`mode=local` 现为 422，未绑模型不建 run、不写文件，测试用摘句工具迁出生产模块。进一步清除 adapter 模型漏段/无效证据/空摘要、ensure_ladders 和旧缓存恢复中的全部本地摘录执行调用，空短层明确 pending、不冒充 suppressed 或 model；新增 11 项禁止 local 调用的回归。问答缺层改用纯全文结构检索。
+- 普通/fold 使用同一宿主 selPop/hlPop 与顶栏问答，核内独立 selbar/npop/chat/chatbtn 不再展示；Full、Key 写行、derived Brief、summary/title 保留各自原生锚与配色/强度。Lead 收口 frame 按 pane 定位、原生锚指纹、真实 CAS 后纯内存 notes apply、旧新 key 并集清残影；避免双写递归。
+- Lead 接通 iframe 滚动 ID+段内比例到对侧及 PDF、follow 开关和程序滚动防回环；原生 unit toggle 发明确状态事件，章节摘要支持整节展开/收起，同 ID 同步两栏。前端兼容补丁从逐字原件生成、同源外链保留严格 CSP。旧探针误点隐藏内核菜单及只滚父容器已指出，独立验收必须走宿主菜单和真正 iframe 滚动，不得删断言假绿。
+- 冻结契约测试改受控 loopback OpenAI 格式服务，不再依赖本地摘句造产物；含 run ready/native200、unit/summary/title 锚存取失效、旧锚兼容、本地入口拒绝、事实哈希，源与 binary 均 22/22。原来 17→11 缩减验收的结果未作为交付证据。持久脚本 `tests/manual/reader_frozen_contract_check.py`；无付费、无 Keychain 写入，真实事实层只读。
+
+## YYYY-MM-DD · 主题`，引用时以上文日期与主题为准。
+- **最终独立验收**：Orca Worker tester 在最终 `index-BNrcgA5H.js`（e4474731）、Workspace 420e047d 上同 runner 39/39、exit0：真实错误溯源、统一宿主菜单/顶栏引用、批注存盘刷新、真实 iframe wheel 跟随 PDF 与 follow off、单段及章节自然点击展开收起、CAS409 后重新保存成功、快速改色同条记录、仅译文栏自然拖选。旧 per-space 81/完整48不用于证明本轮。数据：`tmp/reader-user-feedback-result.json`；严格 CSP `tmp/reader-csp-probe-result.json`。Orca Worker developer 实现最终后端及禁止 local 调用回归，designer 前期迁移后冻结，Lead 完成前端收口/包内验收/安装与真机点验。
+- **最终自包含包**：sidecar runtime_revision `f87c19ed25bb4624eba6`、SHA256 `287a121c49eaf5d77ea3b61502cb520c5d9e89940694e766dee2f338a6a3295e`（49086960 B），含 reader fef91221/adapter fd90031c；main SHA256 `ac7c04c9913758ee22fa66cb2f2f4664c44ea7b555210ffd89329af616562e78`，前端 `index-BNrcgA5H.js`。候选与 launcher 主程序/sidecar 逐字一致，严格深度签名校验通过，旧包备份 `launcher/.rollback-Literature-20261027031838.app`。`tmp/reader-no-local-installed.json` 留存包核对。
+- **真实窗口与边界**：Prince Moonlight 缓存就绪 11/11，启动折叠后右键译文主线只出现中文宿主同一五色菜单，点追问进入已有顶栏问答与本次引用卡，未发送问题；点击源文单元使原译同时展开原全文，再点同时收起。截图 `tmp/reader-native-no-local-{menu,ask,expanded,collapsed}.png`。原生滚轮驱动工具未观测到可靠移动，不据此声称真机滚动已验证；真实 wheel 跟随由隔离生产构建受控测试验证（源 scrollY 4→1504、PDF 0→1582，关闭后不跟随）。43 个 document/translation/raw manifest 哈希不变。旧失败的 BEYOND/唐书仍需要用户显式 AIFold/继续让模型补齐，本轮不自动发付费请求、不清空旧笔记或有效 AI 缓存。
+
+## 2026-10-27 · 阅读器 UI 校准：AIFold 同键状态机/贴合进度内圈 + 问答 composer 与圈号引用
+状态：已编码 / tsc 与 Vite 生产构建通过 / 已重建安装 `launcher/Literature.app`（main `ea25009692e44ce8…`、sidecar 复用 `287a121c49eaf5d7…` 零改动、内嵌前端 `index-COx6BIGB.js`；候选与安装副本逐字一致、严格签名通过）/ 未真机点验新交互。
+
+- **用户五点校准的落地（全部仅前端）**：① AIFold 进度环从独立圆圈改为**贴合按钮圆角外形的内圈**（`.rdrr-ring` conic-gradient + mask-composite 双层描边，`--p` 比例驱动，暂停态转灰色；WKWebView/Safari 与 Chromium 均验证 mask 语法可用性）。② 处理中不再出现独立「暂停」键：主按键变为「暂停」，点击后模型请求边界生效，暂停后同一键变「继续」（`#btn-foldpause` 移除，`data-paused` 移到 `#btn-aifold`；pausing 期间禁用防连点）。③ 就绪后按键文案「启动」→「开始折叠」，进入折叠视图后「退出折叠」→「关闭折叠」；foldStage 状态机与 API 不变。④ 问答输入区重做：单容器圆角 composer，textarea 随内容自适应增高（上限 132px 内部滚动），底部一行内嵌模型 picker（左）与圆形发送键（右，SVG 箭头，空草稿禁用、生成中变方形停止键）；无 +/自动审批/语音。⑤ 回答引用改为 NotebookLM 风格圈号：正文中的 `[#块ID]` 渲染为小圆号，按答案内首次出现顺序编号 1..n，同一块不重复编号（`AnswerCitations` 组件，citations 里未在正文出现的块排在末尾）；底部索引 chip = 序号圈 + 章节名，点击回跳原文。
+- **改动文件**：`frontend/src/reader/ReaderWorkspace.tsx`（AIFold 按钮状态机渲染、AnswerCitations、composer 与输入自适应 effect）、`reader.css`（ring/composer/cite 样式，删除 `.rdrr-aifoldwrap/.rdrr-ai-inputrow/.rdrr-ai-send` 与旧 SVG circle 环）、`docs/ui/reader-design.md` 同步。测试脚本同步：`tests/manual/reader_aifold_acceptance.cjs` S3 场景 `#btn-foldpause` → `#btn-aifold[data-stage=processing]/[data-paused=1]`；`reader_ui_check.cjs` 发送键调试探针改读 `#aiSend` disabled（旧 `.rdrr-ai-send` innerText 已不存在）。
+- **边界（不混写）**：仅编码与类型/构建验证；mask-composite 在 WKWebView 的真实渲染、composer 自适应手感、圈号点击回跳、暂停/继续新交互均未隔离联调或真机点验；后端 fold-run/chat 契约零改动。
 
 ## 2026-10-26 · AIFold 整篇处理与上游阅读器移植
 状态：已编码 / 受控服务逐空间 81/81、完整 UI 48/48、冻结 binary 17/17 / 最后修复定向 149 项及 suppression 17/17、菜单主题 17/17 / 严格 CSP 零违规 / 已重建安装并实际 macOS 窗口点验 / 未系统评估真实整书语义质量、费用或大书性能；未提交 Git。

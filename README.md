@@ -15,8 +15,8 @@
 
 | 平台 | 文件 | 安装方式 |
 |---|---|---|
-| **Windows** x64 | [Literature_0.1.0_x64-setup.exe](https://github.com/carrot123zhou/Literature/releases/download/v0.1.0/Literature_0.1.0_x64-setup.exe) | 双击安装（NSIS，按当前用户安装，无需管理员权限） |
-| **macOS** Apple Silicon | [Literature-0.1.0-macos-arm64.zip](https://github.com/carrot123zhou/Literature/releases/download/v0.1.0/Literature-0.1.0-macos-arm64.zip) | 解压后把 `Literature.app` 拖入「应用程序」；首次打开请右键 → 打开 |
+| **Windows** x64 | [Literature_0.1.1_x64-setup.exe](https://github.com/carrot123zhou/Literature/releases/download/v0.1.1/Literature_0.1.1_x64-setup.exe) | 双击安装（NSIS，按当前用户安装，无需管理员权限） |
+| **macOS** Apple Silicon | [Literature-0.1.1-macos-arm64.zip](https://github.com/carrot123zhou/Literature/releases/download/v0.1.1/Literature-0.1.1-macos-arm64.zip) | 解压后把 `Literature.app` 拖入「应用程序」；首次打开请右键 → 打开 |
 
 所有版本均内置 Python 后端与全部前端资源，运行**不需要** Python、Node、浏览器或源码仓库。其他版本见 [Releases](https://github.com/carrot123zhou/Literature/releases)。
 
