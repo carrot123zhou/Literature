@@ -684,6 +684,13 @@ class ModelServiceStore:
             provider_id=service_id, base_url=str(provider.get("base_url") or ""),
             allow_plaintext_http=bool(provider.get("allow_plaintext_http", False)),
         )
+        # 密钥缺失时在这里就报可读错误：显示服务名与修复指引，而不是把原始
+        # service_id 拼进「尚未配置 … API key」让用户无所适从。
+        if not self.api_key(service_id):
+            raise ProviderError(
+                f"模型服务「{provider.get('name') or service_id}」还没有保存 API Key："
+                "请在设置 → 模型服务里填写后点「保存密钥」。"
+            )
         return OpenAICompatibleProvider(config, api_key=self.api_key(service_id), timeout=timeout)
 
     def list_models(self, service_id: str, *, timeout: float = 30.0) -> list[dict[str, Any]]:

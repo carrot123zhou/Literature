@@ -223,6 +223,14 @@ export default function ModelServicesPanel({ api, onMessage }: { api: ModelServi
       const saved = isNew ? await api.create(payloadOf(draft)) : await api.update(draft.service_id, payloadOf(draft));
       setCreating(false);
       setDraft(draftFrom(saved));
+      // 表单里同时填了 API Key：随保存一并写入 Keychain。否则用户拉完模型列表
+      // 直接保存，会以为密钥已存好，实际只存在当次请求里（翻译时报「尚未配置」）。
+      if (keyInput.trim()) {
+        try {
+          await api.saveKey(saved.service_id, keyInput);
+          setKeyInput("");
+        } catch (keyError) { showStatus(normalizeProviderError(String(keyError)), true); }
+      }
       // 未绑定的角色由后端在创建时自动绑定到服务商的第一个模型，这里不再改写用户手工设置。
       onMessage(`模型服务商已保存：${saved.name}（${saved.models.length} 个模型）`);
     } catch (error) { showStatus(normalizeProviderError(String(error)), true); }

@@ -6,6 +6,15 @@
 
 
 
+## 2026-10-30 · 模型服务密钥缺失报错可读化 + 保存服务商时自动落盘 API Key
+状态：已编码 / 已自动测试 / 已打包安装并真实启动验证报错文案 / 真实 DeepSeek 密钥未配置，未真实调用。
+
+- 问题根因：「模型服务」里填 API Key 后点「获取模型列表」只把密钥用于当次请求，不落盘；只有单独点「保存密钥」才写入 Keychain（`local.literature.models`）。用户填了 Key 拉完模型列表直接保存，翻译启动即报「尚未配置 c8b751a7… API key」（原始 service_id 拼进文案，不可读）；Keychain 核实确无该条目，密钥从未保存。
+- 修复①：`model_services.py` `config_for` 在密钥缺失时提前抛可读错误「模型服务「DeepSeek」还没有保存 API Key：请在设置 → 模型服务里填写后点「保存密钥」」，不再由 provider 层报原始 service_id。
+- 修复②：`ModelServicesDialog.tsx` `save`：点「保存服务商」时若表单里填了 API Key，自动 `saveKey` 写入 Keychain（密钥保存失败仍阻断并提示）。
+- 验证：`pytest tests/test_model_services.py tests/test_backend_safety.py tests/test_reader.py` → 128 passed；前端 `tsc --noEmit` + Vite 生产构建通过；sidecar 重建（SHA256 `fd0960b809504201…`、runtime_revision `4528c791828e38aaaa3e`）+ Tauri 重打包 + adhoc 深签名通过；`setup_macos_launcher.sh --app-only` 安装，旧包备份 `launcher/.rollback-Literature-20261030-local.app.zip`，`/health` runtime_revision 与 manifest 一致；实测 `/model-services/{id}/check` 返回新可读文案。真实 DeepSeek 密钥仍需用户在 UI 点「保存密钥」后才能翻译（未验收真实调用）。
+
+
 
 
 ## 2026-10-28 · v0.1.1 发布：代码同步 GitHub 与 Apple Silicon 新包

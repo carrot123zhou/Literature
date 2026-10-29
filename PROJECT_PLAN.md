@@ -133,7 +133,7 @@ Tauri macOS 客户端（单实例）
 
 **当前里程碑**：M1 客户端导入与 MinerU 全能力接入。M2 结构校对（粗校/精校）与 M3 结构化翻译已具备可用纵向切片，见 §6。
 
-**当前安装包（2026-10-28，v0.1.1）**：`launcher/Literature.app` 已装自包含 sidecar `944443b5b706ad16…`／49,261,696 B、runtime_revision `cb87926a4f118048b8b3`、前端 `index-09OtD-a8.js`、main `d70ab031e49345af…`；严格深度签名与冻结阅读契约 23/23 通过，`/health` 返回 version 0.1.1。旧包备份 `launcher/.rollback-Literature-20261028-v0.1.0.app`。
+**当前安装包（2026-10-30，v0.1.1 本地重装）**：`launcher/Literature.app` 已装 sidecar `fd0960b809504201…`、runtime_revision `4528c791828e38aaaa3e`，adhoc 深签名通过，`/health` 返回 version 0.1.1；本轮含「密钥缺失报错可读化 + 保存服务商自动落盘 API Key」，旧包备份 `launcher/.rollback-Literature-20261030-local.app.zip`。真实 DeepSeek 密钥尚未保存，翻译真实调用未验收。上一 v0.1.1 包备份 `launcher/.rollback-Literature-20261028-v0.1.0.app`。
 
 **阅读器与 AIFold**：严格全部完成与部分成果可读已分离；失败单元五层保留当前全文，源/目标/摘要独立降级，只复用验证通过的逐unit缓存。阅读与作业独立，主键进入/关闭，状态浮层集中暂停/继续/补齐及错误，成果手动刷新；无业务本地摘句。原译三栏、宿主批注及问答、内核原生锚和联动保留。后端 999 项、冻结 binary 23/23、隔离浏览器 146/146 通过；已随 v0.1.1 安装，原生逐项点验与真实模型验收未完成，见最新日志。
 
